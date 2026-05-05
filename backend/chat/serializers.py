@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 
 class HrEnvelopeSerializer(serializers.Serializer):
+    """Standard API response envelope (OpenAPI / contract)."""
 
     trace_id = serializers.CharField()
     intent = serializers.CharField(allow_blank=True, required=False)

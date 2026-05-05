@@ -63,7 +63,7 @@ class HealthView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class ChatView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         ser = ChatRequestSerializer(data=request.data)
@@ -90,7 +90,7 @@ class ChatView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class IntentView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         ser = IntentRequestSerializer(data=request.data)
@@ -122,7 +122,7 @@ class IntentView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class ExtractView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         ser = ExtractRequestSerializer(data=request.data)
@@ -162,7 +162,7 @@ class ExtractView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class DecisionView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         ser = DecisionRequestSerializer(data=request.data)
@@ -208,7 +208,7 @@ class DecisionView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class RequestStatusView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request, request_id: str):
         tid = _trace(request)
@@ -237,7 +237,7 @@ class RequestStatusView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockRequestCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
         ser = MockCreateSerializer(data=request.data)
@@ -280,7 +280,7 @@ class MockRequestCreateView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockRequestStatusView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         tid = _trace(request)
@@ -317,7 +317,7 @@ class MockRequestStatusView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockLeaveBalanceView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         tid = _trace(request)
