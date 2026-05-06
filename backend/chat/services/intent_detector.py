@@ -44,6 +44,12 @@ class IntentDetector:
 
     def detect(self, message: str, trace_id: str) -> dict[str, Any]:
         text = (message or "").lower()
+        # Strong heuristic overrides (esp. for Bengali/Banglish) so LLM misclassifications
+        # don't break the workflow.
+        strong_leave_request = bool(
+            re.search(r"(ছুটি|chuti|chhuti|holiday)", text)
+            and re.search(r"(চাই|lagbe|lage|dorkar|need|apply|request)", text)
+        )
         if self._llm.is_configured():
             out = self._llm.chat_json(
                 system_prompt=INTENT_SYSTEM,
@@ -53,6 +59,8 @@ class IntentDetector:
             if out and isinstance(out.get("intent"), str):
                 intent = out["intent"].strip().upper()
                 if intent in ALL_INTENTS:
+                    if strong_leave_request and intent != INTENT_LEAVE_REQUEST:
+                        return {"intent": INTENT_LEAVE_REQUEST, "confidence": 0.99, "source": "rules_override"}
                     return {
                         "intent": intent,
                         "confidence": float(out.get("confidence") or 0),
@@ -61,6 +69,15 @@ class IntentDetector:
         return {"intent": self._rule_intent(text), "confidence": 0.6, "source": "rules"}
 
     def _rule_intent(self, text: str) -> str:
+        # Bengali / Banglish keywords (fallback path when LLM isn't used or fails)
+        if re.search(r"(ছুটি|chuti|chhuti|holiday)", text) and re.search(
+            r"(চাই|lagbe|lage|dorkar|need|apply|request)", text
+        ):
+            return INTENT_LEAVE_REQUEST
+        if re.search(r"(ছুটি|chuti|chhuti)", text) and re.search(
+            r"(কত|koto|baki|remaining|balance)", text
+        ):
+            return INTENT_LEAVE_BALANCE
         if re.search(r"\b(balance|remaining|how many days|pto|vacation left)\b", text):
             return INTENT_LEAVE_BALANCE
         if re.search(r"\b(wfh|work from home|remote)\b", text):

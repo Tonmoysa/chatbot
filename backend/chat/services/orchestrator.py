@@ -1,4 +1,5 @@
 import uuid
+import re
 from typing import Any
 
 from chat.constants import (
@@ -52,7 +53,11 @@ class ChatOrchestrator:
             {"user_message": message, "session_id": session.session_id},
         )
 
-        intent_result = self.intents.detect(message, trace_id)
+        forced_intent = self._infer_followup_intent(context_lines, message)
+        if forced_intent:
+            intent_result = {"intent": forced_intent, "confidence": 1.0, "source": "followup"}
+        else:
+            intent_result = self.intents.detect(message, trace_id)
         intent = intent_result["intent"]
         log_step(trace_id, "intent_detection_done", {"intent": intent})
 
@@ -149,6 +154,35 @@ class ChatOrchestrator:
             "status": status,
             "_session_id": session.session_id,
         }
+
+    def _infer_followup_intent(self, context_lines: list[str], message: str) -> str | None:
+        """
+        Heuristic: if the assistant just asked for missing fields, treat short user replies
+        (dates/days/etc) as a follow-up for the same workflow instead of re-classifying intent.
+        """
+        if not context_lines:
+            return None
+        last_assistant = ""
+        for line in reversed(context_lines):
+            if line.startswith("Assistant:"):
+                last_assistant = line[len("Assistant:") :].strip()
+                break
+        if not last_assistant:
+            return None
+
+        msg = (message or "").strip()
+        # if user replies with just a date-like token, it's very likely a continuation
+        is_dateish = bool(
+            re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", msg)
+            or re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", msg)
+            or re.search(r"\b\d{1,2}-\d{1,2}-\d{2,4}\b", msg)
+        )
+
+        # Leave flow follow-up
+        if "Leave dates or duration required" in last_assistant:
+            if len(msg) <= 60 or is_dateish:
+                return INTENT_LEAVE_REQUEST
+        return None
 
     def _should_mutate_crm(self, intent: str, decision: dict[str, Any]) -> bool:
         if decision.get("outcome") == "NEEDS_CLARIFICATION":

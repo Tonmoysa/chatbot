@@ -89,6 +89,13 @@ class LLMClient:
         if not content:
             return None
         try:
-            return json.loads(_strip_json_fence(content))
+            parsed = json.loads(_strip_json_fence(content))
+            if isinstance(parsed, dict):
+                return parsed
+            # Some providers occasionally return a single-item JSON array even when
+            # asked for an object. Accept it to avoid breaking the pipeline.
+            if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+                return parsed[0]
+            return None
         except json.JSONDecodeError:
             return None

@@ -5,6 +5,7 @@ from chat.constants import (
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
     INTENT_REQUEST_STATUS,
+    INTENT_UNKNOWN,
 )
 
 
@@ -26,8 +27,20 @@ def build_user_message(
         st = crm_payload.get("status")
         if st and st != "NOT_FOUND":
             return (f"Current request status: {st}.", "success")
+        if st == "NOT_FOUND":
+            rid = (
+                (crm_payload.get("request_id") or "")
+                or str(entities.get("request_id") or "")
+            ).strip()
+            rid_part = f" (`{rid}`)" if rid else ""
+            return (
+                f"I couldn't find any request{rid_part} in the system. "
+                "Please double‑check the reference ID and try again.",
+                "needs_input",
+            )
         if crm_payload.get("detail"):
-            return (str(crm_payload["detail"]), "needs_input")
+            # Avoid leaking low-quality backend phrasing like "Unknown request"
+            return ("I couldn't find that request. Please re-check the reference ID.", "needs_input")
         return ("Please provide a request reference to look up status.", "needs_input")
 
     if intent == INTENT_LEAVE_BALANCE:
@@ -40,6 +53,13 @@ def build_user_message(
         return ("Leave balance is temporarily unavailable.", "degraded")
 
     if outcome == "NEEDS_CLARIFICATION":
+        if intent == INTENT_UNKNOWN:
+            return (
+                "Hi! আমি আপনার HR assistant. আপনি কী নিয়ে সাহায্য চান?\n"
+                "উদাহরণ: leave balance, leave request, WFH request, expense claim/status, "
+                "attendance correction, HR policy, বা request status.",
+                "needs_input",
+            )
         return (reason or "Could you share a bit more detail?", "needs_input")
 
     if outcome == "INFORMATIONAL":

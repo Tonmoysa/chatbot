@@ -64,6 +64,24 @@ class EntityExtractor:
             "reason",
         )}
         low = message.lower()
+        # Guardrail: for leave-like messages without an explicit range or day-count,
+        # ignore any LLM-provided end_date/days that may have leaked from prior context.
+        looks_like_leave = bool(
+            re.search(r"(leave|time off|pto|vacation|holiday|day off|ছুটি|chuti|chhuti)", low)
+        )
+        has_explicit_range = bool(
+            re.search(r"\b(from|to|until|till)\b", low) or re.search(r"(থেকে|পর্যন্ত)", message)
+        )
+        has_explicit_days = bool(re.search(r"\b\d+(\.\d+)?\s*(day|days|din|diner)\b", low))
+        has_any_digit = bool(re.search(r"\d", message))
+        if looks_like_leave and not has_explicit_range:
+            if not has_any_digit and not has_explicit_days:
+                # e.g. "amar kalke chuti lagbe" -> default to a single day leave
+                e["days"] = None
+                e["end_date"] = None
+            else:
+                # a single date was provided, but no range keyword -> treat as one day
+                e["end_date"] = None
         m = re.search(
             r"\b(\d+(?:\.\d+)?)\s*(usd|\$|dollars?|eur|gbp)?\b", low, re.I
         )
@@ -79,6 +97,14 @@ class EntityExtractor:
                 e["date"] = ds
             if e.get("start_date") is None:
                 e["start_date"] = ds
+        # Bengali/Banglish: "kal/kalke/agami kal" => tomorrow
+        if re.search(r"(আগামীকাল|kalke|kal)", low):
+            d = date.today() + timedelta(days=1)
+            ds = d.isoformat()
+            if e.get("date") is None:
+                e["date"] = ds
+            if e.get("start_date") is None:
+                e["start_date"] = ds
         if re.search(r"\btoday\b", low):
             d = date.today().isoformat()
             if e.get("date") is None:
@@ -87,9 +113,43 @@ class EntityExtractor:
             d0 = date.today() + timedelta(days=7)
             if e.get("start_date") is None:
                 e["start_date"] = d0.isoformat()
-        mrid = re.search(r"\b(req|request)[-_#]?\s*([A-Za-z0-9-]{4,})\b", message, re.I)
+
+        # Numeric date parsing for common user inputs like "5-7-2026" or "05/07/2026"
+        if e.get("start_date") is None:
+            m_iso = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", message)
+            m_dmy = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b", message)
+            if m_iso:
+                y, mo, da = m_iso.group(1), m_iso.group(2), m_iso.group(3)
+                try:
+                    ds = date(int(y), int(mo), int(da)).isoformat()
+                    e["start_date"] = ds
+                    if e.get("date") is None:
+                        e["date"] = ds
+                except Exception:
+                    pass
+            elif m_dmy:
+                d1, m1, y1 = m_dmy.group(1), m_dmy.group(2), m_dmy.group(3)
+                yy = int(y1)
+                if yy < 100:
+                    yy += 2000
+                # Assume D-M-YYYY for this project locale
+                try:
+                    ds = date(yy, int(m1), int(d1)).isoformat()
+                    e["start_date"] = ds
+                    if e.get("date") is None:
+                        e["date"] = ds
+                except Exception:
+                    pass
+        # request/reference ids (support "request REQ-123", "Reference: MOCK-XXXX", etc.)
+        mrid = re.search(r"\b(req|request)[-_#:]?\s*([A-Za-z0-9-]{4,})\b", message, re.I)
         if mrid and not e.get("request_id"):
             e["request_id"] = mrid.group(2)
+        mref = re.search(r"\b(ref|reference)[-_#:]?\s*([A-Za-z0-9-]{4,})\b", message, re.I)
+        if mref and not e.get("request_id"):
+            e["request_id"] = mref.group(2)
+        mmock = re.search(r"\bMOCK-[A-Za-z0-9]{6,}\b", message, re.I)
+        if mmock and not e.get("request_id"):
+            e["request_id"] = mmock.group(0).upper()
         if re.search(r"\bsick\b", low):
             e["leave_type"] = e.get("leave_type") or "sick"
         if re.search(r"\bannual|vacation|pto\b", low):
