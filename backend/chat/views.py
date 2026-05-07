@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from chat.serializers import (
     ChatRequestSerializer,
     DecisionRequestSerializer,
+    DocumentExtractRequestSerializer,
     ExtractRequestSerializer,
     HrEnvelopeSerializer,
     IntentRequestSerializer,
@@ -22,6 +23,7 @@ from chat.services.intent_detector import IntentDetector
 from chat.services.memory_store import ConversationMemoryStore
 from chat.services.observability import log_step
 from chat.services.orchestrator import ChatOrchestrator
+from chat.services.document_reader import extract_text_from_upload
 
 
 def _trace(request) -> str:
@@ -75,12 +77,54 @@ class ChatView(APIView):
             session_id=ser.validated_data.get("session_id"),
             employee_id=ser.validated_data.get("employee_id") or "demo-employee",
             trace_id=tid,
+            document_text=(ser.validated_data.get("document_text") or "").strip() or None,
         )
         sid = out.pop("_session_id", None)
         resp = Response(out, status=status.HTTP_200_OK)
         if sid:
             resp["X-Session-Id"] = sid
         return resp
+
+
+@extend_schema(
+    summary="Extract text from uploaded document (receipt/invoice)",
+    tags=["Documents"],
+    request=DocumentExtractRequestSerializer,
+    responses={200: HrEnvelopeSerializer},
+)
+class DocumentExtractView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        ser = DocumentExtractRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        tid = _trace(request)
+        f = ser.validated_data["file"]
+        data = f.read()
+        res = extract_text_from_upload(
+            filename=getattr(f, "name", None),
+            content_type=getattr(f, "content_type", None),
+            data=data,
+        )
+        msg = "Document processed."
+        if res.warnings:
+            msg += " Warnings: " + "; ".join(res.warnings)
+        return Response(
+            {
+                "trace_id": tid,
+                "intent": "DOCUMENT_EXTRACT",
+                "entities": {"source": res.source, "warnings": res.warnings},
+                "decision": {"outcome": "INFORMATIONAL"},
+                "response": {
+                    "message": msg,
+                    "status": "success",
+                    "request_id": "",
+                },
+                "status": "success",
+                "document_text": res.text,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 @extend_schema(

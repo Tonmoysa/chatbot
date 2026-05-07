@@ -7,6 +7,7 @@ app_name = "chat"
 urlpatterns = [
     path("health/", views.HealthView.as_view(), name="health"),
     path("chat/", views.ChatView.as_view(), name="chat"),
+    path("document/extract/", views.DocumentExtractView.as_view(), name="document-extract"),
     path("intent/", views.IntentView.as_view(), name="intent"),
     path("extract/", views.ExtractView.as_view(), name="extract"),
     path("decision/", views.DecisionView.as_view(), name="decision"),

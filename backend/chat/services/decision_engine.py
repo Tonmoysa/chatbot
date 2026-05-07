@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any
 
@@ -13,6 +14,9 @@ from chat.constants import (
     INTENT_UNKNOWN,
     INTENT_WFH_REQUEST,
 )
+from chat.services.leave_days import compute_requested_leave_days
+
+_AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
 
 
 class DecisionEngine:
@@ -59,6 +63,7 @@ class DecisionEngine:
 
         if intent == INTENT_EXPENSE_CLAIM:
             amount = entities.get("amount")
+            doc_text = str(entities.get("document_text") or "")
             if amount is None:
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
@@ -73,11 +78,30 @@ class DecisionEngine:
                     "reason": "Expense amount is invalid.",
                     "rules_applied": ["EXPENSE_AMOUNT_INVALID"],
                 }
+            # If user claims an amount but uploads a receipt, try to validate basic consistency.
+            doc_amount = _extract_reasonable_amount(doc_text) if doc_text else None
+            is_uber = bool(re.search(r"\buber\b", doc_text, re.I)) if doc_text else False
+            if doc_text and doc_amount is not None:
+                if abs(float(doc_amount) - float(val)) > 5.0:
+                    return {
+                        "outcome": "PENDING_APPROVAL",
+                        "reason": f"Receipt amount ({doc_amount}) does not match claimed amount ({val}); routed to HR for review.",
+                        "rules_applied": ["EXPENSE_RECEIPT_AMOUNT_MISMATCH_PENDING_HR"],
+                        "route_to": "HR",
+                    }
             if val > self.EXPENSE_AUTO_THRESHOLD:
+                if not doc_text:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": "Amount exceeds auto-approve limit. Please upload a receipt/document for HR review.",
+                        "rules_applied": ["EXPENSE_GT_THRESHOLD_RECEIPT_REQUIRED"],
+                    }
                 return {
                     "outcome": "PENDING_APPROVAL",
-                    "reason": f"Amount {val} exceeds auto-approve threshold {self.EXPENSE_AUTO_THRESHOLD}.",
-                    "rules_applied": ["EXPENSE_GT_THRESHOLD_PENDING"],
+                    "reason": f"Amount {val} exceeds auto-approve threshold {self.EXPENSE_AUTO_THRESHOLD}; sent to HR for approval.",
+                    "rules_applied": ["EXPENSE_GT_THRESHOLD_PENDING", "EXPENSE_ROUTED_TO_HR"],
+                    "route_to": "HR",
+                    "receipt": {"merchant_hint": "UBER" if is_uber else None, "doc_amount": doc_amount},
                 }
             return {
                 "outcome": "AUTO_APPROVED",
@@ -96,14 +120,7 @@ class DecisionEngine:
                     "rules_applied": ["LEAVE_DATES_REQUIRED"],
                 }
             balance = float(crm_context.get("leave_balance_days") or 0)
-            requested = float(days_needed or 1)
-            if start and end:
-                try:
-                    s = datetime.fromisoformat(str(start)).date()
-                    e = datetime.fromisoformat(str(end)).date()
-                    requested = max(1.0, float((e - s).days + 1))
-                except Exception:
-                    requested = float(days_needed or 1)
+            requested = compute_requested_leave_days(entities)
             if balance >= requested:
                 return {
                     "outcome": "APPROVED",
@@ -142,3 +159,25 @@ class DecisionEngine:
             "reason": "No matching decision path.",
             "rules_applied": ["FALLBACK"],
         }
+
+
+def _extract_reasonable_amount(text: str) -> float | None:
+    """
+    Heuristic: pick the largest 1-6 digit amount found, ignoring tiny numbers.
+    This is intentionally conservative and only used for basic mismatch detection.
+    """
+    if not text:
+        return None
+    candidates: list[float] = []
+    for m in _AMOUNT_RE.finditer(text):
+        whole = m.group(1)
+        frac = m.group(2) or ""
+        try:
+            n = float(f"{whole}.{frac}" if frac else whole)
+        except Exception:
+            continue
+        if 10 <= n <= 500_000:
+            candidates.append(n)
+    if not candidates:
+        return None
+    return float(max(candidates))

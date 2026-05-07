@@ -1,16 +1,21 @@
-import { useCallback, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 
 export default function InputBox({ onSend, disabled, onClearError, error }) {
   const [value, setValue] = useState("");
+  const [file, setFile] = useState(null);
+  const fileId = useId();
+  const fileRef = useRef(null);
 
   const submit = useCallback(() => {
     if (disabled) return;
     const t = value.trim();
     if (!t) return;
     onClearError?.();
-    onSend(t);
+    onSend(file ? { text: t, file } : t);
     setValue("");
-  }, [disabled, onSend, onClearError, value]);
+    setFile(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }, [disabled, onSend, onClearError, value, file]);
 
   const onKeyDown = useCallback(
     (e) => {
@@ -32,7 +37,29 @@ export default function InputBox({ onSend, disabled, onClearError, error }) {
           {error}
         </div>
       ) : null}
-      <div className="mx-auto flex max-w-3xl gap-2">
+      <div className="mx-auto flex max-w-3xl flex-col gap-2">
+        <div className="flex items-end gap-2">
+          <input
+            ref={fileRef}
+            id={fileId}
+            type="file"
+            accept="image/*,.pdf"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              setFile(f);
+            }}
+            disabled={disabled}
+          />
+          <button
+            type="button"
+            onClick={() => document.getElementById(fileId)?.click()}
+            disabled={disabled}
+            className="inline-flex h-[44px] shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            aria-label="Attach receipt"
+          >
+            Attach
+          </button>
         <label htmlFor="chat-input" className="sr-only">
           Message
         </label>
@@ -55,6 +82,27 @@ export default function InputBox({ onSend, disabled, onClearError, error }) {
         >
           Send
         </button>
+        </div>
+
+        {file ? (
+          <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
+            <div className="min-w-0">
+              <span className="font-medium">Receipt:</span>{" "}
+              <span className="truncate">{file.name}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setFile(null);
+                if (fileRef.current) fileRef.current.value = "";
+              }}
+              disabled={disabled}
+              className="ml-3 rounded-lg px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              Remove
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -20,6 +20,14 @@ class ChatRequestSerializer(serializers.Serializer):
     employee_id = serializers.CharField(
         max_length=64, required=False, allow_blank=True, default="demo-employee"
     )
+    # Optional: text extracted from an uploaded receipt/document
+    document_text = serializers.CharField(
+        max_length=60000, required=False, allow_blank=True, default=""
+    )
+
+
+class DocumentExtractRequestSerializer(serializers.Serializer):
+    file = serializers.FileField()
 
 
 class IntentRequestSerializer(serializers.Serializer):

@@ -25,15 +25,32 @@ client.interceptors.request.use((config) => {
  * POST /api/chat/
  * @returns {{ data: object, sessionIdHeader: string | null }}
  */
-export async function postChat({ message, sessionId }) {
+export async function postChat({ message, sessionId, documentText }) {
   const res = await client.post("/api/chat/", {
     message,
     session_id: sessionId,
+    document_text: documentText || "",
   });
   const sessionIdHeader =
     res.headers["x-session-id"] ?? res.headers["X-Session-Id"] ?? null;
   return {
     data: res.data,
     sessionIdHeader: typeof sessionIdHeader === "string" ? sessionIdHeader : null,
+  };
+}
+
+/**
+ * POST /api/document/extract/ (multipart)
+ * @returns {{ data: object, documentText: string }}
+ */
+export async function postDocumentExtract({ file }) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await client.post("/api/document/extract/", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return {
+    data: res.data,
+    documentText: typeof res.data?.document_text === "string" ? res.data.document_text : "",
   };
 }

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from chat.services.crm.base import CRMAdapter
+from chat.services.leave_days import compute_requested_leave_days
 
 
 _MOCK_SINGLETON: "MockCRMAdapter | None" = None
@@ -44,25 +45,7 @@ class MockCRMAdapter(CRMAdapter):
         return 12.0
 
     def _requested_leave_days(self, entities: dict[str, Any]) -> float:
-        """
-        Compute requested leave days using the same conventions as DecisionEngine:
-        - If start_date and end_date are ISO dates, use inclusive day count.
-        - Else fall back to entities["days"] (default 1).
-        """
-        start = entities.get("start_date")
-        end = entities.get("end_date")
-        days = entities.get("days")
-        if start and end:
-            try:
-                s = datetime.fromisoformat(str(start)).date()
-                e = datetime.fromisoformat(str(end)).date()
-                return max(1.0, float((e - s).days + 1))
-            except Exception:
-                pass
-        try:
-            return max(1.0, float(days or 1))
-        except Exception:
-            return 1.0
+        return compute_requested_leave_days(entities or {})
 
     def create_request(
         self,

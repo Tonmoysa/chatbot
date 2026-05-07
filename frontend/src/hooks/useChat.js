@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { postChat } from "../services/api";
+import { postChat, postDocumentExtract } from "../services/api";
 import { getSessionId, setSessionId } from "../utils/session";
 
 function extractBotText(payload) {
@@ -31,7 +31,9 @@ export function useChat() {
 
   const clearError = useCallback(() => setError(null), []);
 
-  const sendMessage = useCallback(async (text) => {
+  const sendMessage = useCallback(async (payload) => {
+    const text = typeof payload === "string" ? payload : payload?.text || "";
+    const file = typeof payload === "object" ? payload?.file : null;
     const trimmed = text.trim();
     if (!trimmed || sendingRef.current) return;
     sendingRef.current = true;
@@ -43,9 +45,15 @@ export function useChat() {
     const sessionId = getSessionId();
 
     try {
+      let documentText = "";
+      if (file) {
+        const extracted = await postDocumentExtract({ file });
+        documentText = extracted.documentText || "";
+      }
       const { data, sessionIdHeader } = await postChat({
         message: trimmed,
         sessionId,
+        documentText,
       });
 
       if (sessionIdHeader) {

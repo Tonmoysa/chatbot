@@ -44,6 +44,7 @@ class ChatOrchestrator:
         session_id: str | None,
         employee_id: str,
         trace_id: str,
+        document_text: str | None = None,
     ) -> dict[str, Any]:
         session = self.memory.get_or_create_session(session_id or "", employee_id)
         context_lines = self.memory.recent_context_lines(session)
@@ -66,6 +67,9 @@ class ChatOrchestrator:
             message, intent, context_lines, trace_id
         )
         entities = entity_result.get("entities") or {}
+        if document_text:
+            # Carry document text into the rule engine (LLM must not decide outcomes).
+            entities["document_text"] = document_text
         log_step(trace_id, "entity_extraction_done", {"keys": list(entities.keys())})
 
         crm_context: dict[str, Any] = {}
@@ -100,7 +104,17 @@ class ChatOrchestrator:
             )
             log_step(trace_id, "decision", {"outcome": decision.get("outcome")})
 
-            if self._should_mutate_crm(intent, decision):
+            dedup_request_id = self._recent_duplicate_request_id(
+                context_lines=context_lines,
+                intent=intent,
+                entities=entities,
+                decision=decision,
+            )
+
+            if dedup_request_id:
+                request_id = dedup_request_id
+                crm_payload.update({"request_id": dedup_request_id, "_deduped": True})
+            elif self._should_mutate_crm(intent, decision):
                 exec_result = self.crm.create_request(
                     employee_id or session.employee_id,
                     intent,
@@ -206,6 +220,114 @@ class ChatOrchestrator:
         if intent == INTENT_APPROVAL_ESCALATION:
             return decision.get("outcome") == "PENDING_APPROVAL"
         return False
+
+    def _recent_duplicate_request_id(
+        self,
+        *,
+        context_lines: list[str],
+        intent: str,
+        entities: dict[str, Any],
+        decision: dict[str, Any],
+    ) -> str | None:
+        """
+        Lightweight duplicate-submission guard.
+        If the user repeats the same request in the same session (common with chat UIs),
+        do not create a new CRM record; return the previously created request id.
+        """
+        last_ref, prior_user = self._last_reference_and_prior_user(context_lines)
+        if not last_ref or not prior_user:
+            return None
+
+        if intent == INTENT_EXPENSE_CLAIM:
+            if decision.get("outcome") not in ("AUTO_APPROVED", "PENDING_APPROVAL"):
+                return None
+            try:
+                amount_val = float(entities.get("amount"))
+            except Exception:
+                return None
+            m2 = re.search(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", prior_user)
+            if not m2:
+                return None
+            whole, frac = m2.group(1), m2.group(2) or ""
+            try:
+                prev_amount = float(f"{whole}.{frac}" if frac else whole)
+            except Exception:
+                return None
+            if abs(float(prev_amount) - float(amount_val)) <= 0.01:
+                return last_ref
+            return None
+
+        if intent == INTENT_LEAVE_REQUEST:
+            if decision.get("outcome") not in ("APPROVED", "REJECTED"):
+                return None
+            cur = self._leave_booking_signature(entities)
+            prev_e = self.entities.extract_rules_only(prior_user)
+            prev = self._leave_booking_signature(prev_e)
+            if (
+                cur[0] == prev[0]
+                and cur[1] == prev[1]
+                and abs(cur[2] - prev[2]) < 1e-6
+            ):
+                return last_ref
+            return None
+
+        return None
+
+    @staticmethod
+    def _last_reference_and_prior_user(
+        context_lines: list[str],
+    ) -> tuple[str | None, str | None]:
+        """
+        Most recent Assistant message that included a Reference id, paired with the
+        User message that immediately preceded that Assistant turn in time order.
+        """
+        lines = context_lines or []
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            if not line.startswith("Assistant:"):
+                continue
+            content = line[len("Assistant:") :].strip()
+            m = re.search(r"\bReference:\s*([A-Z0-9-]+)\b", content)
+            if not m:
+                continue
+            ref = m.group(1)
+            for j in range(i - 1, -1, -1):
+                if lines[j].startswith("User:"):
+                    return ref, lines[j][len("User:") :].strip()
+            return ref, None
+        return None, None
+
+    @staticmethod
+    def _leave_booking_signature(entities: dict[str, Any]) -> tuple[str, str, float]:
+        """Match DecisionEngine.LEAVE_REQUEST day span for duplicate comparison."""
+        from datetime import datetime
+
+        days_needed = entities.get("days")
+        start_raw = entities.get("start_date") or entities.get("date")
+        end_raw = entities.get("end_date")
+        start_s = ""
+        end_s = ""
+        if start_raw:
+            try:
+                start_s = str(datetime.fromisoformat(str(start_raw).split("T")[0]).date())
+            except Exception:
+                start_s = str(start_raw).split("T")[0]
+        if end_raw:
+            try:
+                end_s = str(datetime.fromisoformat(str(end_raw).split("T")[0]).date())
+            except Exception:
+                end_s = str(end_raw).split("T")[0]
+        requested = float(days_needed or 1)
+        if start_s and end_s:
+            try:
+                s_d = datetime.fromisoformat(start_s).date()
+                e_d = datetime.fromisoformat(end_s).date()
+                requested = max(1.0, float((e_d - s_d).days + 1))
+            except Exception:
+                requested = float(days_needed or 1)
+        elif start_s and not end_s:
+            requested = float(days_needed or 1)
+        return (start_s, end_s, requested)
 
 
 def new_trace_id() -> str:

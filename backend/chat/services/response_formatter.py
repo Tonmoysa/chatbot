@@ -4,6 +4,7 @@ from chat.constants import (
     INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
+    INTENT_LEAVE_REQUEST,
     INTENT_REQUEST_STATUS,
     INTENT_UNKNOWN,
 )
@@ -77,28 +78,49 @@ def build_user_message(
 
     if outcome == "AUTO_APPROVED":
         rid = crm_payload.get("request_id", "")
-        msg = "Your expense claim was auto-approved under policy thresholds."
+        if crm_payload.get("_deduped"):
+            msg = "You already submitted this expense claim earlier. No new request was created."
+        else:
+            msg = "Your expense claim was auto-approved under policy thresholds."
         if rid:
             msg += f" Reference: {rid}."
         return (msg, "success")
 
     if outcome == "APPROVED":
         rid = crm_payload.get("request_id", "")
-        msg = "Your leave request is approved under current balance rules."
+        if crm_payload.get("_deduped") and intent == INTENT_LEAVE_REQUEST:
+            msg = (
+                "You already submitted this leave request earlier. "
+                "No new request was created."
+            )
+        else:
+            msg = "Your leave request is approved under current balance rules."
         if rid:
             msg += f" Reference: {rid}."
         return (msg, "success")
 
     if outcome == "REJECTED":
         rid = crm_payload.get("request_id", "")
-        msg = reason or "The request could not be approved."
+        if crm_payload.get("_deduped") and intent == INTENT_LEAVE_REQUEST:
+            msg = (
+                "You already submitted this leave request earlier. "
+                "No new request was created."
+            )
+        else:
+            msg = reason or "The request could not be approved."
         if rid:
             msg += f" Reference: {rid}."
         return (msg, "rejected")
 
     if outcome in ("PENDING_APPROVAL", "PENDING_REVIEW"):
         rid = crm_payload.get("request_id", "")
-        msg = reason or "Your request is submitted for review."
+        route_to = (decision or {}).get("route_to")
+        if crm_payload.get("_deduped") and rid:
+            msg = "You already submitted this request earlier. No new request was created."
+        else:
+            msg = reason or "Your request is submitted for review."
+        if route_to == "HR" and "HR" not in msg:
+            msg = msg.rstrip(".") + " It has been sent to HR for review."
         if rid:
             msg += f" Reference: {rid}."
         return (msg, "pending")

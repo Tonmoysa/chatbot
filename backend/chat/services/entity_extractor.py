@@ -5,6 +5,94 @@ from typing import Any
 from chat.services.llm_client import LLMClient
 
 
+_MONTH_MAP: dict[str, int] = {}
+for _names, _num in (
+    (("january", "jan"), 1),
+    (("february", "feb"), 2),
+    (("march", "mar"), 3),
+    (("april", "apr"), 4),
+    (("may",), 5),
+    (("june", "jun"), 6),
+    (("july", "jul"), 7),
+    (("august", "aug"), 8),
+    (("september", "sept", "sep"), 9),
+    (("october", "oct"), 10),
+    (("november", "nov"), 11),
+    (("december", "dec"), 12),
+):
+    for _n in _names:
+        _MONTH_MAP[_n] = _num
+
+_MONTH_ALT = "|".join(sorted(_MONTH_MAP.keys(), key=len, reverse=True))
+
+
+def _has_explicit_leave_duration(low: str) -> bool:
+    return bool(
+        re.search(r"\b\d+(\.\d+)?\s*(day|days|din|diner|দিন)\b", low)
+    )
+
+
+def _resolve_next_calendar_date(month_num: int, day: int, *, today: date) -> date | None:
+    for y in range(today.year, today.year + 3):
+        try:
+            d = date(y, month_num, day)
+        except ValueError:
+            continue
+        if d >= today:
+            return d
+    return None
+
+
+def _infer_leave_calendar_start(low: str) -> str | None:
+    """
+    Banglish like \"may er 11 tarik\" / \"11 tarikh may\" — calendar day, not N days of leave.
+    """
+    today = date.today()
+    # month (optional \"er\") day [tarik]
+    m1 = re.search(
+        rf"\b({_MONTH_ALT})\s+(?:er\s+)?(\d{{1,2}})(?:\s*(?:tarik|tarikh|th|st|nd|rd))?\b",
+        low,
+    )
+    if m1:
+        mon = _MONTH_MAP.get(m1.group(1), 0)
+        try:
+            dnum = int(m1.group(2))
+        except ValueError:
+            return None
+        if mon:
+            resolved = _resolve_next_calendar_date(mon, dnum, today=today)
+            return resolved.isoformat() if resolved else None
+
+    # day tarik ... month (short gap)
+    m2 = re.search(
+        rf"\b(\d{{1,2}})\s*(?:tarik|tarikh)\b[^\w]{{0,55}}?\b({_MONTH_ALT})\b",
+        low,
+    )
+    if m2:
+        try:
+            dnum = int(m2.group(1))
+        except ValueError:
+            return None
+        mon = _MONTH_MAP.get(m2.group(2), 0)
+        if mon:
+            resolved = _resolve_next_calendar_date(mon, dnum, today=today)
+            return resolved.isoformat() if resolved else None
+
+    # \"11 may\"
+    m3 = re.search(rf"\b(\d{{1,2}})\s+({_MONTH_ALT})\b", low)
+    if m3:
+        try:
+            dnum = int(m3.group(1))
+        except ValueError:
+            return None
+        mon = _MONTH_MAP.get(m3.group(2), 0)
+        if mon:
+            resolved = _resolve_next_calendar_date(mon, dnum, today=today)
+            return resolved.isoformat() if resolved else None
+
+    return None
+
+
 ENTITY_SYSTEM = """You extract structured HR entities from the user message and short context.
 Reply with STRICT JSON only (no markdown, no explanation) using this shape:
 {
@@ -154,4 +242,23 @@ class EntityExtractor:
             e["leave_type"] = e.get("leave_type") or "sick"
         if re.search(r"\bannual|vacation|pto\b", low):
             e["leave_type"] = e.get("leave_type") or "annual"
+
+        if looks_like_leave:
+            inferred_start = _infer_leave_calendar_start(low)
+            if inferred_start:
+                e["start_date"] = inferred_start
+                if not e.get("date"):
+                    e["date"] = inferred_start
+                e["end_date"] = None
+            if (
+                not has_explicit_range
+                and e.get("end_date") is None
+                and not _has_explicit_leave_duration(low)
+            ):
+                e["days"] = None
+
         return e
+
+    def extract_rules_only(self, message: str) -> dict[str, Any]:
+        """Deterministic hints for duplicate detection (no LLM)."""
+        return self._rule_enrich(message or "", {})
