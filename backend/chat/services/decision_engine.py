@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from chat.constants import (
@@ -14,6 +14,7 @@ from chat.constants import (
     INTENT_UNKNOWN,
     INTENT_WFH_REQUEST,
 )
+from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.leave_days import compute_requested_leave_days
 
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
@@ -78,6 +79,27 @@ class DecisionEngine:
                     "reason": "Expense amount is invalid.",
                     "rules_applied": ["EXPENSE_AMOUNT_INVALID"],
                 }
+            inc_iso = entities.get("expense_incurred_date") or infer_expense_incurred_date_iso(
+                message="", hints=entities, today=date.today()
+            )
+            try:
+                inc_d = datetime.fromisoformat(str(inc_iso).split("T")[0]).date()
+            except Exception:
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": "Expense date could not be read. Please state which day the cost was for (e.g. today or a specific date).",
+                    "rules_applied": ["EXPENSE_DATE_INVALID"],
+                }
+            today_d = date.today()
+            if inc_d > today_d:
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": (
+                        "Company policy: submit each day's expense on that day (or after it occurs). "
+                        "আজকের আগে/ভবিষ্যৎ তারিখের খরচ এখন জমা দেওয়া যাবে না—ওই দিনে বা পরে চেষ্টা করুন।"
+                    ),
+                    "rules_applied": ["EXPENSE_FUTURE_DATE_SUBMIT_LATER"],
+                }
             # If user claims an amount but uploads a receipt, try to validate basic consistency.
             doc_amount = _extract_reasonable_amount(doc_text) if doc_text else None
             is_uber = bool(re.search(r"\buber\b", doc_text, re.I)) if doc_text else False
@@ -89,6 +111,32 @@ class DecisionEngine:
                         "rules_applied": ["EXPENSE_RECEIPT_AMOUNT_MISMATCH_PENDING_HR"],
                         "route_to": "HR",
                     }
+            day_so_far = float(crm_context.get("expense_day_approved_total") or 0)
+            cap = float(self.EXPENSE_AUTO_THRESHOLD)
+            if day_so_far + val > cap + 1e-9:
+                if not doc_text:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            f"Same-day auto-approve budget is {cap:.0f} total across all small claims. "
+                            f"You already have {day_so_far:.0f} approved for {inc_d.isoformat()}; "
+                            f"adding {val:.0f} would exceed that. Please upload a receipt/document for HR review."
+                        ),
+                        "rules_applied": ["EXPENSE_DAILY_CAP_EXCEEDED_RECEIPT_REQUIRED"],
+                    }
+                return {
+                    "outcome": "PENDING_APPROVAL",
+                    "reason": (
+                        f"Same-day total would exceed the {cap:.0f} auto-approve budget for {inc_d.isoformat()}; "
+                        "sent to HR for approval."
+                    ),
+                    "rules_applied": [
+                        "EXPENSE_DAILY_CAP_EXCEEDED_PENDING_HR",
+                        "EXPENSE_ROUTED_TO_HR",
+                    ],
+                    "route_to": "HR",
+                    "receipt": {"merchant_hint": "UBER" if is_uber else None, "doc_amount": doc_amount},
+                }
             if val > self.EXPENSE_AUTO_THRESHOLD:
                 if not doc_text:
                     return {

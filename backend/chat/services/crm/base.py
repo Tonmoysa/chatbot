@@ -18,6 +18,13 @@ class CRMAdapter(ABC):
         ...
 
     @abstractmethod
+    def get_expense_day_approved_total(
+        self, employee_id: str, incurred_date_iso: str
+    ) -> dict[str, Any]:
+        """Sum of same-day AUTO_APPROVED expense amounts for policy checks (mock/CRM)."""
+        ...
+
+    @abstractmethod
     def create_request(
         self, employee_id: str, intent: str, entities: dict[str, Any], decision: dict[str, Any]
     ) -> dict[str, Any]:

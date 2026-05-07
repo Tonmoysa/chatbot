@@ -2,6 +2,8 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
+from chat.constants import INTENT_EXPENSE_CLAIM
+from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.llm_client import LLMClient
 
 
@@ -106,9 +108,11 @@ Reply with STRICT JSON only (no markdown, no explanation) using this shape:
   "request_id": string or null,
   "description": string or null,
   "policy_topic": string or null,
-  "reason": string or null
+  "reason": string or null,
+  "expense_incurred_date": "YYYY-MM-DD" or null
 }
 Use null when unknown. Never invent personal identifiers not present in text.
+For EXPENSE_CLAIM, expense_incurred_date is the calendar day the cost was incurred (not submission time).
 """
 
 
@@ -132,12 +136,14 @@ class EntityExtractor:
                 trace_id=trace_id,
             )
             if isinstance(out, dict):
-                merged = self._rule_enrich(message, out)
+                merged = self._rule_enrich(message, out, intent=intent)
                 return {"entities": merged, "source": "llm"}
-        entities = self._rule_enrich(message, {})
+        entities = self._rule_enrich(message, {}, intent=intent)
         return {"entities": entities, "source": "rules"}
 
-    def _rule_enrich(self, message: str, base: dict[str, Any]) -> dict[str, Any]:
+    def _rule_enrich(
+        self, message: str, base: dict[str, Any], intent: str | None = None
+    ) -> dict[str, Any]:
         e = {k: base.get(k) for k in (
             "amount",
             "currency",
@@ -150,6 +156,7 @@ class EntityExtractor:
             "description",
             "policy_topic",
             "reason",
+            "expense_incurred_date",
         )}
         low = message.lower()
         # Guardrail: for leave-like messages without an explicit range or day-count,
@@ -185,8 +192,8 @@ class EntityExtractor:
                 e["date"] = ds
             if e.get("start_date") is None:
                 e["start_date"] = ds
-        # Bengali/Banglish: "kal/kalke/agami kal" => tomorrow
-        if re.search(r"(আগামীকাল|kalke|kal)", low):
+        # Bengali/Banglish: tomorrow (avoid matching "kal" inside "kalker")
+        if re.search(r"(আগামীকাল|kalke|kaller|\bkal\b)", low):
             d = date.today() + timedelta(days=1)
             ds = d.isoformat()
             if e.get("date") is None:
@@ -257,8 +264,13 @@ class EntityExtractor:
             ):
                 e["days"] = None
 
+        if intent == INTENT_EXPENSE_CLAIM:
+            e["expense_incurred_date"] = infer_expense_incurred_date_iso(
+                message=message, hints=e, today=date.today()
+            )
+
         return e
 
-    def extract_rules_only(self, message: str) -> dict[str, Any]:
+    def extract_rules_only(self, message: str, intent: str | None = None) -> dict[str, Any]:
         """Deterministic hints for duplicate detection (no LLM)."""
-        return self._rule_enrich(message or "", {})
+        return self._rule_enrich(message or "", {}, intent=intent)

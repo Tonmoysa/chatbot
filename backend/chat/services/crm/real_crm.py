@@ -69,6 +69,27 @@ class RealCRMAdapter(CRMAdapter):
     def get_leave_balance(self, employee_id: str) -> dict[str, Any]:
         return self._request("GET", f"/employees/{employee_id}/leave-balance/")
 
+    def get_expense_day_approved_total(
+        self, employee_id: str, incurred_date_iso: str
+    ) -> dict[str, Any]:
+        """
+        PHP CRM may expose this later. Until then, do not fail chat: assume zero
+        so only per-claim threshold applies.
+        """
+        try:
+            q = (incurred_date_iso or "").strip().split("T")[0]
+            return self._request(
+                "GET",
+                f"/employees/{employee_id}/expense-day-total/?date={q}",
+            )
+        except Exception:
+            logger.debug(
+                "expense_day_total_unavailable employee=%s date=%s",
+                employee_id,
+                incurred_date_iso,
+            )
+            return {"expense_day_approved_total": 0.0}
+
     def create_request(
         self,
         employee_id: str,

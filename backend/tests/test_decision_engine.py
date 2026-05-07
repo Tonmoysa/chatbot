@@ -84,7 +84,7 @@ def test_attendance_pending_review():
 def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     orch = ChatOrchestrator()
     first = orch.run_chat(
-        message="amar expense lagbe 300 taka",
+        message="amar expense lagbe 100 taka",
         session_id=None,
         employee_id="demo-employee",
         trace_id="t1",
@@ -95,7 +95,7 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     assert rid1
 
     second = orch.run_chat(
-        message="amar abar expense lagbe 300",
+        message="amar expense lagbe 100 taka",
         session_id=str(sid),
         employee_id="demo-employee",
         trace_id="t2",
@@ -171,3 +171,148 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
         trace_id="cal2",
     )
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 10.0
+
+
+@pytest.mark.django_db
+def test_expense_daily_cumulative_cap_blocks_second_small_claim(monkeypatch):
+    fixed = dt.date(2026, 7, 1)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.decision_engine.date", FixedDate)
+
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_EXPENSE_CLAIM,
+        entities={"amount": 200, "expense_incurred_date": "2026-06-15"},
+        crm_context={"expense_day_approved_total": 300.0},
+    )
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_DAILY_CAP_EXCEEDED" in " ".join(d.get("rules_applied", []))
+
+
+@pytest.mark.django_db
+def test_expense_same_day_300_then_200_second_needs_receipt(monkeypatch):
+    fixed = dt.date(2026, 6, 10)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.entity_extractor.date", FixedDate)
+    monkeypatch.setattr("chat.services.expense_incurred_date.date", FixedDate)
+    monkeypatch.setattr("chat.services.decision_engine.date", FixedDate)
+
+    emp = "daily-cap-orchestrator"
+    orch = ChatOrchestrator()
+    first = orch.run_chat(
+        message="amar ajke 300 taka cost hoyeche",
+        session_id=None,
+        employee_id=emp,
+        trace_id="d1",
+    )
+    assert first["decision"]["outcome"] == "AUTO_APPROVED"
+    sid = first["_session_id"]
+
+    second = orch.run_chat(
+        message="amar ajke 200 taka cost hoyeche",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="d2",
+    )
+    assert second["decision"]["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_DAILY_CAP_EXCEEDED" in " ".join(
+        second["decision"].get("rules_applied", [])
+    )
+
+
+@pytest.mark.django_db
+def test_expense_three_small_claims_same_day_sum_to_cap_then_fourth_blocked(monkeypatch):
+    fixed = dt.date(2026, 6, 11)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.entity_extractor.date", FixedDate)
+    monkeypatch.setattr("chat.services.expense_incurred_date.date", FixedDate)
+    monkeypatch.setattr("chat.services.decision_engine.date", FixedDate)
+
+    emp = "daily-cap-333"
+    orch = ChatOrchestrator()
+    sid = None
+    msgs = (
+        "amar ajke 100 taka rickshaw vara hoyeche",
+        "amar ajke 100 taka lunch cost hoyeche",
+        "amar ajke 100 taka tea stall hoyeche",
+    )
+    for i, msg in enumerate(msgs):
+        r = orch.run_chat(
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"3x{i}",
+        )
+        assert r["decision"]["outcome"] == "AUTO_APPROVED", r
+        sid = r["_session_id"]
+    fourth = orch.run_chat(
+        message="amar ajke 50 taka cost hoyeche",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="3x4",
+    )
+    assert fourth["decision"]["outcome"] == "NEEDS_CLARIFICATION"
+
+
+@pytest.mark.django_db
+def test_expense_future_date_blocked_by_policy():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_EXPENSE_CLAIM,
+        entities={"amount": 300, "expense_incurred_date": "2030-01-02"},
+        crm_context={},
+    )
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_FUTURE_DATE_SUBMIT_LATER" in d.get("rules_applied", [])
+
+
+@pytest.mark.django_db
+def test_expense_today_then_tomorrow_same_amount_not_duplicate(monkeypatch):
+    fixed = dt.date(2026, 5, 7)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.entity_extractor.date", FixedDate)
+    monkeypatch.setattr("chat.services.expense_incurred_date.date", FixedDate)
+    monkeypatch.setattr("chat.services.decision_engine.date", FixedDate)
+
+    emp = "expense-policy-dedupe"
+    orch = ChatOrchestrator()
+    first = orch.run_chat(
+        message="amar ajke 300 taka cost hoyeche",
+        session_id=None,
+        employee_id=emp,
+        trace_id="e1",
+    )
+    assert first["decision"]["outcome"] == "AUTO_APPROVED"
+    sid = first["_session_id"]
+    rid1 = first["response"]["request_id"]
+    assert rid1
+
+    second = orch.run_chat(
+        message="amar kalker jonno 300 taka lagbe",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="e2",
+    )
+    assert second["decision"]["outcome"] == "NEEDS_CLARIFICATION"
+    assert "already submitted" not in (second["response"]["message"] or "").lower()
+    assert second["response"]["request_id"] == ""

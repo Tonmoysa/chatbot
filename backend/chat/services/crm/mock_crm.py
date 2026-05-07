@@ -38,6 +38,30 @@ class MockCRMAdapter(CRMAdapter):
             "as_of": datetime.utcnow().isoformat() + "Z",
         }
 
+    def get_expense_day_approved_total(
+        self, employee_id: str, incurred_date_iso: str
+    ) -> dict[str, Any]:
+        emp = (employee_id or "").strip() or "demo-employee"
+        target = (incurred_date_iso or "").strip().split("T")[0]
+        total = 0.0
+        for rec in self._requests.values():
+            if rec.get("employee_id") != emp or rec.get("intent") != "EXPENSE_CLAIM":
+                continue
+            dec = rec.get("decision") or {}
+            if dec.get("outcome") != "AUTO_APPROVED":
+                continue
+            ent = rec.get("entities") or {}
+            inc = str(ent.get("expense_incurred_date") or ent.get("date") or "").split("T")[
+                0
+            ]
+            if not inc or inc != target:
+                continue
+            try:
+                total += float(ent.get("amount") or 0)
+            except (TypeError, ValueError):
+                pass
+        return {"expense_day_approved_total": float(total)}
+
     def _default_balance(self, employee_id: str) -> float:
         # Convenience knobs for demos
         if employee_id.upper().endswith("LOW"):

@@ -17,6 +17,22 @@ from chat.constants import (
 from chat.services.llm_client import LLMClient
 
 
+def _strong_expense_claim(message: str) -> bool:
+    """Banglish / informal cost lines; do not match expense *status* queries."""
+    low = (message or "").lower()
+    if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
+        r"\b(status|track|where)\b", low
+    ):
+        return False
+    if re.search(r"\b(expense|reimbursement|claim)\b", low):
+        return True
+    if re.search(r"(taka|টাকা|cost|hoyeche|hoyese|খরচ|reimburse)", low) and re.search(
+        r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", message
+    ):
+        return True
+    return False
+
+
 INTENT_SYSTEM = """You classify HR chatbot intents. Reply with STRICT JSON only (no prose):
 {"intent":"<ONE_OF_INTENTS>","confidence":0.0-1.0}
 
@@ -61,6 +77,15 @@ class IntentDetector:
                 if intent in ALL_INTENTS:
                     if strong_leave_request and intent != INTENT_LEAVE_REQUEST:
                         return {"intent": INTENT_LEAVE_REQUEST, "confidence": 0.99, "source": "rules_override"}
+                    if _strong_expense_claim(message) and intent not in (
+                        INTENT_EXPENSE_CLAIM,
+                        INTENT_EXPENSE_STATUS,
+                    ):
+                        return {
+                            "intent": INTENT_EXPENSE_CLAIM,
+                            "confidence": 0.99,
+                            "source": "rules_override",
+                        }
                     return {
                         "intent": intent,
                         "confidence": float(out.get("confidence") or 0),
@@ -88,6 +113,11 @@ class IntentDetector:
             return INTENT_EXPENSE_STATUS
         if re.search(r"\b(expense|reimbursement|claim)\b", text):
             return INTENT_EXPENSE_CLAIM
+        # Banglish cost/reimbursement phrasing without English "expense"
+        if re.search(r"(taka|টাকা|cost|hoyeche|hoyese|খরচ|reimburse)", text.lower()) and re.search(
+            r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", text
+        ):
+            return INTENT_EXPENSE_CLAIM
         if re.search(r"\b(attendance|clock|timesheet|punch)\b", text) and re.search(
             r"\b(wrong|mistake|correct|fix)\b", text
         ):
@@ -98,7 +128,11 @@ class IntentDetector:
             return INTENT_REQUEST_STATUS
         if re.search(r"\b(policy|handbook|hr rule|guideline)\b", text):
             return INTENT_HR_POLICY
-        if re.search(r"\b(escalat|manager|approve)\b", text):
+        if re.search(r"\b(escalat|escalate)\b", text.lower()):
+            return INTENT_APPROVAL_ESCALATION
+        if re.search(r"\b(manager|supervisor)\b", text.lower()) and re.search(
+            r"\b(not approved|still pending|too long|slow)\b", text.lower()
+        ):
             return INTENT_APPROVAL_ESCALATION
         if re.search(
             r"\b(leave|pto|vacation|time off|sick day|day off|holiday)\b", text

@@ -1,5 +1,6 @@
 import uuid
 import re
+from datetime import date
 from typing import Any
 
 from chat.constants import (
@@ -18,6 +19,7 @@ from chat.services.crm.base import CRMError
 from chat.services.crm.factory import get_crm_adapter
 from chat.services.decision_engine import DecisionEngine
 from chat.services.entity_extractor import EntityExtractor
+from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.intent_detector import IntentDetector
 from chat.services.memory_store import ConversationMemoryStore
 from chat.services.observability import log_step
@@ -99,6 +101,14 @@ class ChatOrchestrator:
                 else:
                     crm_payload["detail"] = "Missing request_id for status lookup."
 
+            if intent == INTENT_EXPENSE_CLAIM:
+                emp_ctx = employee_id or session.employee_id
+                inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
+                    message=message, hints=entities, today=date.today()
+                )
+                day_tot = self.crm.get_expense_day_approved_total(emp_ctx, inc_iso)
+                crm_context.update(day_tot)
+
             decision = self.engine.evaluate(
                 intent=intent, entities=entities, crm_context=crm_context
             )
@@ -109,6 +119,7 @@ class ChatOrchestrator:
                 intent=intent,
                 entities=entities,
                 decision=decision,
+                user_message=message,
             )
 
             if dedup_request_id:
@@ -221,6 +232,10 @@ class ChatOrchestrator:
             return decision.get("outcome") == "PENDING_APPROVAL"
         return False
 
+    @staticmethod
+    def _norm_user_message(s: str) -> str:
+        return " ".join((s or "").strip().lower().split())
+
     def _recent_duplicate_request_id(
         self,
         *,
@@ -228,6 +243,7 @@ class ChatOrchestrator:
         intent: str,
         entities: dict[str, Any],
         decision: dict[str, Any],
+        user_message: str,
     ) -> str | None:
         """
         Lightweight duplicate-submission guard.
@@ -241,9 +257,20 @@ class ChatOrchestrator:
         if intent == INTENT_EXPENSE_CLAIM:
             if decision.get("outcome") not in ("AUTO_APPROVED", "PENDING_APPROVAL"):
                 return None
+            # Same calendar day + same amount can be separate line items; only dedupe
+            # accidental repeat of the *same* user message (double-send / tap).
+            if self._norm_user_message(user_message) != self._norm_user_message(prior_user):
+                return None
             try:
                 amount_val = float(entities.get("amount"))
             except Exception:
+                return None
+            cur_date = str(entities.get("expense_incurred_date") or "").strip()
+            prev_e = self.entities.extract_rules_only(
+                prior_user, intent=INTENT_EXPENSE_CLAIM
+            )
+            prev_date = str(prev_e.get("expense_incurred_date") or "").strip()
+            if not cur_date or not prev_date or cur_date != prev_date:
                 return None
             m2 = re.search(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", prior_user)
             if not m2:
