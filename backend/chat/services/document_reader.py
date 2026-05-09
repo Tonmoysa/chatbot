@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import re
+import os
+import shutil
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -81,6 +83,7 @@ def _pdf_text(data: bytes, warnings: list[str]) -> str:
 def _image_ocr(data: bytes, warnings: list[str]) -> str:
     try:
         from PIL import Image  # type: ignore
+        from PIL import ImageOps  # type: ignore
     except Exception:
         warnings.append("Missing dependency: pillow. Install it to enable image OCR.")
         return ""
@@ -93,9 +96,46 @@ def _image_ocr(data: bytes, warnings: list[str]) -> str:
         return ""
 
     try:
+        # Ensure Tesseract executable is discoverable on Windows.
+        # If user set TESSERACT_CMD, use it; else fall back to PATH.
+        cmd = (os.getenv("TESSERACT_CMD") or "").strip()
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
+        else:
+            which = shutil.which("tesseract") or shutil.which("tesseract.exe")
+            if which:
+                pytesseract.pytesseract.tesseract_cmd = which
+
         img = Image.open(io.BytesIO(data))
-        return pytesseract.image_to_string(img) or ""
-    except Exception:
-        warnings.append("OCR failed on the uploaded image.")
+        # Basic preprocessing for receipts: grayscale + autocontrast.
+        # (Lightweight and safe; heavy CV would require extra deps.)
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        gray = img.convert("L")
+        gray = ImageOps.autocontrast(gray)
+
+        # Tesseract config tuned for mixed text blocks.
+        # psm 6 = Assume a single uniform block of text.
+        config = "--psm 6"
+        lang = (os.getenv("TESSERACT_LANG") or "eng").strip() or "eng"
+        try:
+            txt = pytesseract.image_to_string(gray, lang=lang, config=config) or ""
+        except Exception:
+            # Retry without lang/config in case of missing traineddata.
+            txt = pytesseract.image_to_string(gray) or ""
+            if lang != "eng":
+                warnings.append(
+                    f"OCR language '{lang}' may be unavailable; fell back to default."
+                )
+        return txt
+    except Exception as exc:
+        if "tesseract" in str(exc).lower() or "not found" in str(exc).lower():
+            warnings.append(
+                "OCR engine (tesseract) not found. Install Tesseract and ensure it's in PATH, "
+                "or set TESSERACT_CMD to the full path of tesseract.exe."
+            )
+        else:
+            warnings.append("OCR failed on the uploaded image.")
         return ""
 

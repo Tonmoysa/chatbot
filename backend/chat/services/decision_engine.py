@@ -34,6 +34,26 @@ class DecisionEngine:
         entities: dict[str, Any],
         crm_context: dict[str, Any],
     ) -> dict[str, Any]:
+        doc_text = str(entities.get("document_text") or "")
+        if entities.get("document_read"):
+            if not doc_text.strip():
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": "I couldn't extract readable text from that document. If it's a scanned PDF/image, OCR is required. Please upload a text-based PDF or enable OCR.",
+                    "rules_applied": ["DOCUMENT_TEXT_EMPTY_OR_UNREADABLE"],
+                }
+            snippet = doc_text.strip()
+            max_chars = 2500
+            truncated = ""
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars]
+                truncated = "\n\n(Showing the first 2500 characters.)"
+            return {
+                "outcome": "INFORMATIONAL",
+                "reason": f"Here's what I could read from the document:\n\n{snippet}{truncated}",
+                "rules_applied": ["DOCUMENT_TEXT_EXTRACTED"],
+            }
+
         if intent == INTENT_UNKNOWN:
             return {
                 "outcome": "NEEDS_CLARIFICATION",
@@ -64,7 +84,6 @@ class DecisionEngine:
 
         if intent == INTENT_EXPENSE_CLAIM:
             amount = entities.get("amount")
-            doc_text = str(entities.get("document_text") or "")
             if amount is None:
                 return {
                     "outcome": "NEEDS_CLARIFICATION",

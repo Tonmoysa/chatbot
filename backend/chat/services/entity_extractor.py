@@ -157,8 +157,29 @@ class EntityExtractor:
             "policy_topic",
             "reason",
             "expense_incurred_date",
+            "document_read",
         )}
         low = message.lower()
+        wants_doc_read_positive = bool(
+            re.search(
+                r"(eikhane|ekhane|ei|here).*(lekha|likha|text)|"
+                r"(ki\s+lekha\s+ache)|"
+                r"\b(read|extract|what\s+is\s+written|what's\s+written)\b|"
+                r"(poro|পড়ো|পড়ো|পড়|পড়)",
+                low,
+            )
+        )
+        wants_doc_read_negated = bool(
+            re.search(
+                r"\b(don't|do\s*not|dont|never|no)\b.*\b(read|extract)\b|"
+                r"\b(read|extract)\b.*\b(don't|do\s*not|dont|never)\b|"
+                r"(poro|porte|porio|porben)\s+na\b|"
+                r"(পড়ো|পড়ো|পড়|পড়|পড়বেন|পড়বেন)\s+না\b|"
+                r"\bna\s+(poro|porte)\b",
+                low,
+            )
+        )
+        wants_doc_read = wants_doc_read_positive and not wants_doc_read_negated
         # Guardrail: for leave-like messages without an explicit range or day-count,
         # ignore any LLM-provided end_date/days that may have leaked from prior context.
         looks_like_leave = bool(
@@ -268,6 +289,10 @@ class EntityExtractor:
             e["expense_incurred_date"] = infer_expense_incurred_date_iso(
                 message=message, hints=e, today=date.today()
             )
+
+        # If user asks "read what's written here", tag it for decision engine.
+        if wants_doc_read:
+            e["document_read"] = True
 
         return e
 

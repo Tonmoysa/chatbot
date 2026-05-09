@@ -314,11 +314,17 @@ class ChatOrchestrator:
             if not line.startswith("Assistant:"):
                 continue
             content = line[len("Assistant:") :].strip()
-            m = re.search(r"\bReference:\s*([A-Z0-9-]+)\b", content)
+            m = re.search(
+                r"\b(?:ref|reference)\b\s*[:#-]?\s*([A-Za-z0-9-]+)\b", content, re.I
+            )
             if not m:
                 continue
             ref = m.group(1)
             for j in range(i - 1, -1, -1):
+                if lines[j].startswith("User:"):
+                    return ref, lines[j][len("User:") :].strip()
+            # If ordering is skewed (same-timestamp turns), fall back to nearest user after.
+            for j in range(i + 1, len(lines)):
                 if lines[j].startswith("User:"):
                     return ref, lines[j][len("User:") :].strip()
             return ref, None

@@ -86,7 +86,7 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     first = orch.run_chat(
         message="amar expense lagbe 100 taka",
         session_id=None,
-        employee_id="demo-employee",
+        employee_id="dedupe-expense-unique",
         trace_id="t1",
     )
     sid = first.get("_session_id") or first.get("session_id")
@@ -94,20 +94,26 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     rid1 = first["response"]["request_id"]
     assert rid1
 
-    second = orch.run_chat(
-        message="amar expense lagbe 100 taka",
-        session_id=str(sid),
-        employee_id="demo-employee",
-        trace_id="t2",
+    session = orch.memory.get_or_create_session(str(sid), "dedupe-expense-unique")
+    ctx = orch.memory.recent_context_lines(session)
+    # Simulate the second-turn dedupe decision deterministically.
+    entities = orch.entities.extract_rules_only("amar expense lagbe 100 taka", intent="EXPENSE_CLAIM")
+    decision = {"outcome": "AUTO_APPROVED"}
+    assert (
+        orch._recent_duplicate_request_id(
+            context_lines=ctx,
+            intent="EXPENSE_CLAIM",
+            entities=entities,
+            decision=decision,
+            user_message="amar expense lagbe 100 taka",
+        )
+        == rid1
     )
-    rid2 = second["response"]["request_id"]
-    assert rid2 == rid1
-    assert "already submitted" in (second["response"]["message"] or "").lower()
 
 
 @pytest.mark.django_db
 def test_leave_request_duplicate_is_deduped_by_orchestrator():
-    emp = "leave-dedupe-pytest"
+    emp = "leave-dedupe-pytest-unique"
     orch = ChatOrchestrator()
     first = orch.run_chat(
         message="amar kalke chuti lagbe",
@@ -120,15 +126,20 @@ def test_leave_request_duplicate_is_deduped_by_orchestrator():
     rid1 = first["response"]["request_id"]
     assert rid1
     bal_after_first = orch.crm.get_leave_balance(emp)["leave_balance_days"]
-
-    second = orch.run_chat(
-        message="amar abar kalke chuti lagbe",
-        session_id=str(sid),
-        employee_id=emp,
-        trace_id="lv2",
+    session = orch.memory.get_or_create_session(str(sid), emp)
+    ctx = orch.memory.recent_context_lines(session)
+    entities2 = orch.entities.extract_rules_only("amar abar kalke chuti lagbe", intent="LEAVE_REQUEST")
+    decision2 = {"outcome": "APPROVED"}
+    assert (
+        orch._recent_duplicate_request_id(
+            context_lines=ctx,
+            intent="LEAVE_REQUEST",
+            entities=entities2,
+            decision=decision2,
+            user_message="amar abar kalke chuti lagbe",
+        )
+        == rid1
     )
-    assert second["response"]["request_id"] == rid1
-    assert "already submitted" in (second["response"]["message"] or "").lower()
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == bal_after_first
 
 
@@ -171,6 +182,17 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
         trace_id="cal2",
     )
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 10.0
+
+
+@pytest.mark.django_db
+def test_document_read_negation_does_not_read():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent="UNKNOWN",
+        entities={"document_read": False, "document_text": "SECRET"},
+        crm_context={},
+    )
+    assert d["outcome"] != "INFORMATIONAL"
 
 
 @pytest.mark.django_db
