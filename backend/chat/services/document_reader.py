@@ -46,27 +46,36 @@ def extract_text_from_upload(
         txt = _norm_text(txt)
         # Keep current fast-path: embedded PDF text is the best quality and cheapest.
         if txt:
-            return DocumentExtractResult(text=txt[:max_chars], warnings=warnings, source="pdf_text")
+            return DocumentExtractResult(
+                text=txt[:max_chars], warnings=warnings, source="pdf_text"
+            )
 
         # Scanned PDFs are image-based and will typically produce empty (or tiny) embedded text.
         # In production, it's common to accept receipts/invoices as scanned PDFs, so we attempt
         # OCR as a fallback when text extraction yields nothing useful.
         if not txt or len(txt) < 30:
-            warnings.append("No embedded text detected in PDF (may be scanned). Attempting OCR.")
+            warnings.append(
+                "No embedded text detected in PDF (may be scanned). Attempting OCR."
+            )
             ocr_txt = _pdf_ocr(data, warnings, max_chars=max_chars)
             ocr_txt = _norm_text(ocr_txt)
             if ocr_txt:
-                return DocumentExtractResult(text=ocr_txt[:max_chars], warnings=warnings, source="ocr")
+                return DocumentExtractResult(
+                    text=ocr_txt[:max_chars], warnings=warnings, source="ocr"
+                )
 
         return DocumentExtractResult(text="", warnings=warnings, source="none")
 
-    is_image = any(name.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")) or (
-        ctype.startswith("image/")
-    )
+    is_image = any(
+        name.endswith(ext)
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+    ) or (ctype.startswith("image/"))
     if is_image:
         txt = _image_ocr(data, warnings)
         txt = _norm_text(txt)
-        return DocumentExtractResult(text=txt[:max_chars], warnings=warnings, source="ocr" if txt else "none")
+        return DocumentExtractResult(
+            text=txt[:max_chars], warnings=warnings, source="ocr" if txt else "none"
+        )
 
     warnings.append("Unsupported file type. Upload a PDF or an image (png/jpg).")
     return DocumentExtractResult(text="", warnings=warnings, source="none")
@@ -76,7 +85,9 @@ def _pdf_text(data: bytes, warnings: list[str]) -> str:
     try:
         from pypdf import PdfReader  # type: ignore
     except Exception:
-        warnings.append("Missing dependency: pypdf. Install it to enable PDF text extraction.")
+        warnings.append(
+            "Missing dependency: pypdf. Install it to enable PDF text extraction."
+        )
         return ""
 
     try:
@@ -160,7 +171,9 @@ def _prepare_image_for_ocr(img, warnings: list[str]):
 
     # Upscale tiny images a bit; OCR quality drops sharply below ~800px shortest edge.
     # Limit overall pixels to avoid abusive requests.
-    max_pixels = _env_int("OCR_MAX_IMAGE_PIXELS", 30_000_000)  # ~30MP default safety cap
+    max_pixels = _env_int(
+        "OCR_MAX_IMAGE_PIXELS", 30_000_000
+    )  # ~30MP default safety cap
     w, h = gray.size
     pixels = int(w) * int(h)
     if pixels > max_pixels:
@@ -192,15 +205,19 @@ def _tesseract_image_to_string(img, warnings: list[str]) -> str:
         )
         return ""
 
-    lang = (os.getenv("TESSERACT_LANG") or "eng").strip() or "eng"
-    config = "--psm 6"
+    # lang = (os.getenv("TESSERACT_LANG") or "eng").strip() or "eng"
+    lang = (os.getenv("TESSERACT_LANG") or "ben+eng").strip() or "ben+eng"
+    # config = "--psm 6"
+    config = "--oem 3 --psm 6"
     try:
         return pytesseract.image_to_string(img, lang=lang, config=config) or ""
     except Exception:
         # Retry without lang/config in case of missing traineddata or unsupported params.
         txt = pytesseract.image_to_string(img) or ""
         if lang != "eng":
-            warnings.append(f"OCR language '{lang}' may be unavailable; fell back to default.")
+            warnings.append(
+                f"OCR language '{lang}' may be unavailable; fell back to default."
+            )
         return txt
 
 
@@ -236,20 +253,26 @@ def _pdf_ocr(data: bytes, warnings: list[str], *, max_chars: int) -> str:
     try:
         from pdf2image import convert_from_bytes  # type: ignore
     except Exception:
-        warnings.append("Missing dependency: pdf2image. Install it to enable scanned PDF OCR.")
+        warnings.append(
+            "Missing dependency: pdf2image. Install it to enable scanned PDF OCR."
+        )
         return ""
 
     try:
         from PIL import Image  # type: ignore
     except Exception:
-        warnings.append("Missing dependency: pillow. Install it to enable scanned PDF OCR.")
+        warnings.append(
+            "Missing dependency: pillow. Install it to enable scanned PDF OCR."
+        )
         return ""
 
     if not _configure_tesseract(warnings):
         return ""
 
     page_limit = _env_int("OCR_PAGE_LIMIT", 10)
-    hard_char_limit = min(max_chars * 3, 200_000)  # prevent runaway OCR output/memory use
+    hard_char_limit = min(
+        max_chars * 3, 200_000
+    )  # prevent runaway OCR output/memory use
 
     try:
         # Moderate DPI balances accuracy and performance/memory.
@@ -298,4 +321,3 @@ def _pdf_ocr(data: bytes, warnings: list[str], *, max_chars: int) -> str:
             continue
 
     return "\n\n".join(parts)
-
