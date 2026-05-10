@@ -16,6 +16,11 @@ from chat.constants import (
 )
 from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.leave_days import compute_requested_leave_days
+from chat.services.leave_workflow import (
+    LEAVE_PAYMENT_LWOP,
+    LEAVE_PAYMENT_PAID,
+    supporting_document_needed,
+)
 
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
 
@@ -177,27 +182,116 @@ class DecisionEngine:
             }
 
         if intent == INTENT_LEAVE_REQUEST:
+            """
+            Final validation after the chatbot finished the multi-step leave wizard.
+            Outcomes are explicit: auto-approve only for paid leave with enough balance
+            and clean policy checks; otherwise route to manager/HR.
+            """
+            pay = str(entities.get("leave_payment_category") or "").strip().lower()
+            if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": "Leave payment type is missing. Please choose **paid** or **LWOP / unpaid**.",
+                    "rules_applied": ["LEAVE_PAYMENT_UNKNOWN"],
+                }
+
+            scope = str(entities.get("day_scope") or "").strip().lower()
+            if scope not in ("full", "half", "half_day", "half-day"):
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": "Duration type is unclear. Reply with **full day** or **half day**.",
+                    "rules_applied": ["LEAVE_DAY_SCOPE_UNKNOWN"],
+                }
+
             days_needed = entities.get("days")
             start = entities.get("start_date")
             end = entities.get("end_date")
             if not start and not end and days_needed is None:
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Leave dates or duration required.",
+                    "reason": (
+                        "Dates are incomplete. Reply with **start** and optional **end** "
+                        "(YYYY-MM-DD) or phrases like tomorrow."
+                    ),
                     "rules_applied": ["LEAVE_DATES_REQUIRED"],
                 }
-            balance = float(crm_context.get("leave_balance_days") or 0)
+
+            rs = str(entities.get("reason") or "").strip()
+            if len(rs) < 4:
+                return {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": (
+                        "**Reason required:** briefly describe why you need leave "
+                        "(family, sickness, planned break, travel, etc.)."
+                    ),
+                    "rules_applied": ["LEAVE_REASON_REQUIRED"],
+                }
+
+            docs_required = supporting_document_needed(entities)
+            doc_plain = str(entities.get("document_text") or "").strip()
+            waived = bool(entities.get("supporting_document_waived"))
+            if docs_required:
+                if not doc_plain:
+                    if waived:
+                        return {
+                            "outcome": "PENDING_APPROVAL",
+                            "reason": (
+                                "**Supporting documents were skipped or missing.** Under policy, HR / your manager "
+                                "must review this leave before approval."
+                            ),
+                            "rules_applied": ["LEAVE_LONG_SICK_NO_DOC_ROUTE_MANAGER"],
+                            "route_to": "MANAGER",
+                        }
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "**Supporting document missing:** upload a certificate / prescription / "
+                            "doctor's note via attachment, paste legible details, "
+                            "**or call HR** if unsure."
+                        ),
+                        "rules_applied": ["LEAVE_LONG_SICK_DOC_REQUIRED"],
+                    }
+
             requested = compute_requested_leave_days(entities)
-            if balance >= requested:
+            balance = float(crm_context.get("leave_balance_days") or 0)
+
+            if pay == LEAVE_PAYMENT_LWOP:
+                return {
+                    "outcome": "PENDING_APPROVAL",
+                    "reason": (
+                        "**Leave without pay requires manager / HR clearance** before payroll can treat it correctly. "
+                        "Your submission was logged for supervisor review."
+                    ),
+                    "rules_applied": ["LEAVE_LWOP_ROUTE_MANAGER"],
+                    "route_to": "MANAGER",
+                }
+
+            if balance + 1e-9 >= requested:
+                summary = (
+                    f"Paid leave validated: **~{requested:g} ledger day(s)**, dates **"
+                    f"{str(start)}..{str(end or start)}**, **{'half' if 'half' in scope else 'full'}** "
+                    "day window per your answers."
+                )
                 return {
                     "outcome": "APPROVED",
-                    "reason": "Sufficient leave balance per rule engine.",
-                    "rules_applied": ["LEAVE_BALANCE_SUFFICIENT"],
+                    "reason": summary + " Enough balance under current totals.",
+                    "rules_applied": ["LEAVE_BALANCE_SUFFICIENT", "LEAVE_PAYLOAD_COMPLETE"],
                 }
+
+            short_by = requested - balance
             return {
-                "outcome": "REJECTED",
-                "reason": "Insufficient leave balance per rule engine.",
-                "rules_applied": ["LEAVE_BALANCE_INSUFFICIENT"],
+                "outcome": "PENDING_APPROVAL",
+                "reason": (
+                    f"**Insufficient paid leave:** you requested **~{requested:g} ledger day(s)** "
+                    f"but only **{balance:g}** day(s) remain. Please **coordinate with HR or your manager** "
+                    "to convert part of this leave to LWOP, adjust dates, "
+                    "**or approve an exception**."
+                    f"\nEstimated shortfall: **~{short_by:g}** day(s)."
+                ),
+                "rules_applied": ["LEAVE_PAID_UNDERBALANCE_ROUTE_MANAGER"],
+                "route_to": "HR",
+                "requested_ledger_days": requested,
+                "balance_days": balance,
             }
 
         if intent == INTENT_WFH_REQUEST:

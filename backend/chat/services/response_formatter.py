@@ -121,6 +121,11 @@ def build_user_message(
             msg = reason or "Your request is submitted for review."
         if route_to == "HR" and "HR" not in msg:
             msg = msg.rstrip(".") + " It has been sent to HR for review."
+        if route_to == "MANAGER" and "manager" not in msg.lower():
+            msg = (
+                msg.rstrip(".")
+                + " Please coordinate with your **manager / HR team**—the ticket is awaiting formal approval."
+            )
         if rid:
             msg += f" Reference: {rid}."
         return (msg, "pending")

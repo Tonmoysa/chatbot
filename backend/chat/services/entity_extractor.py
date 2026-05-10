@@ -105,6 +105,8 @@ Reply with STRICT JSON only (no markdown, no explanation) using this shape:
   "date": "YYYY-MM-DD" or null,
   "days": null or number,
   "leave_type": "annual"|"sick"|"casual"|null,
+  "leave_payment_category": "paid"|"lwop"|null,
+  "day_scope": "full"|"half"|null,
   "request_id": string or null,
   "description": string or null,
   "policy_topic": string or null,
@@ -113,6 +115,7 @@ Reply with STRICT JSON only (no markdown, no explanation) using this shape:
 }
 Use null when unknown. Never invent personal identifiers not present in text.
 For EXPENSE_CLAIM, expense_incurred_date is the calendar day the cost was incurred (not submission time).
+For LEAVE_REQUEST, leave_payment_category is paid/time-off balance versus unpaid/LWOP; day_scope captures full versus half-day leave.
 """
 
 
@@ -152,6 +155,8 @@ class EntityExtractor:
             "date",
             "days",
             "leave_type",
+            "leave_payment_category",
+            "day_scope",
             "request_id",
             "description",
             "policy_topic",

@@ -21,6 +21,12 @@ from chat.services.decision_engine import DecisionEngine
 from chat.services.entity_extractor import EntityExtractor
 from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.intent_detector import IntentDetector
+from chat.services.leave_days import compute_requested_leave_days
+from chat.services.leave_workflow import (
+    deactivate_leave_session,
+    is_leave_collecting,
+    process_leave_turn,
+)
 from chat.services.memory_store import ConversationMemoryStore
 from chat.services.observability import log_step
 from chat.services.response_formatter import build_user_message
@@ -56,12 +62,44 @@ class ChatOrchestrator:
             {"user_message": message, "session_id": session.session_id},
         )
 
-        forced_intent = self._infer_followup_intent(context_lines, message)
-        if forced_intent:
-            intent_result = {"intent": forced_intent, "confidence": 1.0, "source": "followup"}
-        else:
-            intent_result = self.intents.detect(message, trace_id)
+        intent_result = self.intents.detect(message, trace_id)
         intent = intent_result["intent"]
+
+        wf_state = getattr(session, "workflow_state", None) or {}
+        low_msg = (message or "").lower()
+        balance_probe = bool(
+            re.search(
+                r"\b(balance|remaining|left|pto|how many\s+days|ছুটি\s+কত|কত\s+দিন)\b",
+                low_msg,
+            )
+        )
+        if is_leave_collecting(wf_state):
+            hard_switch = intent in (
+                INTENT_EXPENSE_CLAIM,
+                INTENT_EXPENSE_STATUS,
+                INTENT_REQUEST_STATUS,
+                INTENT_WFH_REQUEST,
+                INTENT_ATTENDANCE_CORRECTION,
+                INTENT_APPROVAL_ESCALATION,
+            )
+            if hard_switch:
+                session.workflow_state = deactivate_leave_session(wf_state)
+                session.save(update_fields=["workflow_state", "updated_at"])
+            elif intent == INTENT_LEAVE_BALANCE and balance_probe:
+                pass
+            else:
+                intent = INTENT_LEAVE_REQUEST
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_LEAVE_REQUEST,
+                    "source": (intent_result.get("source") or "intent") + "+leave_wizard",
+                }
+        else:
+            forced_intent = self._infer_followup_intent(context_lines, message)
+            if forced_intent:
+                intent = forced_intent
+                intent_result = {"intent": forced_intent, "confidence": 1.0, "source": "followup"}
+
         log_step(trace_id, "intent_detection_done", {"intent": intent})
 
         log_step(trace_id, "entity_extraction_start", {})
@@ -73,6 +111,26 @@ class ChatOrchestrator:
             # Carry document text into the rule engine (LLM must not decide outcomes).
             entities["document_text"] = document_text
         log_step(trace_id, "entity_extraction_done", {"keys": list(entities.keys())})
+
+        lv_pack: dict[str, Any] = {}
+        leave_collecting_blocked = False
+        if intent == INTENT_LEAVE_REQUEST:
+            lv_pack = process_leave_turn(
+                workflow_state=getattr(session, "workflow_state", None) or {},
+                message=message,
+                entities=dict(entities),
+            )
+            session.workflow_state = lv_pack["workflow_state"]
+            session.save(update_fields=["workflow_state", "updated_at"])
+            merged = lv_pack["merged_entities"] or {}
+            entities.clear()
+            entities.update(merged)
+            leave_collecting_blocked = not bool(lv_pack.get("complete"))
+        log_step(
+            trace_id,
+            "leave_workflow_gate",
+            {"blocked": leave_collecting_blocked, "intent": intent},
+        )
 
         crm_context: dict[str, Any] = {}
         crm_payload: dict[str, Any] = {}
@@ -109,12 +167,21 @@ class ChatOrchestrator:
                 day_tot = self.crm.get_expense_day_approved_total(emp_ctx, inc_iso)
                 crm_context.update(day_tot)
 
-            decision = self.engine.evaluate(
-                intent=intent, entities=entities, crm_context=crm_context
-            )
+            if leave_collecting_blocked:
+                decision = {
+                    "outcome": "NEEDS_CLARIFICATION",
+                    "reason": lv_pack.get("question")
+                    or "Please answer the questions so I can continue your leave request.",
+                    "rules_applied": ["LEAVE_WORKFLOW_COLLECTING"],
+                }
+            else:
+                decision = self.engine.evaluate(
+                    intent=intent, entities=entities, crm_context=crm_context
+                )
             log_step(trace_id, "decision", {"outcome": decision.get("outcome")})
 
             dedup_request_id = self._recent_duplicate_request_id(
+                session=session,
                 context_lines=context_lines,
                 intent=intent,
                 entities=entities,
@@ -134,6 +201,20 @@ class ChatOrchestrator:
                 )
                 request_id = str(exec_result.get("request_id") or "")
                 crm_payload.update(exec_result)
+
+            if (
+                intent == INTENT_LEAVE_REQUEST
+                and request_id
+                and not crm_payload.get("_deduped")
+                and status == "success"
+            ):
+                wf_post = getattr(session, "workflow_state", None) or {}
+                wf_post["last_leave_fingerprint"] = {
+                    "sig": list(self._leave_booking_signature(entities)),
+                    "request_id": request_id,
+                }
+                session.workflow_state = wf_post
+                session.save(update_fields=["workflow_state", "updated_at"])
 
             msg, rstatus = build_user_message(
                 intent=intent,
@@ -203,9 +284,14 @@ class ChatOrchestrator:
             or re.search(r"\b\d{1,2}-\d{1,2}-\d{2,4}\b", msg)
         )
 
-        # Leave flow follow-up
-        if "Leave dates or duration required" in last_assistant:
-            if len(msg) <= 60 or is_dateish:
+        # Leave flow follow-up (legacy copy + wizard copy)
+        if (
+            "Leave dates or duration required" in last_assistant
+            or "**Step " in last_assistant
+            or "Step 3 of 5" in last_assistant
+            or "**Step 3 of 5" in last_assistant
+        ):
+            if len(msg) <= 180 or is_dateish:
                 return INTENT_LEAVE_REQUEST
         return None
 
@@ -218,9 +304,11 @@ class ChatOrchestrator:
             return False
         if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
             return False
-        if intent == INTENT_LEAVE_REQUEST and decision.get("outcome") == "REJECTED":
-            return True
-        if intent == INTENT_LEAVE_REQUEST and decision.get("outcome") == "APPROVED":
+        if intent == INTENT_LEAVE_REQUEST and decision.get("outcome") in (
+            "APPROVED",
+            "REJECTED",
+            "PENDING_APPROVAL",
+        ):
             return True
         if intent == INTENT_WFH_REQUEST:
             return decision.get("outcome") == "PENDING_APPROVAL"
@@ -239,6 +327,7 @@ class ChatOrchestrator:
     def _recent_duplicate_request_id(
         self,
         *,
+        session: Any,
         context_lines: list[str],
         intent: str,
         entities: dict[str, Any],
@@ -285,17 +374,35 @@ class ChatOrchestrator:
             return None
 
         if intent == INTENT_LEAVE_REQUEST:
-            if decision.get("outcome") not in ("APPROVED", "REJECTED"):
+            if decision.get("outcome") not in (
+                "APPROVED",
+                "REJECTED",
+                "PENDING_APPROVAL",
+            ):
                 return None
             cur = self._leave_booking_signature(entities)
-            prev_e = self.entities.extract_rules_only(prior_user)
-            prev = self._leave_booking_signature(prev_e)
-            if (
-                cur[0] == prev[0]
-                and cur[1] == prev[1]
-                and abs(cur[2] - prev[2]) < 1e-6
-            ):
-                return last_ref
+            fp = (getattr(session, "workflow_state", None) or {}).get(
+                "last_leave_fingerprint"
+            ) or {}
+            stored = fp.get("sig")
+            if stored and len(stored) == 5:
+                prev = (
+                    str(stored[0]),
+                    str(stored[1]),
+                    float(stored[2]),
+                    str(stored[3]),
+                    str(stored[4]),
+                )
+                rid = str(fp.get("request_id") or "")
+                if (
+                    rid
+                    and cur[0] == prev[0]
+                    and cur[1] == prev[1]
+                    and abs(cur[2] - prev[2]) < 1e-6
+                    and cur[3] == prev[3]
+                    and cur[4] == prev[4]
+                ):
+                    return rid
             return None
 
         return None
@@ -331,11 +438,10 @@ class ChatOrchestrator:
         return None, None
 
     @staticmethod
-    def _leave_booking_signature(entities: dict[str, Any]) -> tuple[str, str, float]:
-        """Match DecisionEngine.LEAVE_REQUEST day span for duplicate comparison."""
+    def _leave_booking_signature(entities: dict[str, Any]) -> tuple[str, str, float, str, str]:
+        """Paid/LWOP leave duplicate comparison using ledger totals + anchors."""
         from datetime import datetime
 
-        days_needed = entities.get("days")
         start_raw = entities.get("start_date") or entities.get("date")
         end_raw = entities.get("end_date")
         start_s = ""
@@ -350,17 +456,10 @@ class ChatOrchestrator:
                 end_s = str(datetime.fromisoformat(str(end_raw).split("T")[0]).date())
             except Exception:
                 end_s = str(end_raw).split("T")[0]
-        requested = float(days_needed or 1)
-        if start_s and end_s:
-            try:
-                s_d = datetime.fromisoformat(start_s).date()
-                e_d = datetime.fromisoformat(end_s).date()
-                requested = max(1.0, float((e_d - s_d).days + 1))
-            except Exception:
-                requested = float(days_needed or 1)
-        elif start_s and not end_s:
-            requested = float(days_needed or 1)
-        return (start_s, end_s, requested)
+        ledger = compute_requested_leave_days(entities or {})
+        pay = str((entities or {}).get("leave_payment_category") or "")
+        scope = str((entities or {}).get("day_scope") or "")
+        return (start_s, end_s, float(ledger), pay, scope)
 
 
 def new_trace_id() -> str:

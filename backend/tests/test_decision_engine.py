@@ -63,10 +63,53 @@ def test_leave_approved_with_balance():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_LEAVE_REQUEST,
-        entities={"start_date": "2026-05-10", "days": 1},
+        entities={
+            "leave_payment_category": "paid",
+            "day_scope": "full",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-10",
+            "days": 1,
+            "reason": "Planned personal day",
+        },
         crm_context={"leave_balance_days": 5},
     )
     assert d["outcome"] == "APPROVED"
+
+
+@pytest.mark.django_db
+def test_leave_paid_insufficient_balance_routes_to_hr():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_LEAVE_REQUEST,
+        entities={
+            "leave_payment_category": "paid",
+            "day_scope": "full",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-12",
+            "reason": "Family travel",
+        },
+        crm_context={"leave_balance_days": 1},
+    )
+    assert d["outcome"] == "PENDING_APPROVAL"
+    assert d.get("route_to") == "HR"
+
+
+@pytest.mark.django_db
+def test_leave_lwop_routes_to_manager():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_LEAVE_REQUEST,
+        entities={
+            "leave_payment_category": "lwop",
+            "day_scope": "full",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-10",
+            "reason": "Personal reasons",
+        },
+        crm_context={"leave_balance_days": 0},
+    )
+    assert d["outcome"] == "PENDING_APPROVAL"
+    assert d.get("route_to") == "MANAGER"
 
 
 @pytest.mark.django_db
@@ -101,6 +144,7 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     decision = {"outcome": "AUTO_APPROVED"}
     assert (
         orch._recent_duplicate_request_id(
+            session=session,
             context_lines=ctx,
             intent="EXPENSE_CLAIM",
             entities=entities,
@@ -112,34 +156,66 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
 
 
 @pytest.mark.django_db
-def test_leave_request_duplicate_is_deduped_by_orchestrator():
+def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
+    fixed = dt.date(2026, 5, 7)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    for mod in (
+        "chat.services.entity_extractor.date",
+        "chat.services.leave_workflow.date",
+        "chat.services.decision_engine.date",
+    ):
+        monkeypatch.setattr(mod, FixedDate)
+
     emp = "leave-dedupe-pytest-unique"
     orch = ChatOrchestrator()
-    first = orch.run_chat(
-        message="amar kalke chuti lagbe",
-        session_id=None,
-        employee_id=emp,
-        trace_id="lv1",
+    chain = (
+        "amar kalke chuti lagbe",
+        "paid",
+        "full day",
+        "cousin graduation out of Dhaka.",
     )
-    sid = first.get("_session_id")
-    assert sid
-    rid1 = first["response"]["request_id"]
-    assert rid1
-    bal_after_first = orch.crm.get_leave_balance(emp)["leave_balance_days"]
-    session = orch.memory.get_or_create_session(str(sid), emp)
-    ctx = orch.memory.recent_context_lines(session)
-    entities2 = orch.entities.extract_rules_only("amar abar kalke chuti lagbe", intent="LEAVE_REQUEST")
-    decision2 = {"outcome": "APPROVED"}
-    assert (
-        orch._recent_duplicate_request_id(
-            context_lines=ctx,
-            intent="LEAVE_REQUEST",
-            entities=entities2,
-            decision=decision2,
-            user_message="amar abar kalke chuti lagbe",
+
+    sid = None
+    last = None
+    for i, msg in enumerate(chain):
+        last = orch.run_chat(
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"lvwiz-{i}",
         )
-        == rid1
+        sid = last["_session_id"]
+        if i < len(chain) - 1:
+            assert (
+                last["decision"]["outcome"] == "NEEDS_CLARIFICATION"
+            ), last["decision"]
+
+    rid1 = last["response"]["request_id"]
+    assert rid1 and last["decision"]["outcome"] == "APPROVED"
+
+    bal_after_first = orch.crm.get_leave_balance(emp)["leave_balance_days"]
+
+    dup_chain = (
+        "amar abar kalke chuti lagbe",
+        "paid",
+        "full day",
+        "cousin graduation out of Dhaka.",
     )
+    for i, msg in enumerate(dup_chain):
+        last2 = orch.run_chat(
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"lvwiz-dup-{i}",
+        )
+        sid = last2["_session_id"]
+
+    assert "already submitted" in (last2["response"]["message"] or "").lower()
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == bal_after_first
 
 
@@ -151,6 +227,16 @@ def test_compute_requested_leave_days_range_and_single_day():
         == 3.0
     )
     assert compute_requested_leave_days({"start_date": "2026-05-11", "days": None}) == 1.0
+    assert (
+        compute_requested_leave_days(
+            {
+                "start_date": "2026-05-10",
+                "end_date": "2026-05-10",
+                "day_scope": "half",
+            }
+        )
+        == 0.5
+    )
 
 
 @pytest.mark.django_db
@@ -162,25 +248,42 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
         def today(cls):
             return fixed
 
-    monkeypatch.setattr("chat.services.entity_extractor.date", FixedDate)
+    for mod in (
+        "chat.services.entity_extractor.date",
+        "chat.services.leave_workflow.date",
+        "chat.services.decision_engine.date",
+    ):
+        monkeypatch.setattr(mod, FixedDate)
 
     emp = "leave-cal-pytest"
     orch = ChatOrchestrator()
-    first = orch.run_chat(
-        message="amar kalke chuti lagbe",
-        session_id=None,
-        employee_id=emp,
-        trace_id="cal1",
-    )
-    sid = first["_session_id"]
+
+    def run_leave_block(start_msg: str, trace_prefix: str) -> None:
+        sid_local = None
+        steps = (
+            start_msg,
+            "paid",
+            "full day",
+            "Travel to village for ceremonies.",
+        )
+        last_local = None
+        for i, msg in enumerate(steps):
+            last_local = orch.run_chat(
+                message=msg,
+                session_id=sid_local,
+                employee_id=emp,
+                trace_id=f"{trace_prefix}-{i}",
+            )
+            sid_local = last_local["_session_id"]
+            if i < len(steps) - 1:
+                assert last_local["decision"]["outcome"] == "NEEDS_CLARIFICATION"
+        assert last_local["decision"]["outcome"] == "APPROVED"
+
+    assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 12.0
+    run_leave_block("amar kalke chuti lagbe", "cal-kal")
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 11.0
 
-    orch.run_chat(
-        message="amar may er 11 tarik chuti lagbe",
-        session_id=sid,
-        employee_id=emp,
-        trace_id="cal2",
-    )
+    run_leave_block("amar may er 11 tarik chuti lagbe", "cal-may")
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 10.0
 
 
