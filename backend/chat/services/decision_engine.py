@@ -3,9 +3,11 @@ from datetime import date, datetime
 from typing import Any
 
 from chat.constants import (
+    EXPENSE_DAY_CAP_BDT,
     INTENT_APPROVAL_ESCALATION,
     INTENT_ATTENDANCE_CORRECTION,
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
@@ -30,7 +32,7 @@ class DecisionEngine:
     Rule-based source of truth. LLM must never set final approval outcomes.
     """
 
-    EXPENSE_AUTO_THRESHOLD = 300.0
+    EXPENSE_AUTO_THRESHOLD = float(EXPENSE_DAY_CAP_BDT)
 
     def evaluate(
         self,
@@ -85,6 +87,13 @@ class DecisionEngine:
                 "outcome": "INFORMATIONAL",
                 "reason": "Status lookup via CRM.",
                 "rules_applied": ["STATUS_READ_ONLY"],
+            }
+
+        if intent == INTENT_EXPENSE_DAY_SUMMARY:
+            return {
+                "outcome": "INFORMATIONAL",
+                "reason": "Expense day summary (read-only).",
+                "rules_applied": ["EXPENSE_DAY_SUMMARY_READ_ONLY"],
             }
 
         if intent == INTENT_EXPENSE_CLAIM:
@@ -191,7 +200,10 @@ class DecisionEngine:
             if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Leave payment type is missing. Please choose **paid** or **LWOP / unpaid**.",
+                    "reason": (
+                        "এখনও বোঝা যাচ্ছে না ছুটিটা বেতনসহ নাকি বেতন ছাড়া। "
+                        "একটু লিখুন: বেতনসহ / paid — অথবা বেতন ছাড়া / unpaid।"
+                    ),
                     "rules_applied": ["LEAVE_PAYMENT_UNKNOWN"],
                 }
 
@@ -199,7 +211,9 @@ class DecisionEngine:
             if scope not in ("full", "half", "half_day", "half-day"):
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Duration type is unclear. Reply with **full day** or **half day**.",
+                    "reason": (
+                        "পুরো দিন নাকি হাফ দিন — একটু স্পষ্ট করে লিখুন (যেমন: পুরো দিন / হাফ দিন)।"
+                    ),
                     "rules_applied": ["LEAVE_DAY_SCOPE_UNKNOWN"],
                 }
 
@@ -210,8 +224,8 @@ class DecisionEngine:
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
                     "reason": (
-                        "Dates are incomplete. Reply with **start** and optional **end** "
-                        "(YYYY-MM-DD) or phrases like tomorrow."
+                        "কোন তারিখে ছুটি চান সেটা পুরো হয়নি। এক দিন হলে একটা তারিখ দিন; "
+                        "একাধিক দিন হলে শুরু আর শেষ তারিখ দিন (যেমন 2026-05-12 থেকে 2026-05-14)।"
                     ),
                     "rules_applied": ["LEAVE_DATES_REQUIRED"],
                 }
@@ -221,8 +235,7 @@ class DecisionEngine:
                 return {
                     "outcome": "NEEDS_CLARIFICATION",
                     "reason": (
-                        "**Reason required:** briefly describe why you need leave "
-                        "(family, sickness, planned break, travel, etc.)."
+                        "ছুটি **কেন** লাগছে — এক লাইনে লিখুন (পরিবার, অসুস্থতা, ভ্রমণ ইত্যাদি)।"
                     ),
                     "rules_applied": ["LEAVE_REASON_REQUIRED"],
                 }
@@ -236,8 +249,8 @@ class DecisionEngine:
                         return {
                             "outcome": "PENDING_APPROVAL",
                             "reason": (
-                                "**Supporting documents were skipped or missing.** Under policy, HR / your manager "
-                                "must review this leave before approval."
+                                "কাগজপত্র এখন দেননি বা skip লিখেছেন — তাই আগে **ম্যানেজার বা HR** "
+                                "একবার দেখে নেবেন, তারপর ছুটি চূড়ান্ত হবে।"
                             ),
                             "rules_applied": ["LEAVE_LONG_SICK_NO_DOC_ROUTE_MANAGER"],
                             "route_to": "MANAGER",
@@ -245,9 +258,8 @@ class DecisionEngine:
                     return {
                         "outcome": "NEEDS_CLARIFICATION",
                         "reason": (
-                            "**Supporting document missing:** upload a certificate / prescription / "
-                            "doctor's note via attachment, paste legible details, "
-                            "**or call HR** if unsure."
+                            "এই ছুটির জন্য সাধারণত **ডাক্তারের চিট বা প্রেসক্রিপশন** লাগে। "
+                            "ফাইল দিন বা লেখা পেস্ট করুন; দরকার হলে HR-এ ফোন করুন।"
                         ),
                         "rules_applied": ["LEAVE_LONG_SICK_DOC_REQUIRED"],
                     }
@@ -259,22 +271,23 @@ class DecisionEngine:
                 return {
                     "outcome": "PENDING_APPROVAL",
                     "reason": (
-                        "**Leave without pay requires manager / HR clearance** before payroll can treat it correctly. "
-                        "Your submission was logged for supervisor review."
+                        "বেতন ছাড়া ছুটি — অফিসের নিয়ম অনুযায়ী আগে **ম্যানেজার বা HR** "
+                        "একবার দেখে নেবেন। আপনার আবেদন জমা হয়েছে, অনুমোদনের জন্য অপেক্ষা করুন।"
                     ),
                     "rules_applied": ["LEAVE_LWOP_ROUTE_MANAGER"],
                     "route_to": "MANAGER",
                 }
 
             if balance + 1e-9 >= requested:
+                day_word = "হাফ দিন" if "half" in scope else "পুরো দিন"
                 summary = (
-                    f"Paid leave validated: **~{requested:g} ledger day(s)**, dates **"
-                    f"{str(start)}..{str(end or start)}**, **{'half' if 'half' in scope else 'full'}** "
-                    "day window per your answers."
+                    f"আপনার দেওয়া তথ্য অনুযায়ী প্রায় **{requested:g}** দিনের মতো ছুটি "
+                    f"({day_word}), তারিখ **{str(start)}** থেকে **{str(end or start)}**। "
+                    f"আপনার ব্যালান্সে প্রায় **{balance:g}** দিন আছে — যথেষ্ট।"
                 )
                 return {
                     "outcome": "APPROVED",
-                    "reason": summary + " Enough balance under current totals.",
+                    "reason": summary,
                     "rules_applied": ["LEAVE_BALANCE_SUFFICIENT", "LEAVE_PAYLOAD_COMPLETE"],
                 }
 
@@ -282,11 +295,9 @@ class DecisionEngine:
             return {
                 "outcome": "PENDING_APPROVAL",
                 "reason": (
-                    f"**Insufficient paid leave:** you requested **~{requested:g} ledger day(s)** "
-                    f"but only **{balance:g}** day(s) remain. Please **coordinate with HR or your manager** "
-                    "to convert part of this leave to LWOP, adjust dates, "
-                    "**or approve an exception**."
-                    f"\nEstimated shortfall: **~{short_by:g}** day(s)."
+                    f"বেতনসহ ছুটির জন্য প্রায় **{requested:g}** দিন লাগছে, কিন্তু ব্যালান্সে "
+                    f"প্রায় **{balance:g}** দিন আছে — প্রায় **{short_by:g}** দিন কম। "
+                    "তারিখ একটু কমান, অথবা অংশ বেতন ছাড়া করুন, অথবা HR/ম্যানেজারের সাথে কথা বলুন।"
                 ),
                 "rules_applied": ["LEAVE_PAID_UNDERBALANCE_ROUTE_MANAGER"],
                 "route_to": "HR",

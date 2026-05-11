@@ -221,6 +221,7 @@ class DecisionView(APIView):
 
         from chat.constants import (
             INTENT_EXPENSE_CLAIM,
+            INTENT_EXPENSE_DAY_SUMMARY,
             INTENT_LEAVE_BALANCE,
             INTENT_LEAVE_REQUEST,
             INTENT_WFH_REQUEST,
@@ -234,6 +235,11 @@ class DecisionView(APIView):
                 message="", hints=entities, today=date.today()
             )
             crm_context.update(crm.get_expense_day_approved_total(emp, inc_iso))
+        if intent == INTENT_EXPENSE_DAY_SUMMARY:
+            inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
+                message="", hints=entities, today=date.today()
+            )
+            crm_context.update(crm.get_expense_day_breakdown(emp, inc_iso))
         eng = DecisionEngine()
         decision = eng.evaluate(
             intent=intent, entities=entities, crm_context=crm_context

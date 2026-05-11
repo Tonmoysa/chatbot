@@ -1,6 +1,8 @@
 from typing import Any
 
 from chat.constants import (
+    EXPENSE_DAY_CAP_BDT,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
@@ -23,6 +25,38 @@ def build_user_message(
     """
     outcome = (decision or {}).get("outcome", "")
     reason = (decision or {}).get("reason", "")
+
+    if intent == INTENT_EXPENSE_DAY_SUMMARY:
+        entries = list(crm_payload.get("expense_day_entries") or [])
+        target = str(crm_payload.get("expense_incurred_date") or "").strip()
+        logged = crm_payload.get("expense_day_logged_total")
+        if logged is None:
+            logged = sum(float(e.get("amount") or 0) for e in entries)
+        else:
+            logged = float(logged)
+        approved = float(crm_payload.get("expense_day_approved_total") or 0)
+        cap = float(crm_payload.get("expense_daily_cap_bdt") or EXPENSE_DAY_CAP_BDT)
+        remaining = max(0.0, cap - approved)
+        lines: list[str] = []
+        for e in entries:
+            rid = str(e.get("request_id") or "")
+            amt = float(e.get("amount") or 0)
+            oc = str(e.get("outcome") or "")
+            st = str(e.get("status") or "")
+            tail = f" ({st})" if st else ""
+            lines.append(f"• {rid} — {amt:g} BDT — {oc}{tail}")
+        head = (
+            f"For **{target or 'that day'}** you have **{logged:g}** BDT logged across "
+            f"**{len(entries)}** expense line(s).\n"
+            f"Your **{cap:g}** BDT same-day auto-approve budget already has **{approved:g}** BDT used — "
+            f"**{remaining:g}** BDT remaining."
+        )
+        if lines:
+            return (head + "\n\nLines:\n" + "\n".join(lines), "success")
+        return (
+            head + "\n\nNo individual lines were returned; totals above are from the HR system.",
+            "success",
+        )
 
     if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
         st = crm_payload.get("status")
@@ -89,27 +123,21 @@ def build_user_message(
     if outcome == "APPROVED":
         rid = crm_payload.get("request_id", "")
         if crm_payload.get("_deduped") and intent == INTENT_LEAVE_REQUEST:
-            msg = (
-                "You already submitted this leave request earlier. "
-                "No new request was created."
-            )
+            msg = "এই ছুটির আবেদন আগেই জমা হয়েছে — নতুন আবেদন আর তৈরি হয়নি।"
         else:
-            msg = "Your leave request is approved under current balance rules."
+            msg = "আপনার ছুটির আবেদন অনুমোদন হয়েছে। ব্যালান্স ঠিক আছে।"
         if rid:
-            msg += f" Reference: {rid}."
+            msg += f" ট্র্যাকিং নম্বর: {rid}।"
         return (msg, "success")
 
     if outcome == "REJECTED":
         rid = crm_payload.get("request_id", "")
         if crm_payload.get("_deduped") and intent == INTENT_LEAVE_REQUEST:
-            msg = (
-                "You already submitted this leave request earlier. "
-                "No new request was created."
-            )
+            msg = "এই ছুটির আবেদন আগেই জমা হয়েছে — নতুন আবেদন আর তৈরি হয়নি।"
         else:
             msg = reason or "The request could not be approved."
         if rid:
-            msg += f" Reference: {rid}."
+            msg += f" ট্র্যাকিং নম্বর: {rid}।"
         return (msg, "rejected")
 
     if outcome in ("PENDING_APPROVAL", "PENDING_REVIEW"):
@@ -119,15 +147,12 @@ def build_user_message(
             msg = "You already submitted this request earlier. No new request was created."
         else:
             msg = reason or "Your request is submitted for review."
-        if route_to == "HR" and "HR" not in msg:
-            msg = msg.rstrip(".") + " It has been sent to HR for review."
-        if route_to == "MANAGER" and "manager" not in msg.lower():
-            msg = (
-                msg.rstrip(".")
-                + " Please coordinate with your **manager / HR team**—the ticket is awaiting formal approval."
-            )
+        if route_to == "HR" and "HR" not in msg and "এইচআর" not in msg:
+            msg = msg.rstrip("।.") + "। HR টিম একবার দেখবে।"
+        if route_to == "MANAGER" and "manager" not in msg.lower() and "ম্যানেজার" not in msg:
+            msg = msg.rstrip("।.") + "। ম্যানেজার বা HR-এর সাথে একবার কথা বলে নিন।"
         if rid:
-            msg += f" Reference: {rid}."
+            msg += f" ট্র্যাকিং নম্বর: {rid}।"
         return (msg, "pending")
 
     return ("Request processed.", "success")

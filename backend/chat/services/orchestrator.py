@@ -7,6 +7,7 @@ from chat.constants import (
     INTENT_APPROVAL_ESCALATION,
     INTENT_ATTENDANCE_CORRECTION,
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
@@ -74,10 +75,11 @@ class ChatOrchestrator:
             )
         )
         if is_leave_collecting(wf_state):
+            # Do not cancel on EXPENSE_STATUS / REQUEST_STATUS alone — short replies like
+            # "paid" are often misclassified and would wipe the leave draft.
             hard_switch = intent in (
                 INTENT_EXPENSE_CLAIM,
-                INTENT_EXPENSE_STATUS,
-                INTENT_REQUEST_STATUS,
+                INTENT_EXPENSE_DAY_SUMMARY,
                 INTENT_WFH_REQUEST,
                 INTENT_ATTENDANCE_CORRECTION,
                 INTENT_APPROVAL_ESCALATION,
@@ -167,11 +169,20 @@ class ChatOrchestrator:
                 day_tot = self.crm.get_expense_day_approved_total(emp_ctx, inc_iso)
                 crm_context.update(day_tot)
 
+            if intent == INTENT_EXPENSE_DAY_SUMMARY:
+                emp_ctx = employee_id or session.employee_id
+                inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
+                    message=message, hints=entities, today=date.today()
+                )
+                breakdown = self.crm.get_expense_day_breakdown(emp_ctx, inc_iso)
+                crm_payload.update(breakdown)
+                crm_context.update(breakdown)
+
             if leave_collecting_blocked:
                 decision = {
                     "outcome": "NEEDS_CLARIFICATION",
                     "reason": lv_pack.get("question")
-                    or "Please answer the questions so I can continue your leave request.",
+                    or "আর একটু জানতে হবে — উপরের প্রশ্নের উত্তরটা নিচে লিখে পাঠান।",
                     "rules_applied": ["LEAVE_WORKFLOW_COLLECTING"],
                 }
             else:
@@ -287,9 +298,9 @@ class ChatOrchestrator:
         # Leave flow follow-up (legacy copy + wizard copy)
         if (
             "Leave dates or duration required" in last_assistant
+            or "ছুটি ফর্ম" in last_assistant
             or "**Step " in last_assistant
             or "Step 3 of 5" in last_assistant
-            or "**Step 3 of 5" in last_assistant
         ):
             if len(msg) <= 180 or is_dateish:
                 return INTENT_LEAVE_REQUEST
@@ -339,6 +350,38 @@ class ChatOrchestrator:
         If the user repeats the same request in the same session (common with chat UIs),
         do not create a new CRM record; return the previously created request id.
         """
+        if intent == INTENT_LEAVE_REQUEST:
+            if decision.get("outcome") not in (
+                "APPROVED",
+                "REJECTED",
+                "PENDING_APPROVAL",
+            ):
+                return None
+            cur = self._leave_booking_signature(entities)
+            fp = (getattr(session, "workflow_state", None) or {}).get(
+                "last_leave_fingerprint"
+            ) or {}
+            stored = fp.get("sig")
+            if stored and len(stored) == 5:
+                prev = (
+                    str(stored[0]),
+                    str(stored[1]),
+                    float(stored[2]),
+                    str(stored[3]),
+                    str(stored[4]),
+                )
+                rid = str(fp.get("request_id") or "")
+                if (
+                    rid
+                    and cur[0] == prev[0]
+                    and cur[1] == prev[1]
+                    and abs(cur[2] - prev[2]) < 1e-6
+                    and cur[3] == prev[3]
+                    and cur[4] == prev[4]
+                ):
+                    return rid
+            return None
+
         last_ref, prior_user = self._last_reference_and_prior_user(context_lines)
         if not last_ref or not prior_user:
             return None
@@ -371,38 +414,6 @@ class ChatOrchestrator:
                 return None
             if abs(float(prev_amount) - float(amount_val)) <= 0.01:
                 return last_ref
-            return None
-
-        if intent == INTENT_LEAVE_REQUEST:
-            if decision.get("outcome") not in (
-                "APPROVED",
-                "REJECTED",
-                "PENDING_APPROVAL",
-            ):
-                return None
-            cur = self._leave_booking_signature(entities)
-            fp = (getattr(session, "workflow_state", None) or {}).get(
-                "last_leave_fingerprint"
-            ) or {}
-            stored = fp.get("sig")
-            if stored and len(stored) == 5:
-                prev = (
-                    str(stored[0]),
-                    str(stored[1]),
-                    float(stored[2]),
-                    str(stored[3]),
-                    str(stored[4]),
-                )
-                rid = str(fp.get("request_id") or "")
-                if (
-                    rid
-                    and cur[0] == prev[0]
-                    and cur[1] == prev[1]
-                    and abs(cur[2] - prev[2]) < 1e-6
-                    and cur[3] == prev[3]
-                    and cur[4] == prev[4]
-                ):
-                    return rid
             return None
 
         return None

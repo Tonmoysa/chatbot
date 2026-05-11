@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from django.conf import settings
 
+from chat.constants import EXPENSE_DAY_CAP_BDT
 from chat.services.crm.base import CRMAdapter, CRMError
 
 logger = logging.getLogger("hr_chatbot")
@@ -89,6 +90,32 @@ class RealCRMAdapter(CRMAdapter):
                 incurred_date_iso,
             )
             return {"expense_day_approved_total": 0.0}
+
+    def get_expense_day_breakdown(
+        self, employee_id: str, incurred_date_iso: str
+    ) -> dict[str, Any]:
+        q = (incurred_date_iso or "").strip().split("T")[0]
+        try:
+            return self._request(
+                "GET",
+                f"/employees/{employee_id}/expense-day-breakdown/?date={q}",
+            )
+        except Exception:
+            logger.debug(
+                "expense_day_breakdown_unavailable employee=%s date=%s",
+                employee_id,
+                incurred_date_iso,
+            )
+            base = self.get_expense_day_approved_total(employee_id, incurred_date_iso)
+            return {
+                **base,
+                "expense_incurred_date": q,
+                "expense_day_logged_total": float(
+                    base.get("expense_day_approved_total") or 0
+                ),
+                "expense_daily_cap_bdt": float(EXPENSE_DAY_CAP_BDT),
+                "expense_day_entries": [],
+            }
 
     def create_request(
         self,

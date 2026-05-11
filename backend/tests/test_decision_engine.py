@@ -5,9 +5,11 @@ import pytest
 from chat.constants import (
     INTENT_ATTENDANCE_CORRECTION,
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_LEAVE_REQUEST,
 )
 from chat.services.decision_engine import DecisionEngine
+from chat.services.intent_detector import IntentDetector
 from chat.services.leave_days import compute_requested_leave_days
 from chat.services.orchestrator import ChatOrchestrator
 
@@ -215,8 +217,74 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
         )
         sid = last2["_session_id"]
 
-    assert "already submitted" in (last2["response"]["message"] or "").lower()
+    assert "আগেই জমা" in (last2["response"]["message"] or "")
     assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == bal_after_first
+
+
+def test_expense_day_summary_intent_rules(monkeypatch):
+    det = IntentDetector()
+    monkeypatch.setattr(det._llm, "is_configured", lambda: False)
+    r = det.detect(
+        "Today I forgot how much I spent — can you show a summary of my expenses?",
+        "tid-sum-intent",
+    )
+    assert r["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+
+
+def test_expense_day_summary_banglish_total_cost(monkeypatch):
+    det = IntentDetector()
+    monkeypatch.setattr(det._llm, "is_configured", lambda: False)
+    r = det.detect("amar total cost koto hoyeche", "tid-bn-total")
+    assert r["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+
+
+@pytest.mark.django_db
+def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
+    fixed = dt.date(2026, 6, 15)
+
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    for mod in (
+        "chat.services.entity_extractor.date",
+        "chat.services.expense_incurred_date.date",
+        "chat.services.decision_engine.date",
+        "chat.services.orchestrator.date",
+    ):
+        monkeypatch.setattr(mod, FixedDate)
+
+    emp = "expense-summary-pytest-unique"
+    orch = ChatOrchestrator()
+    sid = None
+    for i, msg in enumerate(
+        (
+            "amar ajke 50 taka tea",
+            "amar ajke 120 taka lunch",
+        )
+    ):
+        r = orch.run_chat(
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"es-claim-{i}",
+        )
+        assert r["decision"]["outcome"] == "AUTO_APPROVED", r
+        sid = r["_session_id"]
+
+    summ = orch.run_chat(
+        message="Today I forgot how much I spent — show me a summary.",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="es-sum",
+    )
+    assert summ["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+    assert summ["decision"]["outcome"] == "INFORMATIONAL"
+    body = summ["response"]["message"] or ""
+    assert "170" in body
+    assert "130" in body
+    assert "MOCK-" in body
 
 
 def test_compute_requested_leave_days_range_and_single_day():

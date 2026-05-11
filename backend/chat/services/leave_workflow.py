@@ -18,51 +18,47 @@ DAY_SCOPE_HALF = "half"
 # Sick/medical leaves over this inclusive calendar span generally need proof.
 _SICK_DOCUMENT_MIN_SPAN_DAYS = 3
 
+# Same footer on every prompt so the orchestrator can spot leave follow-ups.
+_WIZ_FOOTER = "\n\n_(ছুটি ফর্ম — নিচে একটা করে উত্তর দিন)_"
+
 _MESSAGES: dict[str, str] = {
     "leave_payment_category": (
-        "**Step 1 of 5 — Leave type**\n\n"
-        "Will you take **paid leave** (counts against your leave balance), or "
-        "**leave without pay (LWOP / unpaid)**?\n\n"
-        "Reply with **paid**, **annual**, **PTO** for balance-backed leave — or "
-        "**LWOP**, **unpaid**, or **without pay** for unpaid leave."
+        "প্রথম প্রশ্ন (১/৫) — এই ছুটিটা **বেতনসহ** চান, নাকি **বেতন ছাড়া**?\n\n"
+        "• বেতনসহ = আপনার ছুটির ব্যালান্স থেকে কাটবে (লিখতে পারেন: বেতনসহ / paid)\n"
+        "• বেতন ছাড়া = বেতন কাটবে না; সাধারণত আগে ম্যানেজার বা HR-এর অনুমোদন লাগে (লিখতে পারেন: বেতন ছাড়া / unpaid)"
+        + _WIZ_FOOTER
     ),
     "day_scope": (
-        "**Step 2 of 5 — Duration per day**\n\n"
-        "Is each day **full day** leave or **half day**?\n\n"
-        "Reply with **full**, **whole day**, or **half**, **half day**."
+        "দ্বিতীয় প্রশ্ন (২/৫) — প্রতিদিন **পুরো দিন** নাকি **হাফ দিন** ছুটি?\n\n"
+        "উত্তর: পুরো দিন / হাফ দিন (ইংরেজিতে full বা half লিখলেও চলবে)"
+        + _WIZ_FOOTER
     ),
     "leave_dates": (
-        "**Step 3 of 5 — Dates**\n\n"
-        "What are the **start date** and **end date**? "
-        "For a single day you can reply with just one date (for example tomorrow or "
-        "**YYYY-MM-DD**).\n\n"
-        "**From–to** example: *2026-05-12 to 2026-05-14*"
+        "তৃতীয় প্রশ্ন (৩/৫) — **কোন তারিখ(গুলো)** ছুটি চান?\n\n"
+        "• এক দিন হলে: কাল / আগামীকাল / বা তারিখ (যেমন 2026-05-12)\n"
+        "• একাধিক দিন হলে: 2026-05-12 থেকে 2026-05-14 — এভাবে লিখুন"
+        + _WIZ_FOOTER
     ),
     "reason": (
-        "**Step 4 of 5 — Reason**\n\n"
-        "Briefly explain the **reason** for your leave "
-        "(family matter, illness, planned leave, travel, etc.)."
+        "চতুর্থ প্রশ্ন (৪/৫) — **কেন** ছুটি লাগছে? এক লাইনেই হবে।\n\n"
+        "উদাহরণ: পরিবারের কাজ, অসুস্থ, ভ্রমণ…"
+        + _WIZ_FOOTER
     ),
     "supporting_document": (
-        "**Step 5 of 5 — Supporting document**\n\n"
-        "For longer **sick / medical** absences we need a supporting document "
-        "(doctor's note / medical certificate).\n\n"
-        "Please **upload or attach** the document via the attachment option "
-        "**or paste** any text you already have "
-        "**or** type **skip** if you truly cannot attach now (your request "
-        "may still be routed to HR / your manager)."
+        "পঞ্চম প্রশ্ন (৫/৫) — এই ধরনের ছুটিতে সাধারণত **ডাক্তারের চিট বা কাগজপত্র** লাগে।\n\n"
+        "ফাইল আপলোড করুন, অথবা লেখাটা এখানে পেস্ট করুন। এখন দিতে পারছেন না? শুধু **skip** লিখুন — তখন ম্যানেজার/HR দেখে নেবে।"
+        + _WIZ_FOOTER
     ),
 }
 
 _DATE_VALIDATION_MESSAGES: dict[str, str] = {
     "BAD_RANGE": (
-        "**Dates look invalid:** the **end date** must be **on or after** the "
-        "**start date**. Please reply with corrected dates."
+        "তারিখটা একটু গুলিয়ে গেছে — **শেষ তারিখ** যেন **প্রথম তারিখের আগে** না হয়। আবার ঠিক করে লিখুন।"
+        + _WIZ_FOOTER
     ),
     "IN_PAST": (
-        "**Dates look invalid:** leave cannot begin **before today**. "
-        "Please give **today's date or a future** start date "
-        "**or talk to HR** if you need a back-dated correction."
+        "আজকের **আগের** তারিখে ছুটি দেওয়া যাবে না। আজ বা পরের দিন দিন, অথবা পুরনো তারিখ লাগলে HR-এর সাথে কথা বলুন।"
+        + _WIZ_FOOTER
     ),
 }
 

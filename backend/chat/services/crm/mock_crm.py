@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from chat.constants import EXPENSE_DAY_CAP_BDT
 from chat.services.crm.base import CRMAdapter
 from chat.services.leave_days import compute_requested_leave_days
 
@@ -61,6 +62,49 @@ class MockCRMAdapter(CRMAdapter):
             except (TypeError, ValueError):
                 pass
         return {"expense_day_approved_total": float(total)}
+
+    def get_expense_day_breakdown(
+        self, employee_id: str, incurred_date_iso: str
+    ) -> dict[str, Any]:
+        emp = (employee_id or "").strip() or "demo-employee"
+        target = (incurred_date_iso or "").strip().split("T")[0]
+        entries: list[dict[str, Any]] = []
+        logged_total = 0.0
+        for rid, rec in sorted(
+            self._requests.items(),
+            key=lambda kv: str((kv[1] or {}).get("created_at") or ""),
+        ):
+            if rec.get("employee_id") != emp or rec.get("intent") != "EXPENSE_CLAIM":
+                continue
+            ent = rec.get("entities") or {}
+            inc = str(ent.get("expense_incurred_date") or ent.get("date") or "").split("T")[0]
+            if not inc or inc != target:
+                continue
+            try:
+                amt = float(ent.get("amount") or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            dec = rec.get("decision") or {}
+            outcome = str(dec.get("outcome") or "")
+            entries.append(
+                {
+                    "request_id": rid,
+                    "amount": amt,
+                    "outcome": outcome,
+                    "status": rec.get("status") or "",
+                }
+            )
+            logged_total += amt
+        approved = float(
+            self.get_expense_day_approved_total(emp, target).get("expense_day_approved_total") or 0
+        )
+        return {
+            "expense_incurred_date": target,
+            "expense_day_approved_total": approved,
+            "expense_day_logged_total": float(logged_total),
+            "expense_daily_cap_bdt": float(EXPENSE_DAY_CAP_BDT),
+            "expense_day_entries": entries,
+        }
 
     def _default_balance(self, employee_id: str) -> float:
         # Convenience knobs for demos
