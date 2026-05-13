@@ -48,6 +48,55 @@ class LLMClient:
             )
         return None
 
+    def chat_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        trace_id: str,
+        max_tokens: int | None = None,
+    ) -> str | None:
+        """Plain-text completion (no JSON shaping). Used for translation, etc.
+
+        ``max_tokens`` is forwarded to the provider when set — important for
+        long translations where the default cap would truncate the answer.
+        """
+        if not self.is_configured():
+            return None
+        url = f"{self.base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+        }
+        if max_tokens and max_tokens > 0:
+            body["max_tokens"] = int(max_tokens)
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                r = client.post(url, headers=headers, json=body)
+                r.raise_for_status()
+                data = r.json()
+            return (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            ) or None
+        except Exception as exc:
+            logger.warning(
+                "llm_http_error trace_id=%s err=%s mode=text",
+                trace_id,
+                type(exc).__name__,
+            )
+            return None
+
     def _complete(
         self, system_prompt: str, user_prompt: str, trace_id: str, attempt: int
     ) -> str | None:

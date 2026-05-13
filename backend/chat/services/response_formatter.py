@@ -99,6 +99,12 @@ def build_user_message(
 
     if outcome == "INFORMATIONAL":
         if intent == INTENT_HR_POLICY:
+            rules_answer = (crm_payload.get("rules_answer") or "").strip()
+            if rules_answer:
+                # Footer (hint to the user) is appended by the orchestrator
+                # *after* any language translation, so the hint always matches
+                # the reply language.
+                return (rules_answer, "success")
             topic = entities.get("policy_topic") or "general HR policy"
             return (
                 f"Regarding {topic}: refer to the official employee handbook. "

@@ -16,6 +16,30 @@ from chat.constants import (
     INTENT_WFH_REQUEST,
 )
 from chat.services.llm_client import LLMClient
+from chat.services.rules_handbook import is_rules_query
+
+
+def _strong_hr_policy(message: str) -> bool:
+    """User is asking about company rules/regulations/policy/handbook."""
+    low = (message or "").lower()
+    raw = message or ""
+    if re.search(
+        r"\b(rules?\s+(?:and|&)\s+regulations?|handbook|employee\s+handbook|"
+        r"company\s+(?:rules?|regulations?|policy|policies)|"
+        r"hr\s+(?:rule|rules|policy|policies)|guideline|guidelines)\b",
+        low,
+    ):
+        return True
+    if re.search(r"\b(rule|rules|regulation|regulations|policy|policies)\b", low):
+        return True
+    if re.search(r"(সব\s*নিয়ম|সকল\s*নিয়ম|নিয়ম|বিধি|নীতি|হ্যান্ডবুক|রুলস|পলিসি)", raw):
+        return True
+    if re.search(
+        r"\b(shob|sob|sokol)?\s*(niyom|niyam|bidhi|niti|rules?|policy|policies|handbook)\b",
+        low,
+    ):
+        return True
+    return False
 
 
 def _strong_expense_claim(message: str) -> bool:
@@ -101,10 +125,238 @@ Definitions:
 - EXPENSE_STATUS: track expense/reimbursement status
 - ATTENDANCE_CORRECTION: fix clock-in/out, attendance mistake
 - REQUEST_STATUS: generic status of leave/wfh/etc
-- HR_POLICY: questions about company HR rules
+- HR_POLICY: questions about company HR rules / policies / regulations / handbook
 - APPROVAL_ESCALATION: escalate pending approval
-- UNKNOWN: none of the above
+- UNKNOWN: greetings, small talk, jokes, thanks, identity questions, off-topic chit-chat, or anything NOT clearly an HR action. When in doubt and the message has no HR keywords, choose UNKNOWN.
+
+Classification examples (follow exactly):
+- "hi" / "hello" / "hey" → UNKNOWN
+- "kemon acho" / "how are you" / "ki khobor" → UNKNOWN
+- "ki re ki koris" / "what's up" → UNKNOWN
+- "amake ekta jokes bolo" / "tell me a joke" → UNKNOWN
+- "thanks" / "dhonnobad" / "ok" → UNKNOWN
+- "tumi ke" / "who are you" / "what's your name" → UNKNOWN
+- "show me all rules and regulations" / "company rules" → HR_POLICY
+- "leave policy ki" / "what's the leave policy" → HR_POLICY
+- "kotodin chuti ache" / "how many leave days do I have" → LEAVE_BALANCE
+- "kalke chuti lagbe" / "I want leave tomorrow" → LEAVE_REQUEST
+- "350 taka cost hoyeche" / "submit 200 BDT expense" → EXPENSE_CLAIM
+- "ajke koto khoroch hoyeche" → EXPENSE_DAY_SUMMARY
 """
+
+
+_HR_SIGNAL_RE = re.compile(
+    r"\b("
+    r"leave|chuti|chhuti|holiday|pto|vacation|time\s*off|"
+    r"expense|reimburs|claim|cost|kharcha|khoroch|taka|money|"
+    r"salary|beton|maine|payroll|overtime|"
+    r"attendance|clock|punch|timesheet|"
+    r"policy|policies|rule|rules|regulation|regulations|handbook|guideline|"
+    r"wfh|remote|work\s+from\s+home|"
+    r"status|track|request|ticket|reference|ref|"
+    r"manager|supervisor|hr|approval|escalat|"
+    r"sick|maternity|paternity|emergency|"
+    r"dress\s*code|ppe|safety|"
+    r"document|receipt|invoice|bill|"
+    r"crm|erp|kpi"
+    r")\b",
+    re.I,
+)
+_HR_SIGNAL_BN_RE = re.compile(
+    r"(ছুটি|খরচ|বেতন|নিয়ম|বিধি|পলিসি|হ্যান্ডবুক|উপস্থিতি|"
+    r"টাকা|রিইম্বার্স|মেডিকেল|অসুস্থ|অনুমোদন|ম্যানেজার)"
+)
+_CHITCHAT_RE = re.compile(
+    r"\b("
+    # English greetings
+    r"hi|hello|hey|hola|salam|salaam|asalam|namaste|sup|yo|"
+    # Banglish vocatives / greetings
+    r"oi|oy|oye|ay|ei|hai|halo|hoy|are|abe|"
+    r"good\s*(morning|afternoon|evening|night)|"
+    # Gratitude / farewell
+    r"thanks?|thx|ty|thank\s*you|dhonnobad|dhonnyobad|dhonnabaad|"
+    r"bye|goodbye|tata|ttyl|cya|see\s*you|"
+    # Tiny affirmations / negations
+    r"yes|yeah|yep|no|nope|ok|okay|sure|fine|alright|hmm+|"
+    # Banglish "how are you" variants
+    r"kemon\s*ach[oe]n?|emon\s*ach[oe]|kemon\s*kemon|kmn\s*acho|"
+    # Banglish "what's up / what are you doing"
+    r"ki\s*khobor|ki\s*obostha|ki\s*koris|ki\s*koros|ki\s*korchish|"
+    r"ki\s*kor[oae]|ki\s*korcho|ki\s*korch[ie]n|ki\s*korben|"
+    r"ki\s*re|ki\s*naam|tumi\s*ke|tomar\s*naam|ki\s*bolb[oe]|"
+    # English chit-chat (including typos like ypou / r u)
+    r"what'?s\s*up|how\s*ar[ey]?\s*y?o?u?|how\s*r\s*u|how'?s\s*it\s*going|how'?s\s*things|"
+    r"who\s*are\s*you|what'?s\s*your\s*name|"
+    # Jokes / humor
+    r"joke|jokes|jok|funny|"
+    # Banglish affirmations / mood
+    r"thik\s*ach[ei]|valo|bhalo|achi|acho|"
+    r"lol|haha|hehe"
+    r")\b",
+    re.I,
+)
+_CHITCHAT_BN_RE = re.compile(
+    r"(কেমন\s*আছ[ো]?|কেমন\s*আছেন|কী\s*খবর|কি\s*খবর|"
+    r"হ্যালো|হাই|ওই|এই|"
+    r"ধন্যবাদ|শুভ\s*সকাল|শুভ\s*রাত্রি|"
+    r"ভালো\s*আছি|ভালো|"
+    r"কী\s*কর|কি\s*কর|তুমি\s*কে|তোমার\s*নাম)"
+)
+
+
+# ---------------------------------------------------------------------------
+# Wizard-answer signals.
+#
+# When a leave-wizard is mid-collection, we need to tell apart real wizard
+# answers (which advance the form) from side-talk (which should NOT be
+# fed into the wizard). For each step we know roughly what tokens count
+# as a plausible answer; if none are present, the message is almost
+# certainly side-talk and we route it to the conversational fallback.
+# Step 4 (reason) and step 5 (document) accept free text, so they fall
+# through to the wizard by default.
+# ---------------------------------------------------------------------------
+_WIZARD_PAYMENT_RE = re.compile(
+    r"\b(paid|unpaid|lwop|pto|annual|casual|"
+    r"with\s*pay|without\s*pay|on\s*pay|off\s*pay|bezeton|bezaton)\b",
+    re.I,
+)
+_WIZARD_PAYMENT_BN_RE = re.compile(
+    r"(বেতনসহ|বেতন\s*ছাড়া|বিনা\s*বেতন|বেতন\s*সহ)"
+)
+_WIZARD_DAYSCOPE_RE = re.compile(
+    r"\b(full|half|fullday|halfday|whole\s*day|half\s*day|semi)\b",
+    re.I,
+)
+_WIZARD_DAYSCOPE_BN_RE = re.compile(
+    r"(পুরো\s*দিন|হাফ\s*দিন|অর্ধ\s*দিন|সম্পূর্ণ\s*দিন|অর্ধ)"
+)
+_WIZARD_DATES_RE = re.compile(
+    r"\b(today|tomorrow|yesterday|tonight|tonite|"
+    r"next\s*(week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"this\s*(week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|"
+    r"kal|ajke|aj|aaj|porshu|aagamikal|agamikal|gotokal)\b",
+    re.I,
+)
+_WIZARD_DATES_BN_RE = re.compile(
+    r"(আজ|কাল|আগামীকাল|গতকাল|পরশু|আগামী|গত|"
+    r"জানুয়ারি|ফেব্রুয়ারি|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|সেপ্টেম্বর|অক্টোবর|নভেম্বর|ডিসেম্বর)"
+)
+
+
+# Pure greetings / explicit cancel signals: when the user opens a new line of
+# conversation we should NOT keep dragging the old wizard along. These match
+# only stand-alone short messages so we don't dismiss the form just because
+# the user said "hi i need leave".
+_FRESH_START_GREETING_RE = re.compile(
+    r"^\s*("
+    r"hi|hello|hey|hola|sup|yo|salam|salaam|asalam|namaste|"
+    r"oi|oy|oye|ay|ei|hai|halo|hoy|"
+    r"good\s*(morning|afternoon|evening|night)|"
+    r"হ্যালো|হাই|ওই|এই|নমস্কার|আসসালামু\s*আলাইকুম"
+    r")\s*[!.?,…]*\s*$",
+    re.I,
+)
+_CANCEL_FORM_RE = re.compile(
+    r"\b("
+    r"cancel|stop|exit|quit|abort|reset|restart|nevermind|never\s*mind|"
+    r"forget\s*it|forget\s*this|drop\s*it|"
+    r"cancel\s*(the\s*)?(form|wizard|leave)|skip\s*(the\s*)?(form|wizard)|"
+    r"bad\s*koro|bad\s*korbo|baad\s*koro|baad\s*den|baad\s*din|"
+    r"chai\s*na|chaina|lagbe\s*na|lagbena|lagbe\s*nah|"
+    r"ekhon\s*na|ekhon\s*tha[ck]|ekhon\s*lagbe\s*na|"
+    r"vule\s*ja[oe]|bhule\s*ja[oe]|"
+    r"form\s*cancel|form\s*bad"
+    r")\b",
+    re.I,
+)
+_CANCEL_FORM_BN_RE = re.compile(
+    r"(বাদ\s*দাও|বাদ\s*দিন|বাদ\s*দে|বাদ\s*করো|বাদ\s*কর|"
+    r"বাতিল|"
+    r"ভুলে\s*যাও|ভুলে\s*যান|"
+    r"চাই\s*না|লাগবে\s*না|লাগবেনা|দরকার\s*নেই|"
+    r"এখন\s*না|এখন\s*থাক|এখন\s*লাগবে\s*না|"
+    r"ফর্ম\s*বাতিল|ফর্ম\s*বাদ)"
+)
+
+
+def _is_fresh_start_greeting(message: str) -> bool:
+    """True when the message is just a stand-alone greeting (no follow-on)."""
+    if not message:
+        return False
+    return bool(_FRESH_START_GREETING_RE.match(message.strip()))
+
+
+def _is_cancel_form_request(message: str) -> bool:
+    """True when the user wants to drop the current wizard / form."""
+    if not message:
+        return False
+    return bool(
+        _CANCEL_FORM_RE.search(message) or _CANCEL_FORM_BN_RE.search(message)
+    )
+
+
+def _message_answers_wizard_step(message: str, step: str | None) -> bool:
+    """True if the message plausibly answers the wizard's *current* step.
+
+    Steps that accept free text (reason / supporting_document) always return
+    True so the wizard receives the message. For structured steps we check
+    for the canonical answer tokens; if none match, the message is treated
+    as side-talk by the orchestrator.
+    """
+    if not step:
+        return False
+    if step in ("reason", "supporting_document"):
+        return True
+    text = (message or "").strip()
+    if not text:
+        return False
+    if step == "leave_payment_category":
+        return bool(
+            _WIZARD_PAYMENT_RE.search(text)
+            or _WIZARD_PAYMENT_BN_RE.search(text)
+        )
+    if step == "day_scope":
+        return bool(
+            _WIZARD_DAYSCOPE_RE.search(text)
+            or _WIZARD_DAYSCOPE_BN_RE.search(text)
+        )
+    if step == "leave_dates":
+        if re.search(r"\d", text):
+            return True
+        return bool(
+            _WIZARD_DATES_RE.search(text)
+            or _WIZARD_DATES_BN_RE.search(text)
+        )
+    return True
+
+
+def _looks_like_chitchat(message: str, *, strict: bool = False) -> bool:
+    """True when the message looks like greeting / small talk and has no HR signal.
+
+    When ``strict=True``, only explicit chit-chat regex hits count. The
+    "short message" fallback is skipped so single-token wizard answers like
+    "paid", "unpaid", "yes", "annual", "full day" are NOT misread as
+    chit-chat. Use strict mode wherever a wizard is mid-collection.
+    """
+    if not message:
+        return False
+    text = message.strip()
+    if not text:
+        return False
+    if _HR_SIGNAL_RE.search(text) or _HR_SIGNAL_BN_RE.search(text):
+        return False
+    if _CHITCHAT_RE.search(text) or _CHITCHAT_BN_RE.search(text):
+        return True
+    if strict:
+        return False
+    # Very short messages (<= 4 words) with no HR signal are almost certainly
+    # chit-chat ("kotha kotha", "kichu na", "achi", etc.) — fall back to UNKNOWN
+    # rather than letting the LLM hallucinate an HR intent.
+    words = re.findall(r"\S+", text)
+    if len(words) <= 4 and not re.search(r"\d", text):
+        return True
+    return False
 
 
 class IntentDetector:
@@ -126,6 +378,20 @@ class IntentDetector:
                 "confidence": 0.99,
                 "source": "rules_override",
             }
+        # Rules / regulations / handbook queries are deterministic — never let
+        # the LLM steer them into another bucket (e.g. LEAVE_REQUEST just because
+        # the user typed "leave policy").
+        strong_hr_policy = _strong_hr_policy(message) and is_rules_query(message)
+        if strong_hr_policy:
+            return {
+                "intent": INTENT_HR_POLICY,
+                "confidence": 0.99,
+                "source": "rules_override",
+            }
+        # Casual chit-chat with no HR signal → force UNKNOWN so the orchestrator
+        # can route to the friendly conversational fallback. Without this guard
+        # the LLM tends to over-classify greetings into the closest HR bucket.
+        chitchat = _looks_like_chitchat(message)
         if self._llm.is_configured():
             out = self._llm.chat_json(
                 system_prompt=INTENT_SYSTEM,
@@ -146,11 +412,19 @@ class IntentDetector:
                             "confidence": 0.99,
                             "source": "rules_override",
                         }
+                    if chitchat and intent != INTENT_UNKNOWN:
+                        return {
+                            "intent": INTENT_UNKNOWN,
+                            "confidence": 0.9,
+                            "source": "rules_override_chitchat",
+                        }
                     return {
                         "intent": intent,
                         "confidence": float(out.get("confidence") or 0),
                         "source": "llm",
                     }
+        if chitchat:
+            return {"intent": INTENT_UNKNOWN, "confidence": 0.9, "source": "rules_chitchat"}
         return {"intent": self._rule_intent(text, message), "confidence": 0.6, "source": "rules"}
 
     def _rule_intent(self, text: str, raw_message: str = "") -> str:
@@ -188,7 +462,11 @@ class IntentDetector:
             r"\b(request|application|ticket)\b", text
         ):
             return INTENT_REQUEST_STATUS
-        if re.search(r"\b(policy|handbook|hr rule|guideline)\b", text):
+        if re.search(
+            r"\b(rule|rules|regulation|regulations|policy|policies|handbook|"
+            r"hr\s*rule|guideline|guidelines)\b",
+            text,
+        ):
             return INTENT_HR_POLICY
         if re.search(r"\b(escalat|escalate)\b", text.lower()):
             return INTENT_APPROVAL_ESCALATION

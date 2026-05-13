@@ -73,6 +73,33 @@ def is_leave_collecting(workflow_state: dict[str, Any] | None) -> bool:
     return bool(lr.get("active"))
 
 
+def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
+    """
+    Return the wizard's current pending prompt without mutating state.
+
+    Used by the orchestrator to resurface the in-progress wizard step after
+    answering an out-of-band query (e.g. a balance probe) while the wizard
+    is still active — so the user always knows where to pick back up.
+    """
+    if not is_leave_collecting(workflow_state):
+        return None
+    block = (workflow_state or {}).get("leave_request") or {}
+    draft = dict(block.get("draft") or {})
+    step = _first_missing_step(draft)
+    if not step:
+        return None
+    return _question_for_step(step, date_error=None)
+
+
+def pending_step(workflow_state: dict[str, Any] | None) -> str | None:
+    """Return the name of the wizard's current pending step (or None)."""
+    if not is_leave_collecting(workflow_state):
+        return None
+    block = (workflow_state or {}).get("leave_request") or {}
+    draft = dict(block.get("draft") or {})
+    return _first_missing_step(draft)
+
+
 def deactivate_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
     wf = clone_workflow_state(workflow_state)
     if "leave_request" in wf:
