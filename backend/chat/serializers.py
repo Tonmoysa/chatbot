@@ -10,6 +10,11 @@ class HrEnvelopeSerializer(serializers.Serializer):
     decision = serializers.JSONField()
     response = serializers.JSONField()
     status = serializers.CharField()
+    sources = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+    )
 
 
 class ChatRequestSerializer(serializers.Serializer):

@@ -16,7 +16,7 @@ from chat.constants import (
     INTENT_WFH_REQUEST,
 )
 from chat.services.llm_client import LLMClient
-from chat.services.rules_handbook import is_rules_query
+from chat.services.policy_intent_helpers import is_rules_query
 
 
 def _strong_hr_policy(message: str) -> bool:

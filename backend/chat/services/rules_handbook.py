@@ -1,17 +1,23 @@
-"""Real Estate Company Employee Rules & Regulations handbook.
-
-Static, in-process source of truth for company rules.
-
-Usage from the orchestrator:
-
-    from chat.services.rules_handbook import answer_rules_query
-
-    pack = answer_rules_query(user_message)
-    # pack = {"mode": "full"|"section"|"toc", "text": "...", "matched": [1,4,...]}
-
-The matcher is deterministic (keyword scoring); no LLM call is required so
-the bot can answer rules questions even when the LLM is offline.
-"""
+# =============================================================================
+# LEGACY / REFERENCE ONLY — not imported by orchestrator or RAG.
+# Company policy answers are served only from the knowledge-base (Qdrant + RAG).
+# This module remains in the repo for historical keyword-matching logic if needed.
+# =============================================================================
+#
+# """Real Estate Company Employee Rules & Regulations handbook.
+#
+# Static, in-process source of truth for company rules.
+#
+# Usage from the orchestrator:
+#
+#     from chat.services.rules_handbook import answer_rules_query
+#
+#     pack = answer_rules_query(user_message)
+#     # pack = {"mode": "full"|"section"|"toc", "text": "...", "matched": [1,4,...]}
+#
+# The matcher is deterministic (keyword scoring); no LLM call is required so
+# the bot can answer rules questions even when the LLM is offline.
+# """
 
 from __future__ import annotations
 

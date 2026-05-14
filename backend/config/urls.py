@@ -11,6 +11,7 @@ from rest_framework.permissions import AllowAny
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("chat.urls")),
+    path("api/", include("knowledge_base.api.urls")),
 ]
 
 if settings.ENABLE_API_DOCS:

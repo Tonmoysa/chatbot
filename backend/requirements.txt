@@ -7,8 +7,10 @@ python-dotenv>=1.0
 pytest>=8.0
 pytest-django>=4.8
 drf-spectacular>=0.28,<0.29
-
-# PDF + OCR
+qdrant-client>=1.11,<2
+tiktoken>=0.7
+sentence-transformers>=3.0.0,<4.0.0
+torch>=2.2.0,<3.0.0
 pypdf>=4.0
 pdf2image>=1.17.0
 pillow>=10.0

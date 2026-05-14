@@ -41,27 +41,36 @@ from chat.services.conversational import conversational_reply
 from chat.services.memory_store import ConversationMemoryStore
 from chat.services.observability import log_step
 from chat.services.response_formatter import build_user_message
-from chat.services.rules_handbook import answer_rules_query
+# from chat.services.rules_handbook import (
+#     answer_rules_query,
+#     is_rules_query,
+#     wants_full_handbook,
+# )  # disabled — policy text comes only from knowledge-base RAG
+from chat.services.policy_intent_helpers import is_rules_query
 from chat.services.translator import (
     detect_user_language,
     is_translation_request,
     translate_text,
 )
+from knowledge_base.services.rag_pipeline import (
+    hr_policy_not_found_message,
+    try_hr_policy_rag,
+)
 
 
 _RULES_FOOTER_EN_SECTION = (
-    "_(Ask \"show me all rules and regulations\" to see the full handbook.)_"
+    "_(Answers come from your uploaded policies; ask using the policy title or topic.)_"
 )
 _RULES_FOOTER_EN_FULL = (
-    "_(Ask a specific question — e.g. \"rules about leave\" or "
-    "\"data confidentiality policy\" — to drill into one section.)_"
+    "_(Ask about a specific policy by name or section — e.g. \"attendance policy\" or "
+    "\"leave policy\" — so retrieval can match your knowledge base.)_"
 )
 _RULES_FOOTER_BN_SECTION = (
-    "_(সব নিয়ম ও নিয়মাবলী দেখতে চাইলে লিখুন \"show me all rules and regulations\"।)_"
+    "_(উত্তর আপনার আপলোড করা পলিসি থেকে আসে; পলিসির নাম বা বিষয় লিখে জিজ্ঞাসা করুন।)_"
 )
 _RULES_FOOTER_BN_FULL = (
-    "_(কোনো নির্দিষ্ট বিষয়ে জানতে চাইলে প্রশ্ন করুন — যেমন \"ছুটির নিয়ম\" "
-    "বা \"ডেটা গোপনীয়তা পলিসি\"।)_"
+    "_(নির্দিষ্ট পলিসির নাম বা বিষয় লিখে জিজ্ঞাসা করুন — যেমন \"উপস্থিতি পলিসি\" বা "
+    "\"ছুটির পলিসি\" — যাতে নলেজ বেসে মিলে।)_"
 )
 
 
@@ -310,6 +319,8 @@ class ChatOrchestrator:
         decision: dict[str, Any] = {}
         msg = ""
         rstatus = ""
+        sources_out: list[dict[str, Any]] = []
+        rag_unknown_hit = False
 
         try:
             if intent in (
@@ -339,18 +350,32 @@ class ChatOrchestrator:
                 crm_context.update(day_tot)
 
             if intent == INTENT_HR_POLICY:
-                rules_pack = answer_rules_query(message)
-                crm_payload["rules_answer"] = rules_pack.get("text") or ""
-                crm_payload["rules_mode"] = rules_pack.get("mode") or "full"
-                crm_payload["rules_matched_sections"] = rules_pack.get("matched") or []
-                log_step(
+                dept = entities.get("department")
+                rag = try_hr_policy_rag(
+                    message,
                     trace_id,
-                    "rules_lookup",
-                    {
-                        "mode": rules_pack.get("mode"),
-                        "matched": rules_pack.get("matched"),
-                    },
+                    department=str(dept).strip() if dept else None,
                 )
+                if rag and rag.get("hit"):
+                    crm_payload["rules_answer"] = rag.get("text") or ""
+                    crm_payload["rules_mode"] = rag.get("mode") or "rag"
+                    crm_payload["rules_matched_sections"] = []
+                    crm_payload["rag_sources"] = rag.get("sources") or []
+                    sources_out = list(crm_payload["rag_sources"])
+                    log_step(
+                        trace_id,
+                        "rag_hr_policy_hit",
+                        {"sources": len(sources_out)},
+                    )
+                else:
+                    # `rules_handbook.py` is not used for runtime answers (RAG / KB only).
+                    # if wants_full_handbook(message):
+                    #     rules_pack = answer_rules_query(message)
+                    #     ...
+                    crm_payload["rules_answer"] = hr_policy_not_found_message()
+                    crm_payload["rules_mode"] = "rag_no_hit"
+                    crm_payload["rules_matched_sections"] = []
+                    log_step(trace_id, "rag_no_hit_kb_only_no_static_handbook", {})
 
             if intent == INTENT_EXPENSE_DAY_SUMMARY:
                 emp_ctx = employee_id or session.employee_id
@@ -421,18 +446,46 @@ class ChatOrchestrator:
             # intent pipeline could not produce a specific answer:
             #   1. The user message did not match any HR intent (UNKNOWN).
             #   2. The user asked about a rule we don't have a section for
-            #      (HR_POLICY with rules_mode == "no_match").
+            #      (HR_POLICY with rules_mode == "no_match"), but not rag_no_hit
+            #      (explicit KB miss copy — do not overwrite with chit-chat).
             # When the LLM is unavailable we keep the existing degraded text
             # so the user always gets *something*.
             used_conversational = False
-            needs_conversational = (
-                (
-                    intent == INTENT_UNKNOWN
-                    and decision.get("outcome") == "NEEDS_CLARIFICATION"
+            if (
+                intent == INTENT_UNKNOWN
+                and decision.get("outcome") == "NEEDS_CLARIFICATION"
+                and (is_rules_query(message) or _strong_hr_policy(message))
+            ):
+                dept = entities.get("department")
+                rag_u = try_hr_policy_rag(
+                    message,
+                    trace_id,
+                    department=str(dept).strip() if dept else None,
                 )
-                or (
-                    intent == INTENT_HR_POLICY
-                    and crm_payload.get("rules_mode") == "no_match"
+                if rag_u and rag_u.get("hit"):
+                    msg = rag_u.get("text") or msg
+                    rstatus = "success"
+                    sources_out = list(rag_u.get("sources") or [])
+                    rag_unknown_hit = True
+                    crm_payload["rules_mode"] = "rag"
+                    crm_payload["rules_answer"] = msg
+                    log_step(
+                        trace_id,
+                        "rag_unknown_policy_hit",
+                        {"sources": len(sources_out)},
+                    )
+
+            needs_conversational = (
+                not rag_unknown_hit
+                and (
+                    (
+                        intent == INTENT_UNKNOWN
+                        and decision.get("outcome") == "NEEDS_CLARIFICATION"
+                    )
+                    or (
+                        intent == INTENT_HR_POLICY
+                        and crm_payload.get("rules_mode") == "no_match"
+                    )
                 )
             )
             if needs_conversational:
@@ -476,10 +529,15 @@ class ChatOrchestrator:
             # localized footer/hint is appended after translation so it never
             # gets dropped or mistranslated by the LLM.
             if (
-                intent == INTENT_HR_POLICY
-                and msg
+                msg
                 and not used_conversational
-                and crm_payload.get("rules_mode") in ("full", "section")
+                and (
+                    (
+                        intent == INTENT_HR_POLICY
+                        and crm_payload.get("rules_mode") in ("full", "section", "rag", "rag_no_hit")
+                    )
+                    or rag_unknown_hit
+                )
             ):
                 user_lang = detect_user_language(message)
                 if user_lang == "bn":
@@ -494,19 +552,24 @@ class ChatOrchestrator:
                     if ok:
                         msg = translated
                 rules_mode = str(crm_payload.get("rules_mode") or "")
-                if rules_mode in ("full", "section"):
+                if rules_mode in ("full", "section", "rag", "rag_no_hit"):
+                    footer_mode = "section" if rules_mode in ("rag", "rag_no_hit") else rules_mode
                     msg = msg.rstrip() + "\n\n" + _rules_footer(
-                        mode=rules_mode, lang=user_lang
+                        mode=footer_mode, lang=user_lang
                     )
 
             # If the user asked a side-question (balance probe, chit-chat, rules
             # lookup) while the leave wizard is still mid-collection, remind them
             # of the open step so the form does not feel abandoned.
             if (
-                intent in (
-                    INTENT_LEAVE_BALANCE,
-                    INTENT_UNKNOWN,
-                    INTENT_HR_POLICY,
+                (
+                    intent
+                    in (
+                        INTENT_LEAVE_BALANCE,
+                        INTENT_UNKNOWN,
+                        INTENT_HR_POLICY,
+                    )
+                    or rag_unknown_hit
                 )
                 and is_leave_collecting(getattr(session, "workflow_state", None) or {})
             ):
@@ -548,6 +611,7 @@ class ChatOrchestrator:
                 "status": rstatus if status == "success" else "error",
                 "request_id": request_id or str(crm_payload.get("request_id", "") or ""),
             },
+            "sources": sources_out,
             "status": status,
             "_session_id": session.session_id,
         }
