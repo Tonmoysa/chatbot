@@ -41,11 +41,57 @@ class TextChunk:
 _HEADER_RE = re.compile(r"^(#{1,6}\s+.+)$", re.MULTILINE)
 
 
+def _looks_like_standalone_ocr_heading(line: str) -> bool:
+    """
+    Heading line heuristic for OCR'd English policy PDFs (all-caps run-in titles).
+    """
+    s = line.strip()
+    if not (14 <= len(s) <= 88):
+        return False
+    if s.count(":") >= 3:
+        return False
+    if any(s.endswith(suf) for suf in (".", "?", "!", "।")):
+        return False
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) < 12:
+        return False
+    latin = sum(1 for c in letters if ord(c) < 128)
+    upperish = sum(1 for c in letters if ord(c) < 128 and c.isupper())
+    if latin < len(letters) * 0.35:
+        return False  # predominantly non-Latin script
+    denom = latin or len(letters)
+    return upperish / denom >= 0.88
+
+
+def promote_ocr_heading_lines(text: str) -> str:
+    """
+    Prefix fake markdown headers before OCR-style shouted section banners so downstream
+    section splitting aligns with policy structure. Leaves files that already declare
+    ``# ...`` headings unchanged.
+    """
+    raw = normalize_whitespace(text)
+    if list(_HEADER_RE.finditer(raw)):
+        return raw
+    rebuilt: list[str] = []
+    for line in raw.split("\n"):
+        if _looks_like_standalone_ocr_heading(line):
+            hl = "## " + line.strip()
+            if rebuilt and rebuilt[-1].strip() and not rebuilt[-1].lstrip().startswith("#"):
+                rebuilt.append("")
+            rebuilt.append(hl)
+            continue
+        rebuilt.append(line)
+    return normalize_whitespace("\n".join(rebuilt))
+
+
 def split_by_markdown_sections(text: str) -> list[tuple[str, str]]:
     """Return list of (section_title, body) preserving order."""
     t = normalize_whitespace(text)
     if not t:
         return [("", "")]
+
+    if not list(_HEADER_RE.finditer(t)):
+        t = promote_ocr_heading_lines(t)
 
     matches = list(_HEADER_RE.finditer(t))
     if not matches:

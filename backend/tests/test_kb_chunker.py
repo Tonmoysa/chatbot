@@ -3,6 +3,19 @@ import pytest
 from knowledge_base.services.chunker import chunk_policy_text, count_tokens, split_by_markdown_sections
 
 
+def test_ocr_heading_line_promoted_to_sections():
+    raw = (
+        "Preamble body line.\n\n"
+        "ANNUAL LEAVE ENTITLEMENT\n\n"
+        "Carry-forward cannot exceed fourteen days unless approved."
+    )
+    secs = split_by_markdown_sections(raw)
+    titles = [t.strip() for t, _ in secs if t]
+    assert titles
+    joined = " ".join(titles)
+    assert "ANNUAL" in joined.upper()
+
+
 def test_split_markdown_sections():
     text = "# A\n\nLine1.\n\n## B\n\nLine2."
     secs = split_by_markdown_sections(text)

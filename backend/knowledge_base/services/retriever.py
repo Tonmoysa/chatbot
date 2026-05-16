@@ -11,7 +11,10 @@ from django.conf import settings
 from chat.services.llm_client import LLMClient
 from chat.services.observability import log_step
 from knowledge_base.services.qdrant_service import search_vectors
-from knowledge_base.services.sanitization import preprocess_query
+from knowledge_base.services.sanitization import (
+    build_retrieval_embedding_text,
+    preprocess_query,
+)
 
 logger = logging.getLogger("hr_chatbot")
 
@@ -36,6 +39,77 @@ def _department_filter(department: str | None):
 
 def _hit_score(hit: Any) -> float:
     return float(getattr(hit, "score", 0.0) or 0.0)
+
+
+def _min_results_floor(top_k: int, pool_size: int) -> int:
+    """Minimum hits to return on graceful degradation (never zero if pool non-empty)."""
+    if pool_size <= 0:
+        return 0
+    return min(pool_size, max(1, min(3, top_k)))
+
+
+def _apply_soft_ranking(
+    hits: list[Any],
+    *,
+    top_k: int,
+    min_sim: float,
+    trace_id: str,
+    used_relaxed: bool,
+) -> list[Any]:
+    """
+    Prefer chunks at or above ``min_sim``; if that would drop everything, fall back to
+    the best-ranked raw Qdrant hits so grounded generation can still run.
+    """
+    if not hits:
+        return []
+
+    ranked = sorted(hits, key=_hit_score, reverse=True)
+    max_score = _hit_score(ranked[0])
+    scores_preview = [round(_hit_score(h), 4) for h in ranked[:8]]
+
+    preferred = [h for h in ranked if _hit_score(h) >= min_sim]
+    if preferred:
+        out = preferred[:top_k]
+        log_step(
+            trace_id,
+            "rag_retrieval_ranked",
+            {
+                "max_score": round(max_score, 4),
+                "min_similarity": min_sim,
+                "mode": "preferred",
+                "pool": len(ranked),
+                "returned": len(out),
+                "relaxed_pass": used_relaxed,
+                "scores": scores_preview,
+            },
+        )
+        return out
+
+    # Graceful degradation: Qdrant returned candidates but all are below min_sim.
+    take = max(_min_results_floor(top_k, len(ranked)), min(top_k, len(ranked)))
+    out = ranked[:take]
+    log_step(
+        trace_id,
+        "rag_retrieval_fallback_raw_topk",
+        {
+            "max_score": round(max_score, 4),
+            "min_similarity": min_sim,
+            "mode": "fallback_raw_topk",
+            "pool": len(ranked),
+            "returned": len(out),
+            "relaxed_pass": used_relaxed,
+            "scores": scores_preview,
+            "reason": "all_below_min_similarity",
+        },
+    )
+    logger.info(
+        "rag_retrieval_fallback_raw_topk trace_id=%s max_score=%.4f min_sim=%.4f returned=%s",
+        trace_id,
+        max_score,
+        min_sim,
+        len(out),
+    )
+    return out
 
 
 def _coerce_embedding_vector(vec: Any, *, trace_id: str) -> list[float] | None:
@@ -85,7 +159,9 @@ def retrieve_for_query(
 
     Uses the same ``LLMClient.embed_texts`` path as ingestion. If the strict
     Qdrant ``score_threshold`` returns no points, retries without a server-side
-    threshold and drops results below ``RAG_MIN_SIMILARITY`` (default 0.3).
+    threshold against a wider candidate pool, then soft-ranks by similarity.
+    Chunks below ``RAG_MIN_SIMILARITY`` are deprioritized; if that would remove
+    every hit, returns the top raw Qdrant results (at least one, up to three).
     """
     if not getattr(settings, "KB_RAG_ENABLED", True):
         return [], 0
@@ -94,12 +170,20 @@ def retrieve_for_query(
     if not q:
         return [], 0
 
+    embedding_prompt = build_retrieval_embedding_text(q)
+    if embedding_prompt.strip() != q.strip():
+        log_step(
+            trace_id,
+            "rag_embedding_query_augmented",
+            {"prompt_chars": len(embedding_prompt), "original_chars": len(q)},
+        )
+
     llm = LLMClient()
     if not llm.is_configured():
         return [], 0
 
     t0 = time.perf_counter()
-    vectors = llm.embed_texts([q], trace_id)
+    vectors = llm.embed_texts([embedding_prompt], trace_id)
     emb_ms = int((time.perf_counter() - t0) * 1000)
     if not vectors:
         log_step(trace_id, "rag_embed_query_failed", {"ms": emb_ms})
@@ -147,6 +231,8 @@ def retrieve_for_query(
     if thr is None:
         thr = float(getattr(settings, "RAG_SCORE_THRESHOLD", 0.45))
     min_sim = float(getattr(settings, "RAG_MIN_SIMILARITY", 0.3))
+    cand_mult = max(2, int(getattr(settings, "RAG_RELAXED_CANDIDATE_MULTIPLIER", 3)))
+    relaxed_limit = max(k * cand_mult, k + 16)
 
     flt = _department_filter(department)
     t1 = time.perf_counter()
@@ -170,28 +256,21 @@ def retrieve_for_query(
             )
             hits = search_vectors(
                 qv,
-                limit=k,
+                limit=relaxed_limit,
                 score_threshold=None,
                 payload_filter=flt,
                 trace_id=trace_id,
             )
             used_relaxed = True
 
-        before_filter = len(hits)
-        pre_scores = [round(_hit_score(h), 4) for h in hits[:8]]
-        hits = [h for h in hits if _hit_score(h) >= min_sim]
-        if before_filter and len(hits) < before_filter:
-            log_step(
-                trace_id,
-                "rag_retrieval_min_similarity_filter",
-                {
-                    "min_similarity": min_sim,
-                    "before": before_filter,
-                    "after": len(hits),
-                    "relaxed_pass": used_relaxed,
-                    "scores_before_filter": pre_scores,
-                },
-            )
+        raw_pool = list(hits)
+        hits = _apply_soft_ranking(
+            raw_pool,
+            top_k=k,
+            min_sim=min_sim,
+            trace_id=trace_id,
+            used_relaxed=used_relaxed,
+        )
     except Exception as exc:
         log_step(
             trace_id,
@@ -210,6 +289,7 @@ def retrieve_for_query(
         return [], emb_ms
 
     ret_ms = int((time.perf_counter() - t1) * 1000)
+    max_score = round(_hit_score(hits[0]), 4) if hits else None
     log_step(
         trace_id,
         "rag_retrieval_done",
@@ -217,6 +297,7 @@ def retrieve_for_query(
             "embedding_ms": emb_ms,
             "retrieval_ms": ret_ms,
             "hits": len(hits),
+            "max_score": max_score,
             "scores": [round(_hit_score(h), 4) for h in hits[:8]],
             "collection": getattr(settings, "QDRANT_COLLECTION", ""),
         },

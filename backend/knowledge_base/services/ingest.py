@@ -18,11 +18,24 @@ from chat.services.llm_client import LLMClient
 from chat.services.observability import log_step
 from chat.services.translator import detect_user_language
 from knowledge_base.models import DocumentStatus, DocumentType, KnowledgeChunk, KnowledgeDocument
-from knowledge_base.services.chunker import chunk_policy_text
+from knowledge_base.services.chunker import chunk_policy_text, count_tokens
 from knowledge_base.services.qdrant_service import delete_by_document_id, upsert_points
 from knowledge_base.services.sanitization import sanitize_for_indexing
 
 logger = logging.getLogger("hr_chatbot")
+
+
+def _indexed_chunk_surface(doc_title: str, section_title: str, chunk_body: str) -> str:
+    """Prefix document + section context for embedding and citation (retrieval alignment)."""
+    d = (doc_title or "").strip()
+    s = (section_title or "").strip()
+    b = (chunk_body or "").strip()
+    bits = [f"Policy title: {d}"] if d else []
+    if s:
+        bits.append(f"Section: {s}")
+    if bits:
+        return ("; ".join(bits) + "\n\n" + b).strip()
+    return b
 
 
 def read_policy_file(
@@ -138,7 +151,11 @@ def ingest_bytes(
         doc.save(update_fields=["status"])
         return {"document_id": str(doc.pk), "chunks_created": 0, "status": "failed", "error": "no_chunks"}
 
-    texts = [c.text for c in chunks]
+    surface_texts = [
+        _indexed_chunk_surface(doc.title, ch.section_title, ch.text) for ch in chunks
+    ]
+    texts = surface_texts
+
     embed_batches: list[list[float]] = []
 
     llm = LLMClient()
@@ -175,8 +192,9 @@ def ingest_bytes(
 
     for i, ch in enumerate(chunks):
         pid = str(uuid4())
+        surface = surface_texts[i]
         payload = {
-            "chunk_text": ch.text[:8000],
+            "chunk_text": surface[:8000],
             "document_title": doc.title,
             "source_document": doc.title,
             "section_title": ch.section_title or "",
@@ -195,8 +213,8 @@ def ingest_bytes(
             KnowledgeChunk(
                 document=doc,
                 chunk_index=i,
-                chunk_text=ch.text,
-                token_count=ch.token_count,
+                chunk_text=surface_texts[i],
+                token_count=count_tokens(surface_texts[i]),
                 qdrant_point_id=str(points[i].id),
                 language=lang,
                 metadata={
@@ -241,7 +259,14 @@ def ingest_bytes(
     }
 
 
-def ingest_path(path: Path, *, trace_id: str, reindex: bool, metadata: dict[str, Any] | None) -> dict[str, Any]:
+def ingest_path(
+    path: Path,
+    *,
+    trace_id: str,
+    reindex: bool,
+    metadata: dict[str, Any] | None,
+    uploaded_by_id: int | None = None,
+) -> dict[str, Any]:
     data = path.read_bytes()
     return ingest_bytes(
         data=data,
@@ -252,5 +277,5 @@ def ingest_path(path: Path, *, trace_id: str, reindex: bool, metadata: dict[str,
         trace_id=trace_id,
         reindex=reindex,
         metadata={**(metadata or {}), "path": str(path)},
-        uploaded_by_id=1, 
+        uploaded_by_id=uploaded_by_id,
     )
