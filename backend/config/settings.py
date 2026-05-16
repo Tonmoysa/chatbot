@@ -149,8 +149,9 @@ KB_RAG_ENABLED = os.environ.get("KB_RAG_ENABLED", "true").lower() in ("1", "true
 KB_RAG_NOT_FOUND_MESSAGE = os.environ.get("KB_RAG_NOT_FOUND_MESSAGE", "").strip() or None
 RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "12"))
 # Qdrant cosine first pass (server-side). If no hits, retriever retries without threshold
-# and keeps chunks with score >= RAG_MIN_SIMILARITY.
-
+# and keeps chunks with score >= RAG_MIN_SIMILARITY (soft ranking may still return low scores).
+# Conservative defaults biased toward recall; grounded-generation still filters weak evidence.
+RAG_SCORE_THRESHOLD = float(os.environ.get("RAG_SCORE_THRESHOLD", "0.38"))
 RAG_MIN_SIMILARITY = float(os.environ.get("RAG_MIN_SIMILARITY", "0.24"))
 # Retrieve more candidates on the relaxed pass, then clamp to TOP_K after min-sim filtering.
 RAG_RELAXED_CANDIDATE_MULTIPLIER = int(os.environ.get("RAG_RELAXED_CANDIDATE_MULTIPLIER", "3"))
@@ -158,8 +159,7 @@ RAG_MAX_CONTEXT_CHARS = int(os.environ.get("RAG_MAX_CONTEXT_CHARS", "10000"))
 RAG_QUERY_DEBUG = os.environ.get("RAG_QUERY_DEBUG", "false").lower() in ("1", "true", "yes")
 
 KB_MAX_UPLOAD_BYTES = int(os.environ.get("KB_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
-KB_MAX_EXTRACT_CHARS = int(os.environ.get("KB_MAX_EXTRACT# Conservative defaults biased toward recall; grounded-generation still filters weak evidence.
-RAG_SCORE_THRESHOLD = float(os.environ.get("RAG_SCORE_THRESHOLD", "0.38"))_CHARS", "200000"))
+KB_MAX_EXTRACT_CHARS = int(os.environ.get("KB_MAX_EXTRACT_CHARS", "200000"))
 KB_CHUNK_TARGET_TOKENS = int(os.environ.get("KB_CHUNK_TARGET_TOKENS", "500"))
 KB_CHUNK_OVERLAP_TOKENS = int(os.environ.get("KB_CHUNK_OVERLAP_TOKENS", "140"))
 
