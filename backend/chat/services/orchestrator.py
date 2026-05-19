@@ -33,9 +33,12 @@ from chat.services.leave_days import compute_requested_leave_days
 from chat.services.leave_workflow import (
     deactivate_leave_session,
     is_leave_collecting,
+    is_leave_paused,
+    pause_leave_session,
     pending_question,
     pending_step,
     process_leave_turn,
+    resume_leave_session,
 )
 from chat.services.conversational import conversational_reply
 from chat.services.memory_store import ConversationMemoryStore
@@ -167,6 +170,12 @@ class ChatOrchestrator:
         intent = intent_result["intent"]
 
         wf_state = getattr(session, "workflow_state", None) or {}
+        if is_leave_paused(wf_state) and _wants_resume_leave(message):
+            session.workflow_state = resume_leave_session(wf_state)
+            session.save(update_fields=["workflow_state", "updated_at"])
+            wf_state = session.workflow_state or {}
+            log_step(trace_id, "leave_wizard_resumed", {})
+
         low_msg = (message or "").lower()
         # Balance probe must catch Banglish phrasing too (kotodin / koydin / kondin / baki etc.)
         # so mid-wizard balance questions are not fed back into the wizard as date answers.
@@ -240,14 +249,18 @@ class ChatOrchestrator:
                     "source": (intent_result.get("source") or "intent") + "+chitchat_in_wizard",
                 }
             elif _strong_hr_policy(message):
-                # User asked about rules/policy mid-wizard. Answer the rules question
-                # and keep the wizard alive so they can resume afterwards.
+                # Explicit policy question — pause wizard (keep draft) so the policy
+                # answer is not followed by the leave form reminder.
+                session.workflow_state = pause_leave_session(wf_state)
+                session.save(update_fields=["workflow_state", "updated_at"])
+                wf_state = session.workflow_state or {}
                 intent = INTENT_HR_POLICY
                 intent_result = {
                     **intent_result,
                     "intent": INTENT_HR_POLICY,
-                    "source": (intent_result.get("source") or "intent") + "+rules_in_wizard",
+                    "source": (intent_result.get("source") or "intent") + "+rules_pause_wizard",
                 }
+                log_step(trace_id, "leave_wizard_paused_for_policy", {})
             elif not _message_answers_wizard_step(
                 message, pending_step(wf_state)
             ):
@@ -558,17 +571,11 @@ class ChatOrchestrator:
                         mode=footer_mode, lang=user_lang
                     )
 
-            # If the user asked a side-question (balance probe, chit-chat, rules
-            # lookup) while the leave wizard is still mid-collection, remind them
-            # of the open step so the form does not feel abandoned.
+            # Side-questions during an active wizard: nudge resume (not for explicit
+            # policy lookups — those pause the wizard above).
             if (
                 (
-                    intent
-                    in (
-                        INTENT_LEAVE_BALANCE,
-                        INTENT_UNKNOWN,
-                        INTENT_HR_POLICY,
-                    )
+                    intent in (INTENT_LEAVE_BALANCE, INTENT_UNKNOWN)
                     or rag_unknown_hit
                 )
                 and is_leave_collecting(getattr(session, "workflow_state", None) or {})
@@ -576,6 +583,18 @@ class ChatOrchestrator:
                 resume = pending_question(getattr(session, "workflow_state", None) or {})
                 if resume:
                     msg = f"{msg}\n\n---\n_(ছুটি ফর্ম এখনও চালু আছে — পরের প্রশ্ন:)_\n\n{resume}"
+
+            # Paused leave draft: short hint only (no full wizard step dump).
+            wf_after = getattr(session, "workflow_state", None) or {}
+            if is_leave_paused(wf_after) and intent == INTENT_HR_POLICY and msg:
+                user_lang = detect_user_language(message)
+                hint = (
+                    "\n\n_(ছুটির খসড়া সংরক্ষিত আছে — চালিয়ে যেতে লিখুন: continue leave)_"
+                    if user_lang == "bn"
+                    else "\n\n_(Your leave draft is saved — type **continue leave** to resume the form.)_"
+                )
+                if "continue leave" not in msg.lower() and "ছুটির খসড়া" not in msg:
+                    msg = msg.rstrip() + hint
 
         except CRMError:
             log_step(trace_id, "crm_error", {"error": "CRMError"})
@@ -825,6 +844,20 @@ class ChatOrchestrator:
         pay = str((entities or {}).get("leave_payment_category") or "")
         scope = str((entities or {}).get("day_scope") or "")
         return (start_s, end_s, float(ledger), pay, scope)
+
+
+def _wants_resume_leave(message: str) -> bool:
+    low = (message or "").lower()
+    raw = message or ""
+    if re.search(r"\b(continue|resume|finish)\b.*\bleave\b", low):
+        return True
+    if re.search(r"\bleave\b.*\b(form|application|request)\b", low) and re.search(
+        r"\b(continue|resume|back)\b", low
+    ):
+        return True
+    if re.search(r"(ছুটি\s*(ফর্ম|আবেদন).*(চালু|শেষ|আবার)|continue\s*ছুটি)", raw, re.I):
+        return True
+    return False
 
 
 def new_trace_id() -> str:

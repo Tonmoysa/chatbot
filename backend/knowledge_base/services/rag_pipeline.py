@@ -29,6 +29,35 @@ def hr_policy_not_found_message() -> str:
     return _NOT_FOUND
 
 
+def _excerpt_fallback_answer(hits: list[Any], *, user_query: str, max_chars: int = 2400) -> str:
+    """
+    When the grounded LLM marks insufficient_evidence but retrieval returned chunks,
+    surface the best-matching excerpt instead of a hard not-found (borderline scores).
+    """
+    if not hits:
+        return ""
+    parts: list[str] = []
+    used = 0
+    for h in hits[:3]:
+        payload = _payload_from_hit(h)
+        title = str(payload.get("section_title") or payload.get("document_title") or "Policy")
+        body = sanitize_retrieval_context(str(payload.get("chunk_text") or ""), max_chars=1200)
+        if not body:
+            continue
+        piece = f"**{title}**\n{body}"
+        if used + len(piece) > max_chars:
+            break
+        parts.append(piece)
+        used += len(piece)
+    if not parts:
+        return ""
+    lead = (
+        f"Here is what your handbook says about “{user_query.strip()[:120]}” "
+        "(from the closest matching section):\n\n"
+    )
+    return lead + "\n\n".join(parts)
+
+
 def _payload_from_hit(hit: Any) -> dict[str, Any]:
     pl = getattr(hit, "payload", None) or {}
     if isinstance(pl, dict):
@@ -121,7 +150,21 @@ def try_hr_policy_rag(
     insufficient = bool(parsed.get("insufficient_evidence"))
     answer = str(parsed.get("answer") or "").strip()
     if insufficient or not answer:
-        answer = hr_policy_not_found_message()
+        log_step(
+            trace_id,
+            "rag_insufficient_evidence",
+            {
+                "insufficient": insufficient,
+                "hits": len(hits),
+                "had_answer": bool(answer),
+            },
+        )
+        fallback = _excerpt_fallback_answer(hits, user_query=msg)
+        if fallback:
+            log_step(trace_id, "rag_excerpt_fallback", {"chars": len(fallback)})
+            answer = fallback
+        else:
+            answer = hr_policy_not_found_message()
 
     sources = build_sources(hits)
     return {

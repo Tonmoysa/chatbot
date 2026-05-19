@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import MessageBubble from "./MessageBubble";
-import InputBox from "./InputBox";
+import ChatInput from "./chat/ChatInput";
 
 export default function ChatBox({ messages, loading, error, onSend, onClearError }) {
   const scrollRef = useRef(null);
@@ -52,7 +52,7 @@ export default function ChatBox({ messages, loading, error, onSend, onClearError
         </div>
       </div>
 
-      <InputBox onSend={onSend} disabled={loading} error={error} onClearError={onClearError} />
+      <ChatInput onSend={onSend} disabled={loading} error={error} onClearError={onClearError} />
     </div>
   );
 }

@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "chat",
     "knowledge_base",
+    "voice",
 ]
 
 MIDDLEWARE = [
@@ -99,6 +100,20 @@ LLM_API_BASE_URL = os.environ.get("LLM_API_BASE_URL", "https://api.openai.com/v1
 LLM_API_KEY = os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "25"))
+
+# Voice / STT (Phase 2 — OpenAI Whisper; unused when frontend uses Web Speech API)
+OPENAI_WHISPER_API_KEY = os.environ.get(
+    "OPENAI_WHISPER_API_KEY",
+    os.environ.get("OPENAI_API_KEY", ""),
+).strip()
+OPENAI_WHISPER_API_BASE_URL = os.environ.get(
+    "OPENAI_WHISPER_API_BASE_URL", "https://api.openai.com/v1"
+).rstrip("/")
+OPENAI_WHISPER_MODEL = os.environ.get("OPENAI_WHISPER_MODEL", "whisper-1")
+OPENAI_WHISPER_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_WHISPER_TIMEOUT_SECONDS", "60"))
+VOICE_STT_PROVIDER = os.environ.get("VOICE_STT_PROVIDER", "openai_whisper").strip().lower()
+VOICE_MAX_UPLOAD_BYTES = int(os.environ.get("VOICE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+VOICE_MAX_DURATION_SECONDS = float(os.environ.get("VOICE_MAX_DURATION_SECONDS", "120"))
 
 # HTTP embeddings (when EMBEDDING_BACKEND=openai). If host differs from LLM, do not reuse chat key.
 _embed_base_raw = os.environ.get("EMBED_API_BASE_URL", "").strip().rstrip("/")

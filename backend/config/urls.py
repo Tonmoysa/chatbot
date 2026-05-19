@@ -12,6 +12,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("chat.urls")),
     path("api/", include("knowledge_base.api.urls")),
+    path("api/", include("voice.urls")),
 ]
 
 if settings.ENABLE_API_DOCS:

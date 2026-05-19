@@ -73,6 +73,36 @@ def is_leave_collecting(workflow_state: dict[str, Any] | None) -> bool:
     return bool(lr.get("active"))
 
 
+def is_leave_paused(workflow_state: dict[str, Any] | None) -> bool:
+    lr = (workflow_state or {}).get("leave_request") or {}
+    return bool(lr.get("paused")) and not bool(lr.get("active"))
+
+
+def pause_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
+    """Keep draft but stop mid-wizard prompts (user switched to another HR topic)."""
+    wf = clone_workflow_state(workflow_state)
+    lr = wf.get("leave_request")
+    if not lr:
+        return wf
+    lr = dict(lr)
+    lr["active"] = False
+    lr["paused"] = True
+    wf["leave_request"] = lr
+    return wf
+
+
+def resume_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
+    wf = clone_workflow_state(workflow_state)
+    lr = wf.get("leave_request")
+    if not lr:
+        return wf
+    lr = dict(lr)
+    lr["active"] = True
+    lr["paused"] = False
+    wf["leave_request"] = lr
+    return wf
+
+
 def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
     """
     Return the wizard's current pending prompt without mutating state.

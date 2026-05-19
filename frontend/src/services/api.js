@@ -1,4 +1,5 @@
 import axios from "axios";
+import { generateTraceId } from "../utils/trace.js";
 
 const resolvedBaseURL = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -17,6 +18,9 @@ client.interceptors.request.use((config) => {
   const key = import.meta.env.VITE_HR_API_KEY?.trim();
   if (key) {
     config.headers["X-API-Key"] = key;
+  }
+  if (!config.headers["X-Trace-Id"] && !config.headers["x-trace-id"]) {
+    config.headers["X-Trace-Id"] = generateTraceId();
   }
   return config;
 });
@@ -52,5 +56,36 @@ export async function postDocumentExtract({ file }) {
   return {
     data: res.data,
     documentText: typeof res.data?.document_text === "string" ? res.data.document_text : "",
+  };
+}
+
+/**
+ * POST /api/voice/transcribe/ (Phase 2 — OpenAI Whisper via backend).
+ * @returns {Promise<{ data: object, transcript: string, traceId: string | null }>}
+ */
+export async function postVoiceTranscribe({ blob, mimeType, language, traceId }) {
+  const form = new FormData();
+  const ext = mimeType?.includes("mp4") ? "m4a" : "webm";
+  form.append("file", blob, `recording.${ext}`);
+  if (language) {
+    form.append("language", language);
+  }
+  const headers = { "Content-Type": "multipart/form-data" };
+  if (traceId) {
+    headers["X-Trace-Id"] = traceId;
+  }
+  const res = await client.post("/api/voice/transcribe/", form, { headers });
+  const traceIdHeader =
+    res.headers["x-trace-id"] ?? res.headers["X-Trace-Id"] ?? traceId ?? null;
+  const transcript =
+    typeof res.data?.transcript === "string"
+      ? res.data.transcript
+      : typeof res.data?.response?.message === "string"
+        ? res.data.response.message
+        : "";
+  return {
+    data: res.data,
+    transcript,
+    traceId: typeof traceIdHeader === "string" ? traceIdHeader : null,
   };
 }
