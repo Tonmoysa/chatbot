@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
 
 @patch("knowledge_base.services.qdrant_service.ensure_collection")
 @patch("knowledge_base.services.qdrant_service.get_qdrant_client")
@@ -18,12 +20,22 @@ def test_search_vectors_uses_query_points(mock_get_client, _mock_ensure):
 
     from knowledge_base.services.qdrant_service import search_vectors
 
-    hits = search_vectors([0.1, 0.2, 0.3], limit=5, score_threshold=0.5, trace_id="t1")
+    payload_filter = Filter(
+        must=[FieldCondition(key="company_id", match=MatchValue(value="company-a"))]
+    )
+    hits = search_vectors(
+        [0.1, 0.2, 0.3],
+        limit=5,
+        score_threshold=0.5,
+        payload_filter=payload_filter,
+        trace_id="t1",
+    )
     client.query_points.assert_called_once()
     call_kw = client.query_points.call_args.kwargs
     assert call_kw["collection_name"]
     assert call_kw["query"] == [0.1, 0.2, 0.3]
     assert call_kw["limit"] == 5
     assert call_kw["score_threshold"] == 0.5
+    assert call_kw["query_filter"] == payload_filter
     assert len(hits) == 1
     assert hits[0].score == 0.91

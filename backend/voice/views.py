@@ -2,10 +2,11 @@ import uuid
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from chat.identity import identity_from_validated_data
 from chat.serializers import HrEnvelopeSerializer
 from chat.services.observability import log_step
 from voice.serializers import VoiceTranscribeRequestSerializer
@@ -21,14 +22,14 @@ def _trace(request) -> str:
     tags=["Voice"],
     request=VoiceTranscribeRequestSerializer,
     responses={200: HrEnvelopeSerializer},
-    auth=[],
 )
 class VoiceTranscribeView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = VoiceTranscribeRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         f = ser.validated_data["file"]
         language = (ser.validated_data.get("language") or "").strip() or None

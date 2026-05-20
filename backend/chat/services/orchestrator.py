@@ -101,11 +101,17 @@ class ChatOrchestrator:
         *,
         message: str,
         session_id: str | None,
+        company_id: str,
         employee_id: str,
         trace_id: str,
         document_text: str | None = None,
+        idempotency_key: str = "",
     ) -> dict[str, Any]:
-        session = self.memory.get_or_create_session(session_id or "", employee_id)
+        session = self.memory.get_or_create_session(
+            company_id=company_id,
+            employee_id=employee_id,
+            session_id=session_id or "",
+        )
         context_lines = self.memory.recent_context_lines(session)
 
         # Translation follow-up — if the user is asking to translate the previous
@@ -341,7 +347,11 @@ class ChatOrchestrator:
                 INTENT_LEAVE_REQUEST,
                 INTENT_WFH_REQUEST,
             ):
-                bal = self.crm.get_leave_balance(employee_id or session.employee_id)
+                bal = self.crm.get_leave_balance(
+                    company_id=company_id,
+                    employee_id=employee_id,
+                    session_id=session.session_id,
+                )
                 crm_context.update(bal)
                 if intent == INTENT_LEAVE_BALANCE:
                     crm_payload.update(bal)
@@ -349,17 +359,26 @@ class ChatOrchestrator:
             if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
                 rid = entities.get("request_id")
                 if rid:
-                    st = self.crm.get_request_status(str(rid))
+                    st = self.crm.get_request_status(
+                        str(rid),
+                        company_id=company_id,
+                        employee_id=employee_id,
+                        session_id=session.session_id,
+                    )
                     crm_payload.update(st)
                 else:
                     crm_payload["detail"] = "Missing request_id for status lookup."
 
             if intent == INTENT_EXPENSE_CLAIM:
-                emp_ctx = employee_id or session.employee_id
                 inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
                     message=message, hints=entities, today=date.today()
                 )
-                day_tot = self.crm.get_expense_day_approved_total(emp_ctx, inc_iso)
+                day_tot = self.crm.get_expense_day_approved_total(
+                    company_id=company_id,
+                    employee_id=employee_id,
+                    session_id=session.session_id,
+                    incurred_date_iso=inc_iso,
+                )
                 crm_context.update(day_tot)
 
             if intent == INTENT_HR_POLICY:
@@ -367,6 +386,7 @@ class ChatOrchestrator:
                 rag = try_hr_policy_rag(
                     message,
                     trace_id,
+                    company_id=company_id,
                     department=str(dept).strip() if dept else None,
                 )
                 if rag and rag.get("hit"):
@@ -391,11 +411,15 @@ class ChatOrchestrator:
                     log_step(trace_id, "rag_no_hit_kb_only_no_static_handbook", {})
 
             if intent == INTENT_EXPENSE_DAY_SUMMARY:
-                emp_ctx = employee_id or session.employee_id
                 inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
                     message=message, hints=entities, today=date.today()
                 )
-                breakdown = self.crm.get_expense_day_breakdown(emp_ctx, inc_iso)
+                breakdown = self.crm.get_expense_day_breakdown(
+                    company_id=company_id,
+                    employee_id=employee_id,
+                    session_id=session.session_id,
+                    incurred_date_iso=inc_iso,
+                )
                 crm_payload.update(breakdown)
                 crm_context.update(breakdown)
 
@@ -426,10 +450,13 @@ class ChatOrchestrator:
                 crm_payload.update({"request_id": dedup_request_id, "_deduped": True})
             elif self._should_mutate_crm(intent, decision):
                 exec_result = self.crm.create_request(
-                    employee_id or session.employee_id,
-                    intent,
-                    entities,
-                    decision,
+                    employee_id=employee_id,
+                    intent=intent,
+                    entities=entities,
+                    decision=decision,
+                    company_id=company_id,
+                    session_id=session.session_id,
+                    idempotency_key=idempotency_key,
                 )
                 request_id = str(exec_result.get("request_id") or "")
                 crm_payload.update(exec_result)
@@ -473,6 +500,7 @@ class ChatOrchestrator:
                 rag_u = try_hr_policy_rag(
                     message,
                     trace_id,
+                    company_id=company_id,
                     department=str(dept).strip() if dept else None,
                 )
                 if rag_u and rag_u.get("hit"):

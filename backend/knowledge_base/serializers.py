@@ -1,7 +1,9 @@
 from rest_framework import serializers
 
+from chat.identity import TenantIdentitySerializerMixin
 
-class KbPolicyUploadSerializer(serializers.Serializer):
+
+class KbPolicyUploadSerializer(TenantIdentitySerializerMixin):
     file = serializers.FileField()
     title = serializers.CharField(max_length=512, required=False, allow_blank=True)
     policy_type = serializers.CharField(max_length=64, required=False, allow_blank=True)

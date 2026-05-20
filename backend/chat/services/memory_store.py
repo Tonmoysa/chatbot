@@ -11,16 +11,24 @@ class ConversationMemoryStore:
     def __init__(self, max_turns: int = 30) -> None:
         self.max_turns = max_turns
 
-    def get_or_create_session(self, session_id: str, employee_id: str) -> ConversationSession:
-        sid = (session_id or "").strip() or self._new_session_id()
+    def get_or_create_session(
+        self,
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+    ) -> ConversationSession:
+        company = (company_id or "").strip()
         emp = (employee_id or "").strip()
+        sid = (session_id or "").strip() or self._new_session_id()
+        if not company or not emp:
+            raise ValueError("company_id and employee_id are required for chat sessions.")
         with transaction.atomic():
             s, _ = ConversationSession.objects.select_for_update().get_or_create(
-                session_id=sid, defaults={"employee_id": emp}
+                company_id=company,
+                employee_id=emp,
+                session_id=sid,
             )
-            if emp and s.employee_id != emp:
-                s.employee_id = emp
-                s.save(update_fields=["employee_id", "updated_at"])
         return s
 
     def _new_session_id(self) -> str:

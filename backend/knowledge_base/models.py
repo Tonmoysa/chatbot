@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.db import models
 
 
@@ -16,22 +15,17 @@ class DocumentType(models.TextChoices):
 
 
 class KnowledgeDocument(models.Model):
+    company_id = models.CharField(max_length=64, db_index=True)
     title = models.CharField(max_length=512)
     file = models.FileField(upload_to="kb/policies/%Y/%m/", blank=True, null=True)
     source_path = models.CharField(max_length=1024, blank=True, default="")
-    checksum = models.CharField(max_length=64, db_index=True)
+    checksum = models.CharField(max_length=64, db_index=True, blank=True, default="")
     document_type = models.CharField(
         max_length=32,
         choices=DocumentType.choices,
         default=DocumentType.POLICY,
     )
-    uploaded_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="kb_documents",
-    )
+    uploaded_by_employee_id = models.CharField(max_length=64)
     uploaded_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(
         max_length=32,
@@ -44,15 +38,18 @@ class KnowledgeDocument(models.Model):
     class Meta:
         ordering = ("-uploaded_at",)
         indexes = [
+            models.Index(fields=("company_id", "checksum"), name="kb_doc_company_checksum_idx"),
+            models.Index(fields=("company_id", "status"), name="kb_doc_company_status_idx"),
             models.Index(fields=("checksum",)),
             models.Index(fields=("status",)),
         ]
 
     def __str__(self) -> str:
-        return f"{self.title} ({self.status})"
+        return f"{self.company_id}:{self.title} ({self.status})"
 
 
 class KnowledgeChunk(models.Model):
+    company_id = models.CharField(max_length=64, db_index=True)
     document = models.ForeignKey(
         KnowledgeDocument,
         on_delete=models.CASCADE,
@@ -75,6 +72,10 @@ class KnowledgeChunk(models.Model):
             ),
         ]
         indexes = [
+            models.Index(
+                fields=("company_id", "document", "chunk_index"),
+                name="kb_chunk_company_doc_idx",
+            ),
             models.Index(fields=("document", "chunk_index")),
         ]
 

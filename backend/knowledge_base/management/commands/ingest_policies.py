@@ -27,6 +27,12 @@ class Command(BaseCommand):
             default="cli-ingest",
             help="Trace id for structured logs.",
         )
+        parser.add_argument("--company-id", required=True, help="Tenant/company id.")
+        parser.add_argument(
+            "--employee-id",
+            required=True,
+            help="Uploader employee id from the SaaS CRM identity model.",
+        )
 
     def handle(self, *args, **options):
         trace_id = str(options.get("trace_id") or "cli-ingest")
@@ -41,6 +47,8 @@ class Command(BaseCommand):
             return
 
         reindex = bool(options.get("reindex"))
+        company_id = str(options["company_id"]).strip()
+        employee_id = str(options["employee_id"]).strip()
         exts = {".md", ".markdown", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".webp"}
         total = 0
         for d in dirs:
@@ -54,7 +62,14 @@ class Command(BaseCommand):
                 if path.suffix.lower() not in exts:
                     continue
                 log_step(trace_id, "kb_ingest_file_start", {"path": str(path)})
-                r = ingest_path(path, trace_id=trace_id, reindex=reindex, metadata={})
+                r = ingest_path(
+                    path,
+                    trace_id=trace_id,
+                    reindex=reindex,
+                    metadata={},
+                    company_id=company_id,
+                    uploaded_by_employee_id=employee_id,
+                )
                 self.stdout.write(f"{path}: {r}")
                 total += 1
         log_step(trace_id, "kb_ingest_command_done", {"files": total})

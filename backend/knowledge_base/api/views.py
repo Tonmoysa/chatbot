@@ -3,15 +3,16 @@ import uuid
 from django.conf import settings
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from chat.identity import identity_from_validated_data
+from knowledge_base.models import DocumentType, KnowledgeDocument
 from knowledge_base.serializers import (
     KbPolicyUploadResponseSerializer,
     KbPolicyUploadSerializer,
 )
-from knowledge_base.services.ingest import ingest_bytes
+from knowledge_base.services.ingestion_service import process_document
 
 
 def _trace(request) -> str:
@@ -25,16 +26,14 @@ def _trace(request) -> str:
     responses={200: KbPolicyUploadResponseSerializer},
 )
 class KbUploadPolicyView(APIView):
-    permission_classes = [AllowAny]
-
     def post(self, request):
         ser = KbPolicyUploadSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         f = ser.validated_data["file"]
-        data = f.read()
         max_b = int(getattr(settings, "KB_MAX_UPLOAD_BYTES", 26_214_400))
-        if len(data) > max_b:
+        if getattr(f, "size", 0) and int(f.size) > max_b:
             return Response(
                 {"detail": "File too large."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -47,20 +46,41 @@ class KbUploadPolicyView(APIView):
             meta["policy_type"] = ser.validated_data["policy_type"].strip()
         if ser.validated_data.get("department"):
             meta["department"] = ser.validated_data["department"].strip()
-        uid = getattr(request.user, "pk", None) if getattr(
-            request.user, "is_authenticated", False
-        ) else None
-        try:
-            result = ingest_bytes(
-                data=data,
-                title=title,
-                filename=getattr(f, "name", None),
-                content_type=getattr(f, "content_type", None),
-                uploaded_by_id=int(uid) if uid else None,
-                trace_id=tid,
-                metadata=meta,
-                reindex=False,
+        meta.update(
+            {
+                "session_id": identity.session_id,
+                "idempotency_key": identity.idempotency_key,
+                "content_type": getattr(f, "content_type", "") or "",
+            }
+        )
+        if identity.idempotency_key:
+            existing = (
+                KnowledgeDocument.objects.filter(
+                    company_id=identity.company_id,
+                    metadata__idempotency_key=identity.idempotency_key,
+                )
+                .order_by("-uploaded_at")
+                .first()
             )
+            if existing:
+                return Response(
+                    {
+                        "document_id": str(existing.pk),
+                        "chunks_created": int(existing.total_chunks or 0),
+                        "status": "idempotent_replay",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+        doc = KnowledgeDocument.objects.create(
+            company_id=identity.company_id,
+            title=title,
+            file=f,
+            document_type=DocumentType.POLICY,
+            uploaded_by_employee_id=identity.employee_id,
+            metadata=meta,
+        )
+        try:
+            result = process_document(doc, trace_id=tid, reindex=False)
         except ValueError as exc:
             if str(exc) == "upload_too_large":
                 return Response(

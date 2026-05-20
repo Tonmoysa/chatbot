@@ -74,6 +74,7 @@ def try_hr_policy_rag(
     message: str,
     trace_id: str,
     *,
+    company_id: str,
     department: str | None = None,
     llm: LLMClient | None = None,
 ) -> dict[str, Any] | None:
@@ -97,12 +98,17 @@ def try_hr_policy_rag(
     hits, _emb_ms = retrieve_for_query(
         msg,
         trace_id,
+        company_id=company_id,
         department=department,
         top_k=int(getattr(settings, "RAG_TOP_K", 8)),
         score_threshold=float(getattr(settings, "RAG_SCORE_THRESHOLD", 0.45)),
     )
     if not hits:
-        log_step(trace_id, "rag_no_hits", {"ms": int((time.perf_counter() - t0) * 1000)})
+        log_step(
+            trace_id,
+            "rag_no_hits",
+            {"ms": int((time.perf_counter() - t0) * 1000), "company_id": company_id},
+        )
         return None
 
     blocks: list[str] = []
@@ -167,6 +173,7 @@ def try_hr_policy_rag(
             answer = hr_policy_not_found_message()
 
     sources = build_sources(hits)
+    log_step(trace_id, "rag_success", {"sources": len(sources), "company_id": company_id})
     return {
         "hit": True,
         "text": answer,

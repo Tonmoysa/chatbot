@@ -50,6 +50,11 @@ class LLMClient:
     def is_configured(self) -> bool:
         return bool(self.api_key)
 
+    def is_embedding_configured(self) -> bool:
+        if self.embedding_backend == "local":
+            return True
+        return bool((self.embed_api_key or "").strip())
+
     def chat_json(
         self,
         *,

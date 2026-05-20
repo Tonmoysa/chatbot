@@ -1,5 +1,6 @@
 import uuid
 
+from django.db import connection
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
@@ -16,14 +17,17 @@ from chat.serializers import (
     IntentRequestSerializer,
     MockCreateSerializer,
 )
+from chat.identity import identity_from_request, identity_from_validated_data
 from chat.services.crm.factory import get_crm_adapter
 from chat.services.decision_engine import DecisionEngine
 from chat.services.entity_extractor import EntityExtractor
 from chat.services.intent_detector import IntentDetector
+from chat.services.llm_client import LLMClient
 from chat.services.memory_store import ConversationMemoryStore
 from chat.services.observability import log_step
 from chat.services.orchestrator import ChatOrchestrator
 from chat.services.document_reader import extract_text_from_upload
+from knowledge_base.services.qdrant_service import collection_name, get_qdrant_client
 
 
 def _trace(request) -> str:
@@ -42,6 +46,13 @@ class HealthView(APIView):
 
     def get(self, request):
         tid = _trace(request)
+        checks = {
+            "db": self._check_db(),
+            "qdrant": self._check_qdrant(),
+            "embedding_service": self._check_embedding_service(),
+            "crm": get_crm_adapter().health(),
+        }
+        ok = all(bool(v.get("ok")) for v in checks.values())
         return Response(
             {
                 "trace_id": tid,
@@ -49,13 +60,44 @@ class HealthView(APIView):
                 "entities": {},
                 "decision": {},
                 "response": {
-                    "message": "HR chatbot microservice is running.",
-                    "status": "success",
+                    "message": "HR chatbot microservice health check complete.",
+                    "status": "success" if ok else "degraded",
                     "request_id": "",
+                    "checks": checks,
                 },
-                "status": "success",
+                "status": "success" if ok else "degraded",
             }
         )
+
+    def _check_db(self) -> dict:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
+
+    def _check_qdrant(self) -> dict:
+        try:
+            client = get_qdrant_client()
+            name = collection_name()
+            if hasattr(client, "collection_exists"):
+                exists = bool(client.collection_exists(name))
+            else:
+                cols = client.get_collections().collections
+                exists = any(c.name == name for c in cols)
+            return {"ok": True, "collection": name, "exists": exists}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
+
+    def _check_embedding_service(self) -> dict:
+        try:
+            client = LLMClient()
+            configured = bool(client.is_embedding_configured())
+            return {"ok": configured, "configured": configured}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__}
 
 
 @extend_schema(
@@ -65,19 +107,22 @@ class HealthView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class ChatView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = ChatRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         orch = ChatOrchestrator()
         out = orch.run_chat(
             message=ser.validated_data["message"],
-            session_id=ser.validated_data.get("session_id"),
-            employee_id=ser.validated_data.get("employee_id") or "demo-employee",
+            session_id=identity.session_id,
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
             trace_id=tid,
             document_text=(ser.validated_data.get("document_text") or "").strip() or None,
+            idempotency_key=identity.idempotency_key,
         )
         sid = out.pop("_session_id", None)
         resp = Response(out, status=status.HTTP_200_OK)
@@ -93,11 +138,12 @@ class ChatView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class DocumentExtractView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = DocumentExtractRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         f = ser.validated_data["file"]
         data = f.read()
@@ -134,11 +180,12 @@ class DocumentExtractView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class IntentView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = IntentRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         det = IntentDetector()
         r = det.detect(ser.validated_data["message"], tid)
@@ -166,14 +213,19 @@ class IntentView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class ExtractView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = ExtractRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         mem = ConversationMemoryStore()
-        session = mem.get_or_create_session(ser.validated_data.get("session_id") or "", "")
+        session = mem.get_or_create_session(
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
+            session_id=identity.session_id,
+        )
         ctx = mem.recent_context_lines(session)
         ext = EntityExtractor()
         r = ext.extract(
@@ -206,17 +258,17 @@ class ExtractView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class DecisionView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = DecisionRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         crm = get_crm_adapter()
         crm_context: dict = {}
         intent = ser.validated_data["intent"]
         entities = ser.validated_data["entities"]
-        emp = ser.validated_data.get("employee_id") or "demo-employee"
         from datetime import date
 
         from chat.constants import (
@@ -229,17 +281,37 @@ class DecisionView(APIView):
         from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 
         if intent in (INTENT_LEAVE_REQUEST, INTENT_WFH_REQUEST, INTENT_LEAVE_BALANCE):
-            crm_context.update(crm.get_leave_balance(emp))
+            crm_context.update(
+                crm.get_leave_balance(
+                    company_id=identity.company_id,
+                    employee_id=identity.employee_id,
+                    session_id=identity.session_id,
+                )
+            )
         if intent == INTENT_EXPENSE_CLAIM:
             inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
                 message="", hints=entities, today=date.today()
             )
-            crm_context.update(crm.get_expense_day_approved_total(emp, inc_iso))
+            crm_context.update(
+                crm.get_expense_day_approved_total(
+                    company_id=identity.company_id,
+                    employee_id=identity.employee_id,
+                    session_id=identity.session_id,
+                    incurred_date_iso=inc_iso,
+                )
+            )
         if intent == INTENT_EXPENSE_DAY_SUMMARY:
             inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
                 message="", hints=entities, today=date.today()
             )
-            crm_context.update(crm.get_expense_day_breakdown(emp, inc_iso))
+            crm_context.update(
+                crm.get_expense_day_breakdown(
+                    company_id=identity.company_id,
+                    employee_id=identity.employee_id,
+                    session_id=identity.session_id,
+                    incurred_date_iso=inc_iso,
+                )
+            )
         eng = DecisionEngine()
         decision = eng.evaluate(
             intent=intent, entities=entities, crm_context=crm_context
@@ -267,12 +339,18 @@ class DecisionView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class RequestStatusView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, request_id: str):
         tid = _trace(request)
+        identity = identity_from_request(request)
         crm = get_crm_adapter()
-        st = crm.get_request_status(request_id)
+        st = crm.get_request_status(
+            request_id,
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
+            session_id=identity.session_id,
+        )
         return Response(
             {
                 "trace_id": tid,
@@ -296,18 +374,22 @@ class RequestStatusView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockRequestCreateView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = MockCreateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(ser.validated_data)
         tid = _trace(request)
         crm = get_crm_adapter()
         r = crm.create_request(
-            ser.validated_data["employee_id"],
-            ser.validated_data["intent"],
-            ser.validated_data.get("entities") or {},
-            ser.validated_data.get("decision") or {},
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
+            session_id=identity.session_id,
+            intent=ser.validated_data["intent"],
+            entities=ser.validated_data.get("entities") or {},
+            decision=ser.validated_data.get("decision") or {},
+            idempotency_key=identity.idempotency_key,
         )
         return Response(
             {
@@ -339,13 +421,23 @@ class MockRequestCreateView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockRequestStatusView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         tid = _trace(request)
+        identity = identity_from_request(request)
         rid = request.query_params.get("request_id", "")
         crm = get_crm_adapter()
-        st = crm.get_request_status(rid) if rid else {"status": "MISSING_ID"}
+        st = (
+            crm.get_request_status(
+                rid,
+                company_id=identity.company_id,
+                employee_id=identity.employee_id,
+                session_id=identity.session_id,
+            )
+            if rid
+            else {"status": "MISSING_ID"}
+        )
         return Response(
             {
                 "trace_id": tid,
@@ -376,18 +468,22 @@ class MockRequestStatusView(APIView):
     responses={200: HrEnvelopeSerializer},
 )
 class MockLeaveBalanceView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         tid = _trace(request)
-        emp = request.query_params.get("employee_id", "demo-employee")
+        identity = identity_from_request(request)
         crm = get_crm_adapter()
-        bal = crm.get_leave_balance(emp)
+        bal = crm.get_leave_balance(
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
+            session_id=identity.session_id,
+        )
         return Response(
             {
                 "trace_id": tid,
                 "intent": "LEAVE_BALANCE",
-                "entities": {"employee_id": emp},
+                "entities": {"employee_id": identity.employee_id, "company_id": identity.company_id},
                 "decision": {"outcome": "INFORMATIONAL"},
                 "response": {
                     "message": f"Balance payload: {bal}",

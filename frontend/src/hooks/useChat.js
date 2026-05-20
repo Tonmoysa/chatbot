@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { postChat, postDocumentExtract } from "../services/api";
-import { getSessionId, setSessionId } from "../utils/session";
+import { getClientIdentity, setSessionId } from "../utils/session";
 
 function extractBotText(payload) {
   const msg = payload?.response?.message;
@@ -42,22 +42,31 @@ export function useChat() {
     setMessages((prev) => [...prev, { role: "user", text: trimmed }]);
     setLoading(true);
 
-    const sessionId = getSessionId();
+    let identity;
+    try {
+      identity = getClientIdentity();
+    } catch (err) {
+      setError(err?.message || "Missing CRM identity.");
+      setLoading(false);
+      sendingRef.current = false;
+      return;
+    }
 
     try {
       let documentText = "";
       if (file) {
-        const extracted = await postDocumentExtract({ file });
+        const extracted = await postDocumentExtract({ file, identity });
         documentText = extracted.documentText || "";
       }
       const { data, sessionIdHeader } = await postChat({
         message: trimmed,
-        sessionId,
+        sessionId: identity.session_id,
         documentText,
+        identity,
       });
 
       if (sessionIdHeader) {
-        setSessionId(sessionIdHeader);
+        setSessionId(sessionIdHeader, identity);
       }
 
       const topStatus = data?.status;

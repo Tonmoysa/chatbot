@@ -8,7 +8,7 @@ from knowledge_base.services.rag_pipeline import try_hr_policy_rag
 @pytest.mark.django_db
 def test_try_hr_policy_rag_returns_none_when_disabled(settings):
     settings.KB_RAG_ENABLED = False
-    assert try_hr_policy_rag("leave policy?", "t1") is None
+    assert try_hr_policy_rag("leave policy?", "t1", company_id="company-a") is None
 
 
 @pytest.mark.django_db
@@ -29,7 +29,11 @@ def test_try_hr_policy_rag_runs_for_full_handbook_phrase(settings):
                 "answer": "Here are highlights from the indexed policies.",
                 "insufficient_evidence": False,
             }
-            out = try_hr_policy_rag("show me all rules and regulations", "t2")
+            out = try_hr_policy_rag(
+                "show me all rules and regulations",
+                "t2",
+                company_id="company-a",
+            )
     assert out and out.get("hit")
     assert "highlights" in out["text"].lower()
 
@@ -51,7 +55,7 @@ def test_try_hr_policy_rag_grounded_answer(settings):
                 "answer": "LWOP needs manager approval per handbook.",
                 "insufficient_evidence": False,
             }
-            out = try_hr_policy_rag("What about LWOP?", "t3")
+            out = try_hr_policy_rag("What about LWOP?", "t3", company_id="company-a")
     assert out and out.get("hit")
     assert "LWOP" in out["text"]
     assert out["sources"] and out["sources"][0]["score"] == 0.9
@@ -74,5 +78,5 @@ def test_try_hr_policy_rag_insufficient_evidence_message(settings):
                 "answer": "",
                 "insufficient_evidence": True,
             }
-            out = try_hr_policy_rag("parking policy?", "t4")
-    assert out and "could not find" in out["text"].lower()
+            out = try_hr_policy_rag("parking policy?", "t4", company_id="company-a")
+    assert out and "closest matching section" in out["text"].lower()

@@ -11,6 +11,7 @@ def test_policy_question_while_leave_wizard_does_not_append_leave_form(settings)
     settings.KB_RAG_ENABLED = True
     orch = ChatOrchestrator()
     session = orch.memory.get_or_create_session(
+        company_id="company-a",
         session_id="test-policy-interrupt-session",
         employee_id="E1",
     )
@@ -35,6 +36,7 @@ def test_policy_question_while_leave_wizard_does_not_append_leave_form(settings)
         out = orch.run_chat(
             message="hello I want to know Attendance & Working Hours Policy",
             session_id=session.session_id,
+            company_id="company-a",
             employee_id="E1",
             trace_id="trace-policy-interrupt",
         )

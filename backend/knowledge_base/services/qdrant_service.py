@@ -109,24 +109,61 @@ def ensure_collection(*, trace_id: str = "") -> None:
             type(exc).__name__,
         )
         raise
-    if exists:
-        return
+    if not exists:
+        try:
+            client.create_collection(
+                collection_name=name,
+                vectors_config=VectorParams(size=vs, distance=Distance.COSINE),
+            )
+            logger.info("qdrant_collection_created trace_id=%s name=%s", trace_id, name)
+        except Exception as exc:
+            logger.warning(
+                "qdrant_collection_create_failed trace_id=%s err=%s",
+                trace_id,
+                type(exc).__name__,
+            )
+            raise
+    _ensure_payload_indexes(client, name, trace_id=trace_id)
+
+
+def _ensure_payload_indexes(client: Any, name: str, *, trace_id: str = "") -> None:
     try:
-        client.create_collection(
-            collection_name=name,
-            vectors_config=VectorParams(size=vs, distance=Distance.COSINE),
-        )
-        logger.info("qdrant_collection_created trace_id=%s name=%s", trace_id, name)
-    except Exception as exc:
-        logger.warning(
-            "qdrant_collection_create_failed trace_id=%s err=%s",
-            trace_id,
-            type(exc).__name__,
-        )
-        raise
+        from qdrant_client.models import PayloadSchemaType
+
+        keyword = PayloadSchemaType.KEYWORD
+        integer = PayloadSchemaType.INTEGER
+    except Exception:
+        keyword = "keyword"
+        integer = "integer"
+
+    for field_name, schema in (
+        ("company_id", keyword),
+        ("document_db_id", integer),
+        ("embedding_version", keyword),
+    ):
+        try:
+            client.create_payload_index(
+                collection_name=name,
+                field_name=field_name,
+                field_schema=schema,
+            )
+        except Exception as exc:
+            # Qdrant returns an error if the index already exists; keep ensure idempotent.
+            logger.debug(
+                "qdrant_payload_index_skip trace_id=%s field=%s err=%s",
+                trace_id,
+                field_name,
+                type(exc).__name__,
+            )
 
 
 def upsert_points(points: list, *, trace_id: str = "") -> None:
+    for point in points:
+        payload = getattr(point, "payload", None) or {}
+        if not payload.get("company_id"):
+            raise ValueError("Qdrant point missing company_id payload.")
+        if not payload.get("embedding_version"):
+            raise ValueError("Qdrant point missing embedding_version payload.")
     ensure_collection(trace_id=trace_id)
     client = get_qdrant_client()
     name = collection_name()
@@ -146,9 +183,17 @@ def upsert_points(points: list, *, trace_id: str = "") -> None:
         )
 
 
-def delete_by_document_id(document_db_id: int, *, trace_id: str = "") -> None:
+def delete_by_document_id(
+    document_db_id: int,
+    *,
+    company_id: str,
+    trace_id: str = "",
+) -> None:
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+    company = (company_id or "").strip()
+    if not company:
+        raise ValueError("company_id is required for tenant-scoped Qdrant deletion.")
     client = get_qdrant_client()
     name = collection_name()
     try:
@@ -161,6 +206,10 @@ def delete_by_document_id(document_db_id: int, *, trace_id: str = "") -> None:
             collection_name=name,
             points_selector=Filter(
                 must=[
+                    FieldCondition(
+                        key="company_id",
+                        match=MatchValue(value=company),
+                    ),
                     FieldCondition(
                         key="document_db_id",
                         match=MatchValue(value=document_db_id),
@@ -184,6 +233,8 @@ def search_vectors(
     payload_filter: Any | None = None,
     trace_id: str = "",
 ) -> list[Any]:
+    if payload_filter is None:
+        raise ValueError("payload_filter with company_id is required for Qdrant search.")
     qv = _coerce_query_vector(query_vector, trace_id=trace_id)
     if not qv:
         logger.warning("qdrant_search_skipped_empty_vector trace_id=%s", trace_id)

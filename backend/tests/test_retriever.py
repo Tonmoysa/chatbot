@@ -20,6 +20,7 @@ def test_retrieve_relaxed_pass_applies_min_similarity(settings):
     with patch("knowledge_base.services.retriever.LLMClient") as m_llm:
         inst = m_llm.return_value
         inst.is_configured.return_value = True
+        inst.is_embedding_configured.return_value = True
         inst.embed_texts.return_value = [[0.1, 0.2, 0.3]]
         with patch(
             "knowledge_base.services.retriever.search_vectors",
@@ -27,12 +28,17 @@ def test_retrieve_relaxed_pass_applies_min_similarity(settings):
         ) as m_search:
             from knowledge_base.services.retriever import retrieve_for_query
 
-            hits, emb = retrieve_for_query("leave policy ki?", "t-relax")
+            hits, emb = retrieve_for_query(
+                "leave policy ki?",
+                "t-relax",
+                company_id="company-a",
+            )
 
     assert emb >= 0
     assert len(hits) == 1
     assert hits[0].score == 0.42
     assert m_search.call_count == 2
+    assert m_search.call_args_list[0].kwargs.get("payload_filter") is not None
     assert m_search.call_args_list[0].kwargs.get("score_threshold") == 0.99
     assert m_search.call_args_list[1].kwargs.get("score_threshold") is None
 
@@ -54,6 +60,7 @@ def test_retrieve_coerces_numpy_embedding(settings):
     with patch("knowledge_base.services.retriever.LLMClient") as m_llm:
         inst = m_llm.return_value
         inst.is_configured.return_value = True
+        inst.is_embedding_configured.return_value = True
         inst.embed_texts.return_value = [np.array([0.5, 0.6], dtype=np.float32)]
         with patch(
             "knowledge_base.services.retriever.search_vectors",
@@ -61,7 +68,7 @@ def test_retrieve_coerces_numpy_embedding(settings):
         ) as m_search:
             from knowledge_base.services.retriever import retrieve_for_query
 
-            hits, _ = retrieve_for_query("q", "t-np")
+            hits, _ = retrieve_for_query("q", "t-np", company_id="company-a")
 
     assert len(hits) == 1
     qv = m_search.call_args[0][0]
@@ -92,6 +99,7 @@ def test_retrieve_fallback_when_all_below_min_similarity(settings):
     with patch("knowledge_base.services.retriever.LLMClient") as m_llm:
         inst = m_llm.return_value
         inst.is_configured.return_value = True
+        inst.is_embedding_configured.return_value = True
         inst.embed_texts.return_value = [[0.1, 0.2, 0.3]]
         with patch(
             "knowledge_base.services.retriever.search_vectors",
@@ -100,7 +108,9 @@ def test_retrieve_fallback_when_all_below_min_similarity(settings):
             from knowledge_base.services.retriever import retrieve_for_query
 
             hits, _ = retrieve_for_query(
-                "How many annual leaves can be carried forward?", "t-fallback"
+                "How many annual leaves can be carried forward?",
+                "t-fallback",
+                company_id="company-a",
             )
 
     assert len(hits) >= 3

@@ -140,6 +140,7 @@ LOCAL_EMBED_DEVICE = os.environ.get("LOCAL_EMBED_DEVICE", "").strip()
 
 # --- Embeddings + Qdrant (RAG) ---
 OPENAI_EMBED_MODEL = os.environ.get("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+EMBEDDING_VERSION = os.environ.get("EMBEDDING_VERSION", "").strip()
 EMBED_TIMEOUT_SECONDS = float(os.environ.get("EMBED_TIMEOUT_SECONDS", "30"))
 EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", "64"))
 EMBED_CACHE_TTL_SECONDS = int(os.environ.get("EMBED_CACHE_TTL_SECONDS", "86400"))
@@ -178,23 +179,12 @@ KB_MAX_EXTRACT_CHARS = int(os.environ.get("KB_MAX_EXTRACT_CHARS", "200000"))
 KB_CHUNK_TARGET_TOKENS = int(os.environ.get("KB_CHUNK_TARGET_TOKENS", "500"))
 KB_CHUNK_OVERLAP_TOKENS = int(os.environ.get("KB_CHUNK_OVERLAP_TOKENS", "140"))
 
-REDIS_URL = os.environ.get("REDIS_URL", "").strip()
-
-if REDIS_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": REDIS_URL,
-            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
-        }
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "hr-chatbot-local",
     }
-else:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "hr-chatbot-local",
-        }
-    }
+}
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["chat.authentication.ApiKeyAuthentication"],

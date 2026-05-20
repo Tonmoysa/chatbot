@@ -19,22 +19,31 @@ from knowledge_base.services.sanitization import (
 logger = logging.getLogger("hr_chatbot")
 
 
-def _department_filter(department: str | None):
-    if not department or not str(department).strip():
-        return None
+def _tenant_filter(*, company_id: str, department: str | None):
+    company = (company_id or "").strip()
+    if not company:
+        raise ValueError("company_id is required for tenant-scoped retrieval.")
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-        return Filter(
-            must=[
+        must = [
+            FieldCondition(
+                key="company_id",
+                match=MatchValue(value=company),
+            )
+        ]
+        if department and str(department).strip():
+            must.append(
                 FieldCondition(
                     key="department",
                     match=MatchValue(value=str(department).strip()),
                 )
-            ]
+            )
+        return Filter(
+            must=must
         )
     except Exception:
-        return None
+        raise
 
 
 def _hit_score(hit: Any) -> float:
@@ -150,6 +159,7 @@ def retrieve_for_query(
     query: str,
     trace_id: str,
     *,
+    company_id: str,
     department: str | None = None,
     top_k: int | None = None,
     score_threshold: float | None = None,
@@ -179,7 +189,7 @@ def retrieve_for_query(
         )
 
     llm = LLMClient()
-    if not llm.is_configured():
+    if not llm.is_embedding_configured():
         return [], 0
 
     t0 = time.perf_counter()
@@ -234,7 +244,7 @@ def retrieve_for_query(
     cand_mult = max(2, int(getattr(settings, "RAG_RELAXED_CANDIDATE_MULTIPLIER", 3)))
     relaxed_limit = max(k * cand_mult, k + 16)
 
-    flt = _department_filter(department)
+    flt = _tenant_filter(company_id=company_id, department=department)
     t1 = time.perf_counter()
     try:
         hits = search_vectors(
@@ -300,6 +310,7 @@ def retrieve_for_query(
             "max_score": max_score,
             "scores": [round(_hit_score(h), 4) for h in hits[:8]],
             "collection": getattr(settings, "QDRANT_COLLECTION", ""),
+            "company_id": company_id,
         },
     )
 

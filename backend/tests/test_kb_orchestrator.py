@@ -8,6 +8,9 @@ from chat.constants import INTENT_UNKNOWN
 from chat.services.orchestrator import ChatOrchestrator
 
 
+COMPANY_ID = "company-a"
+
+
 @pytest.mark.django_db
 def test_orchestrator_hr_policy_uses_rag_when_hit(settings):
     settings.KB_RAG_ENABLED = True
@@ -24,6 +27,7 @@ def test_orchestrator_hr_policy_uses_rag_when_hit(settings):
         out = orch.run_chat(
             message="What is the dress code policy?",
             session_id=None,
+            company_id=COMPANY_ID,
             employee_id="E1",
             trace_id="trace-rag-1",
         )
@@ -44,6 +48,7 @@ def test_orchestrator_hr_policy_rag_miss_skips_static_handbook(settings):
         out = orch.run_chat(
             message="Attendance & Working Hours Policy",
             session_id=None,
+            company_id=COMPANY_ID,
             employee_id="E1",
             trace_id="trace-rag-miss",
         )
@@ -74,6 +79,7 @@ def test_orchestrator_unknown_policy_question_rag(settings):
         out = orch.run_chat(
             message="what is the policy on zebras at the office",
             session_id=None,
+            company_id=COMPANY_ID,
             employee_id="E1",
             trace_id="trace-rag-2",
         )

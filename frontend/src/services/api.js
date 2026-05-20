@@ -1,4 +1,5 @@
 import axios from "axios";
+import { getClientIdentity } from "../utils/session.js";
 import { generateTraceId } from "../utils/trace.js";
 
 const resolvedBaseURL = () => {
@@ -29,11 +30,28 @@ client.interceptors.request.use((config) => {
  * POST /api/chat/
  * @returns {{ data: object, sessionIdHeader: string | null }}
  */
-export async function postChat({ message, sessionId, documentText }) {
+function resolveIdentity(identity) {
+  return identity || getClientIdentity();
+}
+
+function appendIdentity(form, identity) {
+  form.append("company_id", identity.company_id);
+  form.append("employee_id", identity.employee_id);
+  form.append("session_id", identity.session_id);
+  if (identity.idempotency_key) {
+    form.append("idempotency_key", identity.idempotency_key);
+  }
+}
+
+export async function postChat({ message, sessionId, documentText, identity }) {
+  const requestIdentity = resolveIdentity(identity);
   const res = await client.post("/api/chat/", {
+    company_id: requestIdentity.company_id,
+    employee_id: requestIdentity.employee_id,
+    session_id: sessionId || requestIdentity.session_id,
     message,
-    session_id: sessionId,
     document_text: documentText || "",
+    idempotency_key: requestIdentity.idempotency_key || "",
   });
   const sessionIdHeader =
     res.headers["x-session-id"] ?? res.headers["X-Session-Id"] ?? null;
@@ -47,9 +65,11 @@ export async function postChat({ message, sessionId, documentText }) {
  * POST /api/document/extract/ (multipart)
  * @returns {{ data: object, documentText: string }}
  */
-export async function postDocumentExtract({ file }) {
+export async function postDocumentExtract({ file, identity }) {
+  const requestIdentity = resolveIdentity(identity);
   const form = new FormData();
   form.append("file", file);
+  appendIdentity(form, requestIdentity);
   const res = await client.post("/api/document/extract/", form, {
     headers: { "Content-Type": "multipart/form-data" },
   });
@@ -63,10 +83,12 @@ export async function postDocumentExtract({ file }) {
  * POST /api/voice/transcribe/ (Phase 2 — OpenAI Whisper via backend).
  * @returns {Promise<{ data: object, transcript: string, traceId: string | null }>}
  */
-export async function postVoiceTranscribe({ blob, mimeType, language, traceId }) {
+export async function postVoiceTranscribe({ blob, mimeType, language, traceId, identity }) {
+  const requestIdentity = resolveIdentity(identity);
   const form = new FormData();
   const ext = mimeType?.includes("mp4") ? "m4a" : "webm";
   form.append("file", blob, `recording.${ext}`);
+  appendIdentity(form, requestIdentity);
   if (language) {
     form.append("language", language);
   }

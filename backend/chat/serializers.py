@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from chat.identity import TenantIdentitySerializerMixin
 
 class HrEnvelopeSerializer(serializers.Serializer):
     """Standard API response envelope (OpenAPI / contract)."""
@@ -17,46 +18,33 @@ class HrEnvelopeSerializer(serializers.Serializer):
     )
 
 
-class ChatRequestSerializer(serializers.Serializer):
+class ChatRequestSerializer(TenantIdentitySerializerMixin):
     message = serializers.CharField(max_length=8000)
-    session_id = serializers.CharField(
-        max_length=64, required=False, allow_blank=True, default=""
-    )
-    employee_id = serializers.CharField(
-        max_length=64, required=False, allow_blank=True, default="demo-employee"
-    )
     # Optional: text extracted from an uploaded receipt/document
     document_text = serializers.CharField(
         max_length=60000, required=False, allow_blank=True, default=""
     )
 
 
-class DocumentExtractRequestSerializer(serializers.Serializer):
+class DocumentExtractRequestSerializer(TenantIdentitySerializerMixin):
     file = serializers.FileField()
 
 
-class IntentRequestSerializer(serializers.Serializer):
+class IntentRequestSerializer(TenantIdentitySerializerMixin):
     message = serializers.CharField(max_length=8000)
 
 
-class ExtractRequestSerializer(serializers.Serializer):
+class ExtractRequestSerializer(TenantIdentitySerializerMixin):
     message = serializers.CharField(max_length=8000)
     intent = serializers.CharField(max_length=64)
-    session_id = serializers.CharField(
-        max_length=64, required=False, allow_blank=True, default=""
-    )
 
 
-class DecisionRequestSerializer(serializers.Serializer):
+class DecisionRequestSerializer(TenantIdentitySerializerMixin):
     intent = serializers.CharField(max_length=64)
     entities = serializers.JSONField()
-    employee_id = serializers.CharField(
-        max_length=64, required=False, allow_blank=True, default="demo-employee"
-    )
 
 
-class MockCreateSerializer(serializers.Serializer):
-    employee_id = serializers.CharField(max_length=64, default="demo-employee")
+class MockCreateSerializer(TenantIdentitySerializerMixin):
     intent = serializers.CharField(max_length=64)
     entities = serializers.JSONField(required=False, default=dict)
     decision = serializers.JSONField(required=False, default=dict)

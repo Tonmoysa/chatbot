@@ -14,6 +14,22 @@ from chat.services.leave_days import compute_requested_leave_days
 from chat.services.orchestrator import ChatOrchestrator
 
 
+COMPANY_ID = "company-a"
+TEST_SESSION_ID = "test-session"
+
+
+def run_tenant_chat(orch: ChatOrchestrator, **kwargs):
+    return orch.run_chat(company_id=COMPANY_ID, **kwargs)
+
+
+def tenant_leave_balance(orch: ChatOrchestrator, employee_id: str, session_id: str = TEST_SESSION_ID):
+    return orch.crm.get_leave_balance(
+        company_id=COMPANY_ID,
+        employee_id=employee_id,
+        session_id=session_id,
+    )
+
+
 @pytest.mark.django_db
 def test_expense_auto_threshold():
     eng = DecisionEngine()
@@ -128,7 +144,8 @@ def test_attendance_pending_review():
 @pytest.mark.django_db
 def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     orch = ChatOrchestrator()
-    first = orch.run_chat(
+    first = run_tenant_chat(
+        orch,
         message="amar expense lagbe 100 taka",
         session_id=None,
         employee_id="dedupe-expense-unique",
@@ -139,7 +156,11 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
     rid1 = first["response"]["request_id"]
     assert rid1
 
-    session = orch.memory.get_or_create_session(str(sid), "dedupe-expense-unique")
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID,
+        employee_id="dedupe-expense-unique",
+        session_id=str(sid),
+    )
     ctx = orch.memory.recent_context_lines(session)
     # Simulate the second-turn dedupe decision deterministically.
     entities = orch.entities.extract_rules_only("amar expense lagbe 100 taka", intent="EXPENSE_CLAIM")
@@ -185,7 +206,8 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
     sid = None
     last = None
     for i, msg in enumerate(chain):
-        last = orch.run_chat(
+        last = run_tenant_chat(
+            orch,
             message=msg,
             session_id=sid,
             employee_id=emp,
@@ -200,7 +222,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
     rid1 = last["response"]["request_id"]
     assert rid1 and last["decision"]["outcome"] == "APPROVED"
 
-    bal_after_first = orch.crm.get_leave_balance(emp)["leave_balance_days"]
+    bal_after_first = tenant_leave_balance(orch, emp, sid)["leave_balance_days"]
 
     dup_chain = (
         "amar abar kalke chuti lagbe",
@@ -209,7 +231,8 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
         "cousin graduation out of Dhaka.",
     )
     for i, msg in enumerate(dup_chain):
-        last2 = orch.run_chat(
+        last2 = run_tenant_chat(
+            orch,
             message=msg,
             session_id=sid,
             employee_id=emp,
@@ -218,7 +241,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
         sid = last2["_session_id"]
 
     assert "আগেই জমা" in (last2["response"]["message"] or "")
-    assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == bal_after_first
+    assert tenant_leave_balance(orch, emp, sid)["leave_balance_days"] == bal_after_first
 
 
 def test_expense_day_summary_intent_rules(monkeypatch):
@@ -264,7 +287,8 @@ def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
             "amar ajke 120 taka lunch",
         )
     ):
-        r = orch.run_chat(
+        r = run_tenant_chat(
+            orch,
             message=msg,
             session_id=sid,
             employee_id=emp,
@@ -273,7 +297,8 @@ def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
         assert r["decision"]["outcome"] == "AUTO_APPROVED", r
         sid = r["_session_id"]
 
-    summ = orch.run_chat(
+    summ = run_tenant_chat(
+        orch,
         message="Today I forgot how much I spent — show me a summary.",
         session_id=sid,
         employee_id=emp,
@@ -336,7 +361,8 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
         )
         last_local = None
         for i, msg in enumerate(steps):
-            last_local = orch.run_chat(
+            last_local = run_tenant_chat(
+                orch,
                 message=msg,
                 session_id=sid_local,
                 employee_id=emp,
@@ -347,12 +373,12 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
                 assert last_local["decision"]["outcome"] == "NEEDS_CLARIFICATION"
         assert last_local["decision"]["outcome"] == "APPROVED"
 
-    assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 12.0
+    assert tenant_leave_balance(orch, emp)["leave_balance_days"] == 12.0
     run_leave_block("amar kalke chuti lagbe", "cal-kal")
-    assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 11.0
+    assert tenant_leave_balance(orch, emp)["leave_balance_days"] == 11.0
 
     run_leave_block("amar may er 11 tarik chuti lagbe", "cal-may")
-    assert orch.crm.get_leave_balance(emp)["leave_balance_days"] == 10.0
+    assert tenant_leave_balance(orch, emp)["leave_balance_days"] == 10.0
 
 
 @pytest.mark.django_db
@@ -402,7 +428,8 @@ def test_expense_same_day_300_then_200_second_needs_receipt(monkeypatch):
 
     emp = "daily-cap-orchestrator"
     orch = ChatOrchestrator()
-    first = orch.run_chat(
+    first = run_tenant_chat(
+        orch,
         message="amar ajke 300 taka cost hoyeche",
         session_id=None,
         employee_id=emp,
@@ -411,7 +438,8 @@ def test_expense_same_day_300_then_200_second_needs_receipt(monkeypatch):
     assert first["decision"]["outcome"] == "AUTO_APPROVED"
     sid = first["_session_id"]
 
-    second = orch.run_chat(
+    second = run_tenant_chat(
+        orch,
         message="amar ajke 200 taka cost hoyeche",
         session_id=sid,
         employee_id=emp,
@@ -445,7 +473,8 @@ def test_expense_three_small_claims_same_day_sum_to_cap_then_fourth_blocked(monk
         "amar ajke 100 taka tea stall hoyeche",
     )
     for i, msg in enumerate(msgs):
-        r = orch.run_chat(
+        r = run_tenant_chat(
+            orch,
             message=msg,
             session_id=sid,
             employee_id=emp,
@@ -453,7 +482,8 @@ def test_expense_three_small_claims_same_day_sum_to_cap_then_fourth_blocked(monk
         )
         assert r["decision"]["outcome"] == "AUTO_APPROVED", r
         sid = r["_session_id"]
-    fourth = orch.run_chat(
+    fourth = run_tenant_chat(
+        orch,
         message="amar ajke 50 taka cost hoyeche",
         session_id=sid,
         employee_id=emp,
@@ -489,7 +519,8 @@ def test_expense_today_then_tomorrow_same_amount_not_duplicate(monkeypatch):
 
     emp = "expense-policy-dedupe"
     orch = ChatOrchestrator()
-    first = orch.run_chat(
+    first = run_tenant_chat(
+        orch,
         message="amar ajke 300 taka cost hoyeche",
         session_id=None,
         employee_id=emp,
@@ -500,7 +531,8 @@ def test_expense_today_then_tomorrow_same_amount_not_duplicate(monkeypatch):
     rid1 = first["response"]["request_id"]
     assert rid1
 
-    second = orch.run_chat(
+    second = run_tenant_chat(
+        orch,
         message="amar kalker jonno 300 taka lagbe",
         session_id=sid,
         employee_id=emp,
