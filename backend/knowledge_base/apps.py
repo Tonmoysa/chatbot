@@ -5,3 +5,6 @@ class KnowledgeBaseConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "knowledge_base"
     verbose_name = "Knowledge base"
+
+    def ready(self) -> None:
+        import knowledge_base.signals  # noqa: F401

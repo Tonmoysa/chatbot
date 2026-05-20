@@ -83,12 +83,28 @@ _EMBEDDING_TOPIC_HINTS: Final[tuple[tuple[re.Pattern[str], tuple[str, ...]], ...
     ),
     (
         re.compile(
-            r"\bacceptable\s+use\b|\bpersonal\b.*illegal.*assets\b|"
-            r"\bcompany\s+(?:devices|equipment|computers|laptops)\b|\bউপস্থিতি\b|\battendance\b|"
-            r"\bflex\s*time\b|\bbio\b.*time\b|\bflexible\b.*working\b|\bfingerprint\b",
+            r"\bউপস্থিতি\b|\bhajira\b|\battendance\b|"
+            r"\bflex\s*time\b|\bbio\b.*time\b|\bflexible\b.*working\b|\bfingerprint\b|\bbiometric\b",
             re.I | re.UNICODE,
         ),
-        ("acceptable use company assets", "attendance tardiness policy"),
+        ("attendance working hours policy", "presence punctuality biometric time"),
+    ),
+    (
+        re.compile(
+            r"\bacceptable\s+use\b|\bpersonal\b.*illegal.*assets\b|"
+            r"\bcompany\s+(?:devices|equipment|computers|laptops)\b",
+            re.I | re.UNICODE,
+        ),
+        ("acceptable use company devices policy",),
+    ),
+    (
+        re.compile(
+            r"\b(?:cyber|cyber\s*security|cybersecurity|infosec|information\s+security|"
+            r"it\s+security|network\s+security|data\s+protection)\b|"
+            r"সাইবার|ইনফরমেশন\s*(?:সুরক্ষা|সিকিউরিটি)",
+            re.I | re.UNICODE,
+        ),
+        ("cybersecurity information security data classification policy",),
     ),
     (
         re.compile(

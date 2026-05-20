@@ -1,71 +1,72 @@
 """
-Multi-step paid / LWOP leave collection. LLM extracts hints; readiness and questions are deterministic.
+Dynamic slot-filling leave collection. Extracts all available fields first, asks only what is missing.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
+from chat.services.leave_draft_utils import (
+    DAY_SCOPE_FULL,
+    DAY_SCOPE_HALF,
+    LEAVE_PAYMENT_LWOP,
+    LEAVE_PAYMENT_PAID,
+    apply_leave_draft_defaults,
+    normalize_end_equals_start_if_missing,
+    supporting_document_needed,
+    validate_dates,
+)
+from chat.services.leave_policies import get_company_leave_policy
+from chat.services.leave_slot_extraction import (
+    extract_leave_slots,
+    merge_llm_entities_into_extraction,
+)
+from chat.services.leave_slots import (
+    SLOT_DATES,
+    apply_wizard_answer,
+    generate_question,
+    get_missing_slots,
+    prefill_draft_from_extraction,
+    summarize_captured,
+)
 
-LEAVE_PAYMENT_PAID = "paid"
-LEAVE_PAYMENT_LWOP = "lwop"
+__all__ = [
+    "LEAVE_PAYMENT_PAID",
+    "LEAVE_PAYMENT_LWOP",
+    "DAY_SCOPE_FULL",
+    "DAY_SCOPE_HALF",
+    "supporting_document_needed",
+    "process_leave_turn",
+    "pending_step",
+    "pending_question",
+    "is_leave_collecting",
+    "is_leave_paused",
+    "pause_leave_session",
+    "resume_leave_session",
+    "deactivate_leave_session",
+    "merge_extractor_entities",
+    "build_merged_entities_for_engine",
+]
 
-DAY_SCOPE_FULL = "full"
-DAY_SCOPE_HALF = "half"
-
-# Sick/medical leaves over this inclusive calendar span generally need proof.
-_SICK_DOCUMENT_MIN_SPAN_DAYS = 3
-
-# Same footer on every prompt so the orchestrator can spot leave follow-ups.
-_WIZ_FOOTER = "\n\n_(ছুটি ফর্ম — নিচে একটা করে উত্তর দিন)_"
-
-_MESSAGES: dict[str, str] = {
-    "leave_payment_category": (
-        "প্রথম প্রশ্ন (১/৫) — এই ছুটিটা **বেতনসহ** চান, নাকি **বেতন ছাড়া**?\n\n"
-        "• বেতনসহ = আপনার ছুটির ব্যালান্স থেকে কাটবে (লিখতে পারেন: বেতনসহ / paid)\n"
-        "• বেতন ছাড়া = বেতন কাটবে না; সাধারণত আগে ম্যানেজার বা HR-এর অনুমোদন লাগে (লিখতে পারেন: বেতন ছাড়া / unpaid)"
-        + _WIZ_FOOTER
+_LEAVE_TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"\b(sick(?:ness)?|ill(?:ness)?|medical|health)\b|অসুস্থ|জ্বর|ডাক্তার",
+        "sick",
     ),
-    "day_scope": (
-        "দ্বিতীয় প্রশ্ন (২/৫) — প্রতিদিন **পুরো দিন** নাকি **হাফ দিন** ছুটি?\n\n"
-        "উত্তর: পুরো দিন / হাফ দিন (ইংরেজিতে full বা half লিখলেও চলবে)"
-        + _WIZ_FOOTER
-    ),
-    "leave_dates": (
-        "তৃতীয় প্রশ্ন (৩/৫) — **কোন তারিখ(গুলো)** ছুটি চান?\n\n"
-        "• এক দিন হলে: কাল / আগামীকাল / বা তারিখ (যেমন 2026-05-12)\n"
-        "• একাধিক দিন হলে: 2026-05-12 থেকে 2026-05-14 — এভাবে লিখুন"
-        + _WIZ_FOOTER
-    ),
-    "reason": (
-        "চতুর্থ প্রশ্ন (৪/৫) — **কেন** ছুটি লাগছে? এক লাইনেই হবে।\n\n"
-        "উদাহরণ: পরিবারের কাজ, অসুস্থ, ভ্রমণ…"
-        + _WIZ_FOOTER
-    ),
-    "supporting_document": (
-        "পঞ্চম প্রশ্ন (৫/৫) — এই ধরনের ছুটিতে সাধারণত **ডাক্তারের চিট বা কাগজপত্র** লাগে।\n\n"
-        "ফাইল আপলোড করুন, অথবা লেখাটা এখানে পেস্ট করুন। এখন দিতে পারছেন না? শুধু **skip** লিখুন — তখন ম্যানেজার/HR দেখে নেবে।"
-        + _WIZ_FOOTER
-    ),
-}
-
-_DATE_VALIDATION_MESSAGES: dict[str, str] = {
-    "BAD_RANGE": (
-        "তারিখটা একটু গুলিয়ে গেছে — **শেষ তারিখ** যেন **প্রথম তারিখের আগে** না হয়। আবার ঠিক করে লিখুন।"
-        + _WIZ_FOOTER
-    ),
-    "IN_PAST": (
-        "আজকের **আগের** তারিখে ছুটি দেওয়া যাবে না। আজ বা পরের দিন দিন, অথবা পুরনো তারিখ লাগলে HR-এর সাথে কথা বলুন।"
-        + _WIZ_FOOTER
-    ),
-}
+    (r"\b(casual)\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
+    (r"\b(annual|vacation|pto)\b|বার্ষিক", "annual"),
+    (r"\b(unpaid|lwop)\b|বেতন\s*ছাড়া", "unpaid"),
+    (r"\b(maternity)\b|মাতৃত্ব", "maternity"),
+    (r"\b(paternity)\b|পিতৃত্ব", "paternity"),
+    (r"\b(emergency)\b|জরুরি", "emergency"),
+    (r"\b(compensatory|comp\s*off)\b|কম্পেনসেটরি", "compensatory"),
+)
 
 
 def clone_workflow_state(state: dict[str, Any] | None) -> dict[str, Any]:
-    raw = dict(state or {})
-    return raw
+    return dict(state or {})
 
 
 def is_leave_collecting(workflow_state: dict[str, Any] | None) -> bool:
@@ -79,7 +80,6 @@ def is_leave_paused(workflow_state: dict[str, Any] | None) -> bool:
 
 
 def pause_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
-    """Keep draft but stop mid-wizard prompts (user switched to another HR topic)."""
     wf = clone_workflow_state(workflow_state)
     lr = wf.get("leave_request")
     if not lr:
@@ -104,117 +104,60 @@ def resume_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
 
 
 def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
-    """
-    Return the wizard's current pending prompt without mutating state.
-
-    Used by the orchestrator to resurface the in-progress wizard step after
-    answering an out-of-band query (e.g. a balance probe) while the wizard
-    is still active — so the user always knows where to pick back up.
-    """
     if not is_leave_collecting(workflow_state):
         return None
     block = (workflow_state or {}).get("leave_request") or {}
     draft = dict(block.get("draft") or {})
-    step = _first_missing_step(draft)
-    if not step:
+    missing = get_missing_slots(draft)
+    if not missing:
         return None
-    return _question_for_step(step, date_error=None)
+    return generate_question(missing[0], draft, remaining=len(missing))
 
 
 def pending_step(workflow_state: dict[str, Any] | None) -> str | None:
-    """Return the name of the wizard's current pending step (or None)."""
     if not is_leave_collecting(workflow_state):
         return None
     block = (workflow_state or {}).get("leave_request") or {}
-    draft = dict(block.get("draft") or {})
-    return _first_missing_step(draft)
+    return block.get("pending_slot") or _first_missing_step(dict(block.get("draft") or {}))
 
 
 def deactivate_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
     wf = clone_workflow_state(workflow_state)
-    if "leave_request" in wf:
-        wf.pop("leave_request", None)
+    wf.pop("leave_request", None)
     return wf
-
-
-def _today() -> date:
-    return date.today()
-
-
-def _parse_iso(d: Any) -> date | None:
-    if not d:
-        return None
-    s = str(d).strip().split("T")[0]
-    try:
-        return datetime.fromisoformat(s).date()
-    except Exception:
-        return None
-
-
-def _calendar_span_days(draft: dict[str, Any]) -> int:
-    s = _parse_iso(draft.get("start_date"))
-    e = _parse_iso(draft.get("end_date") or draft.get("start_date"))
-    if not s or not e:
-        return 0
-    return max(0, (e - s).days) + 1
-
-
-def _effective_leave_bucket(draft: dict[str, Any]) -> str:
-    """Broad bucket for sick vs other for document policy."""
-    lt = str(draft.get("leave_type") or "").strip().lower()
-    reason_l = str(draft.get("reason") or "").lower()
-    if lt in {"sick", "medical", "health"}:
-        return "sick"
-    sickish = ("sick", "ill", "fever", "medical", "doctor", "hospital")
-    if any(w in reason_l for w in sickish):
-        return "sick"
-    return "other"
-
-
-def supporting_document_needed(draft: dict[str, Any]) -> bool:
-    span = _calendar_span_days(draft)
-    return _effective_leave_bucket(draft) == "sick" and span >= _SICK_DOCUMENT_MIN_SPAN_DAYS
-
-
-def _normalize_end_equals_start_if_missing(draft: dict[str, Any]) -> None:
-    """If user gave only one day copy to end_date when missing."""
-    s = draft.get("start_date")
-    if draft.get("end_date"):
-        return
-    if not s:
-        return
-    draft["end_date"] = str(s).strip().split("T")[0]
 
 
 def _infer_payment_category(message: str, draft: dict[str, Any]) -> None:
     low = message.lower().strip()
     if draft.get("leave_payment_category"):
         return
-
-    if re.search(
-        r"\b(lwop|leave without pay|without pay|unpaid)\b|\bbezeton\b|\bbezaton\b|\bbina\s+beton\b|\bbez\s+beton\b",
-        low,
-    ):
+    if re.search(r"\b(lwop|unpaid)\b|বেতন\s*ছাড়া", low):
         draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
+    elif re.search(r"\bpaid\b|বেতনসহ", low):
+        draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
+
+
+def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
+    if draft.get("leave_type"):
         return
-    if re.search(
-        r"\bpaid\b|\bpto\b|\bannual\b|\bcasual\b|\b(?:from|using)\s+(?:my\s+)?balance\b",
-        low,
-    ):
-        if re.search(r"\b(lwop|unpaid)\b", low):
-            draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
-        else:
-            draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
+    low = message.lower()
+    for pattern, code in _LEAVE_TYPE_PATTERNS:
+        if re.search(pattern, low, re.I):
+            draft["leave_type"] = code
+            if code == "unpaid":
+                draft.setdefault("leave_payment_category", LEAVE_PAYMENT_LWOP)
+            else:
+                draft.setdefault("leave_payment_category", LEAVE_PAYMENT_PAID)
+            return
 
 
 def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
     if draft.get("day_scope"):
         return
     low = message.lower()
-    if re.search(r"\bhalf\b|half[- ]day|semi|অর্ধ", low):
+    if re.search(r"\bhalf\b|হাফ|অর্ধ", low):
         draft["day_scope"] = DAY_SCOPE_HALF
-        return
-    if re.search(r"\bfull\b|whole\s*day|\bwhole\b|সম্পূর্ণ\b", low):
+    elif re.search(r"\bfull\b|পুরো", low):
         draft["day_scope"] = DAY_SCOPE_FULL
 
 
@@ -223,45 +166,18 @@ def _reason_from_message(message: str) -> str | None:
     if len(m) < 4:
         return None
     low = m.lower().strip()
-
-    refusal = ("skip doc", "skip document", "^skip$")
-    if re.match(r"^skip$", low.strip()):
+    if re.match(r"^(paid|lwop|unpaid|full|half)\b", low) and len(m.split()) <= 3:
         return None
-
-    if any(m.lower().startswith(x) for x in ("paid", "lwop", "unpaid", "full ", "half ")):
-        if len(m.split()) <= 6 and not any(c.isdigit() for c in m):
-            maybe_structural = False
-            for kw in ("family", "sick", "travel", "wedding", "medical"):
-                if kw in low:
-                    maybe_structural = True
-            if not maybe_structural:
-                return None
-    stripped = low
     stripped = re.sub(
-        r"^(paid|lwop|unpaid|annual|pto|whole day|full day|half day|half|full)\b[\s,:-]*",
-        "",
-        stripped,
-        flags=re.I,
+        r"^(paid|lwop|unpaid|full|half)\b[\s,:-]*", "", low, flags=re.I
     ).strip(" ,.:;-")
-    if len(stripped) < 10:
-        if not re.search(r"(family|travel|sick|wedding|planned|annual|pto|urgent)", stripped):
-            return None
-        if len(stripped) < 3:
-            return None
-        return stripped
-    # Longer textual reply — treat whole message minus leading structural fluff
-    remainder = stripped
-    remainder = remainder.strip(",.:;-")
-    return remainder.strip()[:2000]
+    return stripped[:2000] if len(stripped) >= 4 else None
 
 
 def merge_extractor_entities(draft: dict[str, Any], entities: dict[str, Any]) -> None:
-    """Apply LLM / rule extractor fields into mutable draft."""
-
     dt = entities.get("document_text")
     if dt and str(dt).strip():
         draft["document_text"] = str(dt).strip()
-
     for key in (
         "start_date",
         "end_date",
@@ -275,83 +191,50 @@ def merge_extractor_entities(draft: dict[str, Any], entities: dict[str, Any]) ->
         v = entities.get(key)
         if v is None or v == "":
             continue
-
         if key == "leave_payment_category":
             s = str(v).strip().lower()
-            if s in {"paid", "pto", "annual", "casual", "balance"}:
-                draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
-            elif s in {"lwop", "unpaid", "without_pay", "leave_without_pay"}:
-                draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
+            draft["leave_payment_category"] = (
+                LEAVE_PAYMENT_LWOP if s in {"lwop", "unpaid"} else LEAVE_PAYMENT_PAID
+            )
             continue
-
         if key == "day_scope":
             s = str(v).strip().lower()
-            if s in {"half", "half_day", "half-day"}:
-                draft["day_scope"] = DAY_SCOPE_HALF
-            elif s in {"full", "full_day", "full-day"}:
-                draft["day_scope"] = DAY_SCOPE_FULL
+            draft["day_scope"] = DAY_SCOPE_HALF if s.startswith("half") else DAY_SCOPE_FULL
             continue
-
         if key == "date" and not draft.get("start_date"):
             draft["start_date"] = str(v).split("T")[0]
             continue
-
         draft[key] = v
-
     rs = entities.get("description")
-    if rs and isinstance(rs, str) and rs.strip() and not draft.get("reason"):
-        draft["reason"] = rs.strip()[:2000]
-
-
-def _validate_dates(draft: dict[str, Any]) -> tuple[bool, str | None]:
-    s = _parse_iso(draft.get("start_date"))
-    e = _parse_iso(draft.get("end_date") or draft.get("start_date"))
-    if not s:
-        return True, None
-    if not e:
-        e = s
-        draft.setdefault("end_date", s.isoformat())
-    today = _today()
-    if s < today:
-        return False, "IN_PAST"
-    if e < s:
-        return False, "BAD_RANGE"
-    return True, None
+    if rs and str(rs).strip() and not draft.get("reason"):
+        draft["reason"] = str(rs).strip()[:2000]
 
 
 def _first_missing_step(draft: dict[str, Any]) -> str | None:
-    if not draft.get("leave_payment_category"):
-        return "leave_payment_category"
-    if not draft.get("day_scope"):
-        return "day_scope"
-    if not draft.get("start_date"):
-        return "leave_dates"
-    _normalize_end_equals_start_if_missing(draft)
-    if not draft.get("start_date"):
-        return "leave_dates"
-    ok, err = _validate_dates(draft)
-    if not ok and err:
-        return "leave_dates"
-    if not str(draft.get("reason") or "").strip():
-        return "reason"
-    if supporting_document_needed(draft):
-        if draft.get("supporting_document_waived"):
-            return None
-        doc = str(draft.get("document_text") or "").strip()
-        if not doc:
-            return "supporting_document"
-    return None
+    missing = get_missing_slots(draft)
+    return missing[0] if missing else None
 
 
-def _question_for_step(step: str, *, date_error: str | None) -> str:
-    if step == "leave_dates" and date_error:
-        return _DATE_VALIDATION_MESSAGES.get(date_error, _MESSAGES["leave_dates"])
-    return _MESSAGES.get(step, "Please provide the missing information to continue your leave request.")
+def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
+    if not pending_slot:
+        return False
+    t = message.strip().lower()
+    if pending_slot == "leave_type":
+        if t in {"paid", "unpaid", "lwop", "full", "half"}:
+            return False
+        return len(t) >= 2
+    if pending_slot == "leave_payment_category":
+        return t in {"paid", "unpaid", "lwop"} or bool(re.match(r"^(paid|বেতন)", t))
+    if pending_slot == "day_scope":
+        return t in {"full", "half"} or "full" in t or "half" in t
+    if pending_slot == "supporting_document":
+        return t == "skip" or len(t) > 8
+    if pending_slot == "reason":
+        return len(t) >= 4 and t not in {"paid", "unpaid", "full", "half"}
+    return False
 
 
 def build_merged_entities_for_engine(draft: dict[str, Any]) -> dict[str, Any]:
-    """Flat entity dict for DecisionEngine + CRM."""
-
     out: dict[str, Any] = {
         "start_date": draft.get("start_date"),
         "end_date": draft.get("end_date") or draft.get("start_date"),
@@ -360,7 +243,7 @@ def build_merged_entities_for_engine(draft: dict[str, Any]) -> dict[str, Any]:
         "leave_type": draft.get("leave_type"),
         "reason": draft.get("reason"),
         "leave_payment_category": draft.get("leave_payment_category"),
-        "day_scope": draft.get("day_scope") or DAY_SCOPE_FULL,
+        "day_scope": draft.get("day_scope"),
         "document_text": draft.get("document_text"),
     }
     if draft.get("supporting_document_waived"):
@@ -373,80 +256,102 @@ def process_leave_turn(
     workflow_state: dict[str, Any],
     message: str,
     entities: dict[str, Any],
+    company_id: str = "",
 ) -> dict[str, Any]:
-    """
-    Returns:
-      workflow_state: updated session JSON
-      merged_entities: snapshot for logging + decision path
-      complete: whether decision engine should run final leave rules
-      question: assistant prompt if not complete
-    """
     wf = clone_workflow_state(workflow_state)
     block = wf.setdefault("leave_request", {})
     block["active"] = True
     draft = dict(block.get("draft") or {})
     draft["_last_user_message"] = message
+    pending_slot = block.get("pending_slot")
+    policy = get_company_leave_policy(company_id or "default")
+    extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
 
-    # Wizard steps must not trust LLM-invented payment / scope flags on the first utterance —
-    # they are parsed only from the actual user wording below.
-    safe_entities = dict(entities)
-    safe_entities.pop("leave_payment_category", None)
-    safe_entities.pop("day_scope", None)
-    safe_entities.pop("reason", None)
-    safe_entities.pop("description", None)
-    merge_extractor_entities(draft, safe_entities)
-    _infer_payment_category(message, draft)
-    _infer_day_scope(message, draft)
+    if pending_slot and _is_direct_slot_answer(message, pending_slot):
+        apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
+    else:
+        ext = dict(entities)
+        if extraction.leave_payment_category.confidence != "high":
+            ext.pop("leave_payment_category", None)
+        if extraction.day_scope.confidence != "high":
+            ext.pop("day_scope", None)
+        if extraction.reason.confidence != "high":
+            ext.pop("reason", None)
+            ext.pop("description", None)
+        # Must merge the same sanitized overlay as prefill uses — merging full
+        # `entities` let LLM hallucinated reason/description bypass slot gating
+        # and auto-complete the wizard (duplicate flows then lost active state).
+        merge_llm_entities_into_extraction(extraction, ext)
+        prefill_draft_from_extraction(draft, extraction, external_entities=ext)
+        _infer_leave_type(message, draft)
+        _infer_payment_category(message, draft)
+        _infer_day_scope(message, draft)
 
-    _normalize_end_equals_start_if_missing(draft)
-
-    if _first_missing_step(draft) == "reason":
-        inferred = _reason_from_message(message)
-        if inferred:
-            draft["reason"] = str(inferred).strip()[:2000]
-
+    normalize_end_equals_start_if_missing(draft)
     date_err: str | None = None
     if draft.get("start_date"):
-        ok, code = _validate_dates(draft)
+        ok, code = validate_dates(draft)
         if not ok:
             date_err = code
             if code == "BAD_RANGE":
                 draft.pop("end_date", None)
-            if code == "IN_PAST":
-                draft.pop("start_date", None)
-                draft.pop("end_date", None)
-                draft.pop("date", None)
+            # Keep start/end on IN_PAST so the user sees what was parsed; slot layer
+            # still asks for a corrected date via date_error + SLOT_DATES.
 
-    miss0 = _first_missing_step(draft)
-    if miss0 == "supporting_document" and message.strip().lower() == "skip":
-        draft["supporting_document_waived"] = True
+    missing = get_missing_slots(
+        draft, policy=policy, extraction=extraction, date_error=date_err
+    )
 
-    missing = _first_missing_step(draft)
-    if missing == "leave_dates" and date_err:
+    if not missing:
+        # Apply tenant/policy defaults only once every required slot is explicit.
+        apply_leave_draft_defaults(draft, policy)
+        block.pop("pending_slot", None)
         block["draft"] = draft
         wf["leave_request"] = block
+        wf["last_completed_leave_workflow"] = {
+            "workflow_type": "leave_request",
+            "completed": True,
+            "slots_snapshot": {
+                k: draft.get(k)
+                for k in (
+                    "start_date",
+                    "end_date",
+                    "leave_type",
+                    "leave_payment_category",
+                    "day_scope",
+                    "reason",
+                )
+            },
+        }
+        wf = deactivate_leave_session(wf)
         return {
             "workflow_state": wf,
             "merged_entities": build_merged_entities_for_engine(draft),
-            "complete": False,
-            "question": _question_for_step("leave_dates", date_error=date_err),
+            "complete": True,
+            "question": None,
         }
 
-    if missing:
-        block["draft"] = draft
-        wf["leave_request"] = block
-        return {
-            "workflow_state": wf,
-            "merged_entities": build_merged_entities_for_engine(draft),
-            "complete": False,
-            "question": _question_for_step(missing, date_error=None),
-        }
+    slot = missing[0]
+    block["pending_slot"] = slot
+    block["draft"] = draft
+    block["workflow_type"] = "leave_request"
+    block["missing_slots"] = list(missing)
+    block["completed"] = False
+    wf["leave_request"] = block
+    question = generate_question(
+        slot,
+        draft,
+        remaining=len(missing),
+        date_error=date_err if slot == SLOT_DATES else None,
+        extraction=extraction,
+    )
+    ack = summarize_captured(draft)
+    if ack and slot not in (SLOT_DATES, "supporting_document"):
+        question = ack + "\n\n" + question
 
-    merged = build_merged_entities_for_engine(draft)
-    wf = deactivate_leave_session(wf)
     return {
         "workflow_state": wf,
-        "merged_entities": merged,
-        "complete": True,
-        "question": None,
+        "merged_entities": build_merged_entities_for_engine(draft),
+        "complete": False,
+        "question": question,
     }

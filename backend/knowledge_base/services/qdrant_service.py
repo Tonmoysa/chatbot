@@ -183,6 +183,55 @@ def upsert_points(points: list, *, trace_id: str = "") -> None:
         )
 
 
+def purge_company_vectors(company_id: str, *, trace_id: str = "") -> int | None:
+    """
+    Delete all Qdrant points for a tenant. Use after admin deletes when vectors were left behind.
+    Returns Qdrant operation info when available.
+    """
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    company = (company_id or "").strip()
+    if not company:
+        raise ValueError("company_id is required for tenant-scoped Qdrant purge.")
+    client = get_qdrant_client()
+    name = collection_name()
+    try:
+        if hasattr(client, "collection_exists") and not client.collection_exists(name):
+            return 0
+    except Exception:
+        pass
+    try:
+        result = client.delete(
+            collection_name=name,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="company_id",
+                        match=MatchValue(value=company),
+                    ),
+                ]
+            ),
+        )
+        logger.info(
+            "qdrant_company_purged trace_id=%s company_id=%s collection=%s",
+            trace_id,
+            company,
+            name,
+        )
+        status = getattr(result, "status", None)
+        if status is not None:
+            return getattr(status, "deleted", None) or getattr(status, "num_deleted", None)
+        return None
+    except Exception as exc:
+        logger.warning(
+            "qdrant_company_purge_failed trace_id=%s company_id=%s err=%s",
+            trace_id,
+            company,
+            type(exc).__name__,
+        )
+        raise
+
+
 def delete_by_document_id(
     document_db_id: int,
     *,
@@ -221,6 +270,34 @@ def delete_by_document_id(
         logger.warning(
             "qdrant_delete_failed trace_id=%s err=%s",
             trace_id,
+            type(exc).__name__,
+        )
+
+
+def delete_points_by_ids(point_ids: list[str], *, trace_id: str = "") -> None:
+    """Delete specific Qdrant points by UUID (used when a single chunk row is removed)."""
+    ids = [str(pid).strip() for pid in point_ids if str(pid).strip()]
+    if not ids:
+        return
+    client = get_qdrant_client()
+    name = collection_name()
+    try:
+        if hasattr(client, "collection_exists") and not client.collection_exists(name):
+            return
+    except Exception:
+        pass
+    try:
+        from qdrant_client.models import PointIdsList
+
+        client.delete(
+            collection_name=name,
+            points_selector=PointIdsList(points=ids),
+        )
+    except Exception as exc:
+        logger.warning(
+            "qdrant_delete_points_failed trace_id=%s count=%s err=%s",
+            trace_id,
+            len(ids),
             type(exc).__name__,
         )
 

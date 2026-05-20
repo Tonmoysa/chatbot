@@ -188,7 +188,11 @@ class EntityExtractor:
         # Guardrail: for leave-like messages without an explicit range or day-count,
         # ignore any LLM-provided end_date/days that may have leaked from prior context.
         looks_like_leave = bool(
-            re.search(r"(leave|time off|pto|vacation|holiday|day off|ছুটি|chuti|chhuti)", low)
+            re.search(
+                r"(leave|time\s*off|pto|vacation|holiday|day\s*off|ছুটি|chuti|chhuti|chutti|"
+                r"sick\s*leave|medical\s*leave|leave\s*lagbe|leave\s*nite|ছুটি\s*লাগবে|ছুটি\s*নিতে|ছুটি\s*চাই)",
+                low,
+            )
         )
         has_explicit_range = bool(
             re.search(r"\b(from|to|until|till)\b", low) or re.search(r"(থেকে|পর্যন্ত)", message)
@@ -211,7 +215,9 @@ class EntityExtractor:
                 e["amount"] = float(m.group(1))
             except ValueError:
                 pass
-        if re.search(r"\btomorrow\b", low):
+        if re.search(
+            r"\b(tomorrow|tomarrow|tommorow|tommorrow|tomorow|tmrw|tmw)\b", low
+        ):
             d = date.today() + timedelta(days=1)
             ds = d.isoformat()
             if e.get("date") is None:
@@ -226,10 +232,22 @@ class EntityExtractor:
                 e["date"] = ds
             if e.get("start_date") is None:
                 e["start_date"] = ds
-        if re.search(r"\btoday\b", low):
+        if re.search(r"\b(today|ajke|aj\s*ke)\b|আজকে|আজ\b", low):
             d = date.today().isoformat()
             if e.get("date") is None:
                 e["date"] = d
+            if e.get("start_date") is None:
+                e["start_date"] = d
+        m_dur = re.search(r"\b(\d+)\s*(din|diner|days?|দিন)\b", low)
+        if m_dur and e.get("days") is None:
+            try:
+                n = int(m_dur.group(1))
+                e["days"] = float(n)
+                if e.get("start_date") and not e.get("end_date"):
+                    s = date.fromisoformat(str(e["start_date"]).split("T")[0])
+                    e["end_date"] = (s + timedelta(days=n - 1)).isoformat()
+            except ValueError:
+                pass
         if re.search(r"\bnext week\b", low):
             d0 = date.today() + timedelta(days=7)
             if e.get("start_date") is None:
@@ -271,10 +289,24 @@ class EntityExtractor:
         mmock = re.search(r"\bMOCK-[A-Za-z0-9]{6,}\b", message, re.I)
         if mmock and not e.get("request_id"):
             e["request_id"] = mmock.group(0).upper()
-        if re.search(r"\bsick\b", low):
+        if re.search(r"\bsick(?:ness)?\b|\bill(?:ness)?\b|অসুস্থ|জ্বর", low):
             e["leave_type"] = e.get("leave_type") or "sick"
-        if re.search(r"\bannual|vacation|pto\b", low):
+        if re.search(r"\bannual|vacation|pto\b|বার্ষিক", low):
             e["leave_type"] = e.get("leave_type") or "annual"
+        if re.search(r"\bcasual\b|ক্যাজুয়াল|নৈমিত্তিক", low):
+            e["leave_type"] = e.get("leave_type") or "casual"
+        if re.search(r"\b(maternity)\b|মাতৃত্ব", low):
+            e["leave_type"] = e.get("leave_type") or "maternity"
+        if re.search(r"\b(paternity)\b|পিতৃত্ব", low):
+            e["leave_type"] = e.get("leave_type") or "paternity"
+        if re.search(r"\b(emergency)\b|জরুরি", low):
+            e["leave_type"] = e.get("leave_type") or "emergency"
+        if re.search(r"\b(compensatory|comp\s*off)\b", low):
+            e["leave_type"] = e.get("leave_type") or "compensatory"
+        if re.search(r"\bfull\s*day\b|পুরো\s*দিন", low):
+            e["day_scope"] = e.get("day_scope") or "full"
+        if re.search(r"\bhalf\b|হাফ|অর্ধ", low):
+            e["day_scope"] = e.get("day_scope") or "half"
 
         if looks_like_leave:
             inferred_start = _infer_leave_calendar_start(low)

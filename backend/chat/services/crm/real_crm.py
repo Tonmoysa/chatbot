@@ -117,6 +117,27 @@ class RealCRMAdapter(CRMAdapter):
             session_id=session_id,
         )
 
+    def list_employee_leave_requests(
+        self,
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        try:
+            return self._request(
+                "GET",
+                f"/employees/{employee_id}/leave-requests/",
+                company_id=company_id,
+                employee_id=employee_id,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.debug(
+                "leave_requests_list_unavailable employee=%s", employee_id
+            )
+            return {"leave_requests": []}
+
     def get_expense_day_approved_total(
         self,
         *,

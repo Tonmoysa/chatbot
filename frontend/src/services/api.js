@@ -43,6 +43,41 @@ function appendIdentity(form, identity) {
   }
 }
 
+/**
+ * GET /api/chat/sessions/
+ */
+export async function fetchChatSessions({ identity, limit = 30 } = {}) {
+  const requestIdentity = resolveIdentity(identity);
+  const res = await client.get("/api/chat/sessions/", {
+    params: {
+      company_id: requestIdentity.company_id,
+      employee_id: requestIdentity.employee_id,
+      limit,
+    },
+  });
+  return {
+    sessions: Array.isArray(res.data?.sessions) ? res.data.sessions : [],
+  };
+}
+
+/**
+ * GET /api/chat/sessions/:sessionId/
+ */
+export async function fetchChatSession({ sessionId, identity }) {
+  const requestIdentity = resolveIdentity(identity);
+  const sid = (sessionId || requestIdentity.session_id || "").trim();
+  const res = await client.get(`/api/chat/sessions/${encodeURIComponent(sid)}/`, {
+    params: {
+      company_id: requestIdentity.company_id,
+      employee_id: requestIdentity.employee_id,
+    },
+  });
+  return {
+    sessionId: res.data?.session_id || sid,
+    messages: Array.isArray(res.data?.messages) ? res.data.messages : [],
+  };
+}
+
 export async function postChat({ message, sessionId, documentText, identity }) {
   const requestIdentity = resolveIdentity(identity);
   const res = await client.post("/api/chat/", {

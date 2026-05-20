@@ -1,61 +1,17 @@
-import { useCallback, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useSpeechRecognition } from "../../hooks/useSpeechRecognition.js";
 import { useVoiceWaveform } from "../../hooks/useVoiceWaveform.js";
+import { CheckIcon, CloseIcon, MicIcon } from "./ChatInput.icons.jsx";
 import VoiceWaveform from "./VoiceWaveform.jsx";
 
-function MicIcon({ className }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-      <path d="M19 10v1a7 7 0 0 1-14 0v-1" />
-      <path d="M12 18v4" />
-      <path d="M8 22h8" />
-    </svg>
-  );
-}
+const MAX_TEXTAREA_HEIGHT = 168;
 
-function CheckIcon({ className }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M20 6 9 17l-5-5" />
-    </svg>
-  );
-}
-
-function CloseIcon({ className }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  );
-}
+const QUICK_REPLIES = [
+  { label: "Leave Balance", prompt: "Check my leave balance" },
+  { label: "Payslip", prompt: "How do I access my payslip?" },
+  { label: "Benefits", prompt: "Explain our company benefits" },
+  { label: "Contact HR", prompt: "How do I contact HR?" },
+];
 
 export default function ChatInput({ onSend, disabled, onClearError, error }) {
   const [value, setValue] = useState("");
@@ -77,6 +33,13 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
   } = useSpeechRecognition({ disabled });
 
   const waveformLevels = useVoiceWaveform(isDictating);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || isDictating) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
+  }, [value, isDictating]);
 
   const handleStartDictation = useCallback(async () => {
     setLocalError(null);
@@ -117,6 +80,10 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
     setValue("");
     setFile(null);
     if (fileRef.current) fileRef.current.value = "";
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (el) el.style.height = "auto";
+    });
   }, [disabled, isDictating, onSend, onClearError, value, file, clearSpeechError]);
 
   const onKeyDown = useCallback(
@@ -131,162 +98,187 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
 
   const showError = error || speechError || localError;
   const voiceUnavailable = !capabilities.supported;
+  const canSend = !disabled && !isDictating && value.trim().length > 0;
+
+  if (isDictating) {
+    return (
+      <>
+        {showError ? (
+          <div
+            className="chat-footer"
+            style={{ borderTop: "none", paddingBottom: 0 }}
+            role="alert"
+          >
+            <div
+              style={{
+                borderRadius: 8,
+                border: "1px solid #fecaca",
+                background: "#fef2f2",
+                padding: "8px 12px",
+                fontSize: "0.85rem",
+                color: "#991b1b",
+              }}
+            >
+              {showError}
+            </div>
+          </div>
+        ) : null}
+        <div className="dictation-footer" role="region" aria-label="Dictate message">
+          <span style={{ color: "var(--hr-danger)", fontWeight: 600 }}>Listening…</span>
+          <button type="button" className="action-btn" onClick={() => fileRef.current?.click()} disabled={disabled} title="Attach file" aria-label="Attach file">
+            <svg className="hr-icon" viewBox="0 0 24 24">
+              <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z" />
+            </svg>
+          </button>
+          <input
+            ref={fileRef}
+            id={fileId}
+            type="file"
+            accept="image/*,.pdf"
+            className="hidden-input"
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              setFile(f);
+            }}
+            disabled={disabled}
+          />
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+            <VoiceWaveform levels={waveformLevels} />
+            {sessionText ? (
+              <p style={{ fontSize: "0.8rem", margin: 0, color: "var(--hr-text-dark)" }} aria-live="polite">
+                {sessionText}
+              </p>
+            ) : (
+              <p style={{ fontSize: "0.75rem", margin: 0, color: "var(--hr-text-light)" }}>Speak in Bangla, Banglish, or English</p>
+            )}
+          </div>
+          <button type="button" className="action-btn" onClick={handleCancel} aria-label="Cancel dictation">
+            <CloseIcon className="size-5" />
+          </button>
+          <button
+            type="button"
+            className="action-btn send-btn"
+            onClick={handleConfirm}
+            aria-label="Done — add text to message"
+          >
+            <CheckIcon className="size-5" />
+          </button>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <div className="border-t border-slate-200/90 bg-slate-50/95 px-3 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/95 sm:px-4">
+    <>
       {showError ? (
-        <div
-          className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
-          role="alert"
-        >
-          {showError}
+        <div className="chat-footer" style={{ borderTop: "none", paddingBottom: 0 }} role="alert">
+          <div
+            style={{
+              borderRadius: 8,
+              border: "1px solid #fde68a",
+              background: "#fffbeb",
+              padding: "8px 12px",
+              fontSize: "0.85rem",
+              color: "#854d0e",
+            }}
+          >
+            {showError}
+          </div>
         </div>
       ) : null}
 
-      <div className="mx-auto flex max-w-3xl flex-col gap-2">
+      <form className="chat-footer" onSubmit={(e) => e.preventDefault()}>
         <input
           ref={fileRef}
           id={fileId}
           type="file"
           accept="image/*,.pdf"
-          className="hidden"
+          className="hidden-input"
           onChange={(e) => {
             const f = e.target.files?.[0] || null;
             setFile(f);
           }}
-          disabled={disabled || isDictating}
+          disabled={disabled}
         />
 
-        {isDictating ? (
-          <div
-            className="flex items-center gap-2 rounded-[28px] border border-slate-300/80 bg-white px-3 py-2.5 shadow-md dark:border-slate-600 dark:bg-slate-900"
-            role="region"
-            aria-label="Dictate message"
-          >
+        <div className="quick-replies">
+          {QUICK_REPLIES.map((item) => (
             <button
+              key={item.label}
               type="button"
-              onClick={() => document.getElementById(fileId)?.click()}
+              className="quick-btn"
               disabled={disabled}
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-              aria-label="Attach file"
+              onClick={() => {
+                onClearError?.();
+                onSend(item.prompt);
+              }}
             >
-              <span className="text-xl font-light leading-none">+</span>
+              {item.label}
             </button>
+          ))}
+        </div>
 
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-              <div className="flex min-h-9 items-center gap-2">
-                <div
-                  className="hidden flex-1 border-b border-dotted border-slate-300 dark:border-slate-600 sm:block"
-                  aria-hidden
-                />
-                <VoiceWaveform levels={waveformLevels} />
-              </div>
-              {sessionText ? (
-                <p
-                  className="truncate px-1 text-sm text-slate-700 dark:text-slate-200"
-                  aria-live="polite"
+        <div className="input-group">
+          <button type="button" className="action-btn" onClick={() => fileRef.current?.click()} title="Attach file" aria-label="Attach file">
+            <svg className="hr-icon" viewBox="0 0 24 24">
+              <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z" />
+            </svg>
+          </button>
+
+          <div className="input-wrapper">
+            {file ? (
+              <div className="file-preview-pill">
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
+                <button
+                  type="button"
+                  className="remove-file"
+                  onClick={() => {
+                    setFile(null);
+                    if (fileRef.current) fileRef.current.value = "";
+                  }}
+                  aria-label="Remove file"
                 >
-                  {sessionText}
-                </p>
-              ) : (
-                <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                  Listening… speak in Bangla, Banglish, or English
-                </p>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={handleCancel}
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-              aria-label="Cancel dictation"
-            >
-              <CloseIcon className="size-5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={handleConfirm}
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white shadow-sm hover:bg-emerald-500 focus-visible:ring-2 focus-visible:ring-emerald-500"
-              aria-label="Done — add text to message"
-              title="Done"
-            >
-              <CheckIcon className="size-5" />
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-end gap-2">
-            <button
-              type="button"
-              onClick={() => document.getElementById(fileId)?.click()}
-              disabled={disabled}
-              className="inline-flex h-[44px] shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-              aria-label="Attach receipt"
-            >
-              Attach
-            </button>
-
-            <button
-              type="button"
-              onClick={handleStartDictation}
-              disabled={disabled || voiceUnavailable}
-              title={
-                voiceUnavailable
-                  ? "Voice input is not supported in this browser"
-                  : "Dictate message"
-              }
-              className="inline-flex h-[44px] shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-slate-700 shadow-sm outline-none transition hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-              aria-label="Dictate message"
-            >
-              <MicIcon className="size-5" />
-            </button>
-
-            <label htmlFor="chat-input" className="sr-only">
+                  ✕
+                </button>
+              </div>
+            ) : null}
+            <label htmlFor="chat-input-hr" className="sr-only">
               Message
             </label>
             <textarea
               ref={textareaRef}
-              id="chat-input"
+              id="chat-input-hr"
+              className="chat-textarea"
               rows={1}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={onKeyDown}
               disabled={disabled}
-              placeholder="Ask about leave, policies, or HR requests…"
-              className="min-h-[44px] flex-1 resize-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[15px] text-slate-900 shadow-sm outline-none ring-emerald-500/0 transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-emerald-500"
+              placeholder="Type a message..."
+              style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
             />
-            <button
-              type="button"
-              onClick={submit}
-              disabled={disabled || !value.trim()}
-              className="inline-flex shrink-0 items-center justify-center rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm outline-none transition hover:bg-emerald-700 focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-emerald-600 dark:hover:bg-emerald-500 dark:focus-visible:ring-offset-slate-950"
-              aria-label="Send message"
-            >
-              Send
-            </button>
           </div>
-        )}
 
-        {file ? (
-          <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
-            <div className="min-w-0">
-              <span className="font-medium">Receipt:</span>{" "}
-              <span className="truncate">{file.name}</span>
-            </div>
+          {!value.trim() && !file && !disabled ? (
             <button
               type="button"
-              onClick={() => {
-                setFile(null);
-                if (fileRef.current) fileRef.current.value = "";
-              }}
-              disabled={disabled}
-              className="ml-3 rounded-lg px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-800"
+              className={`action-btn mic-btn ${isDictating ? "recording" : ""}`}
+              onClick={handleStartDictation}
+              disabled={voiceUnavailable}
+              title={voiceUnavailable ? "Voice input is not supported in this browser" : "Dictate message"}
+              aria-label="Dictate message"
             >
-              Remove
+              <MicIcon className="size-5" />
             </button>
-          </div>
-        ) : null}
-      </div>
-    </div>
+          ) : (
+            <button type="button" className="action-btn send-btn" disabled={!canSend} onClick={submit} aria-label="Send message">
+              <svg className="hr-icon" viewBox="0 0 24 24" style={{ marginLeft: 2 }}>
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+              </svg>
+            </button>
+          )}
+        </div>
+      </form>
+    </>
   );
 }

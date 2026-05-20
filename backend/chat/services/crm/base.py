@@ -23,6 +23,19 @@ class CRMAdapter(ABC):
     ) -> dict[str, Any]:
         ...
 
+    def list_employee_leave_requests(
+        self,
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """
+        Active/recent leave rows for overlap detection. Real CRM may implement
+        GET /employees/{id}/leave-requests/; default empty list.
+        """
+        return {"leave_requests": []}
+
     @abstractmethod
     def get_expense_day_approved_total(
         self,

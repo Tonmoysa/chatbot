@@ -44,6 +44,17 @@ class DecisionRequestSerializer(TenantIdentitySerializerMixin):
     entities = serializers.JSONField()
 
 
+class ChatSessionsQuerySerializer(serializers.Serializer):
+    company_id = serializers.CharField(max_length=64)
+    employee_id = serializers.CharField(max_length=64)
+    limit = serializers.IntegerField(required=False, default=30, min_value=1, max_value=50)
+
+
+class ChatSessionDetailQuerySerializer(serializers.Serializer):
+    company_id = serializers.CharField(max_length=64)
+    employee_id = serializers.CharField(max_length=64)
+
+
 class MockCreateSerializer(TenantIdentitySerializerMixin):
     intent = serializers.CharField(max_length=64)
     entities = serializers.JSONField(required=False, default=dict)

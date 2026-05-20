@@ -225,6 +225,9 @@ SPECTACULAR_SETTINGS = {
     "SECURITY": [{"ApiKeyAuth": []}],
 }
 
+# Per-tenant leave policy overrides (company_id -> dict). See chat.services.leave_policies.
+COMPANY_LEAVE_POLICIES: dict = {}
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

@@ -10,6 +10,8 @@ from rest_framework.views import APIView
 
 from chat.serializers import (
     ChatRequestSerializer,
+    ChatSessionDetailQuerySerializer,
+    ChatSessionsQuerySerializer,
     DecisionRequestSerializer,
     DocumentExtractRequestSerializer,
     ExtractRequestSerializer,
@@ -17,6 +19,7 @@ from chat.serializers import (
     IntentRequestSerializer,
     MockCreateSerializer,
 )
+from chat.services.session_history import get_session_messages, list_sessions
 from chat.identity import identity_from_request, identity_from_validated_data
 from chat.services.crm.factory import get_crm_adapter
 from chat.services.decision_engine import DecisionEngine
@@ -106,6 +109,83 @@ class HealthView(APIView):
     request=ChatRequestSerializer,
     responses={200: HrEnvelopeSerializer},
 )
+@extend_schema(
+    summary="List recent chat sessions",
+    tags=["Chat"],
+    parameters=[
+        OpenApiParameter("company_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+        OpenApiParameter("employee_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+        OpenApiParameter("limit", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
+    ],
+)
+class ChatSessionsListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        ser = ChatSessionsQuerySerializer(data=request.query_params)
+        ser.is_valid(raise_exception=True)
+        company_id = ser.validated_data["company_id"].strip()
+        employee_id = ser.validated_data["employee_id"].strip()
+        sessions = list_sessions(
+            company_id=company_id,
+            employee_id=employee_id,
+            limit=ser.validated_data.get("limit") or 30,
+        )
+        return Response(
+            {
+                "trace_id": _trace(request),
+                "status": "success",
+                "sessions": sessions,
+            }
+        )
+
+
+@extend_schema(
+    summary="Load messages for a chat session",
+    tags=["Chat"],
+    parameters=[
+        OpenApiParameter("company_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+        OpenApiParameter("employee_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+        OpenApiParameter("session_id", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
+    ],
+)
+class ChatSessionDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id: str):
+        ser = ChatSessionDetailQuerySerializer(data=request.query_params)
+        ser.is_valid(raise_exception=True)
+        identity = identity_from_validated_data(
+            {
+                **ser.validated_data,
+                "session_id": session_id,
+            }
+        )
+        messages = get_session_messages(
+            company_id=identity.company_id,
+            employee_id=identity.employee_id,
+            session_id=identity.session_id,
+        )
+        if messages is None:
+            return Response(
+                {
+                    "trace_id": _trace(request),
+                    "status": "not_found",
+                    "session_id": identity.session_id,
+                    "messages": [],
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(
+            {
+                "trace_id": _trace(request),
+                "status": "success",
+                "session_id": identity.session_id,
+                "messages": messages,
+            }
+        )
+
+
 class ChatView(APIView):
     permission_classes = [IsAuthenticated]
 

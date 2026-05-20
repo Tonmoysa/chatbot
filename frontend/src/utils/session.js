@@ -1,6 +1,6 @@
 const STORAGE_PREFIX = "hr-chatbot-session-id";
 
-function newSessionId() {
+export function newSessionId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
   }
@@ -57,6 +57,13 @@ export function setSessionId(sessionId, identity = {}) {
   } catch {
     /* ignore */
   }
+}
+
+/** Start a fresh chat thread (new session id in local storage). */
+export function rotateSessionId(identity) {
+  const id = newSessionId();
+  setSessionId(id, identity);
+  return id;
 }
 
 export function getClientIdentity() {

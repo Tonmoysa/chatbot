@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from chat.services.leave_workflow import DAY_SCOPE_HALF, DAY_SCOPE_FULL
+from chat.services.leave_draft_utils import DAY_SCOPE_FULL, DAY_SCOPE_HALF
 
 
 def compute_requested_leave_days(entities: dict[str, Any]) -> float:

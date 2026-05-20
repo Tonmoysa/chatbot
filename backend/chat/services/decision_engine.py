@@ -17,11 +17,12 @@ from chat.constants import (
     INTENT_WFH_REQUEST,
 )
 from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
-from chat.services.leave_days import compute_requested_leave_days
+from chat.services.leave_approval import resolve_leave_decision
+from chat.services.leave_policies import get_company_leave_policy
+from chat.services.leave_validation import validate_leave_request
 from chat.services.leave_workflow import (
     LEAVE_PAYMENT_LWOP,
     LEAVE_PAYMENT_PAID,
-    supporting_document_needed,
 )
 
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
@@ -97,6 +98,50 @@ class DecisionEngine:
             }
 
         if intent == INTENT_EXPENSE_CLAIM:
+            # Enterprise workflow submission (collect → confirm → CRM payload).
+            if entities.get("expense_workflow_submit"):
+                items = list(entities.get("expense_items") or [])
+                if not items:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": "কোনো expense line পাওয়া যায়নি।",
+                        "rules_applied": ["EXPENSE_WORKFLOW_EMPTY"],
+                    }
+                inc_iso = entities.get("expense_incurred_date") or infer_expense_incurred_date_iso(
+                    message="", hints=entities, today=date.today()
+                )
+                try:
+                    inc_d = datetime.fromisoformat(str(inc_iso).split("T")[0]).date()
+                except Exception:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": "Expense date could not be read.",
+                        "rules_applied": ["EXPENSE_DATE_INVALID"],
+                    }
+                if inc_d > date.today():
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "Company policy: submit each day's expense on that day (or after it occurs). "
+                            "আজকের আগে/ভবিষ্যৎ তারিখের খরচ এখন জমা দেওয়া যাবে না।"
+                        ),
+                        "rules_applied": ["EXPENSE_FUTURE_DATE_SUBMIT_LATER"],
+                    }
+                total = sum(float(r.get("amount") or 0) for r in items)
+                return {
+                    "outcome": "SUBMITTED",
+                    "reason": (
+                        f"Expense request queued for CRM review ({len(items)} line(s), "
+                        f"total {total:g} BDT). Finance approves in HR system — not in chat."
+                    ),
+                    "rules_applied": ["EXPENSE_WORKFLOW_SUBMITTED"],
+                    # Mock CRM day-summary still keys off AUTO_APPROVED totals until PHP API ships.
+                    "_crm_outcome_hint": "AUTO_APPROVED",
+                }
+
+            # LEGACY / OBSOLETE: single-amount auto-approve / HR-routing in chatbot.
+            # Replaced by expense_workflow.py + expense_submission_service.py.
+            # Kept for direct DecisionEngine unit tests and backward compatibility only.
             amount = entities.get("amount")
             if amount is None:
                 return {
@@ -192,9 +237,8 @@ class DecisionEngine:
 
         if intent == INTENT_LEAVE_REQUEST:
             """
-            Final validation after the chatbot finished the multi-step leave wizard.
-            Outcomes are explicit: auto-approve only for paid leave with enough balance
-            and clean policy checks; otherwise route to manager/HR.
+            Enterprise leave path: tenant policy, overlap guard, balance split,
+            duration-based approval tiers. LLM does not approve.
             """
             pay = str(entities.get("leave_payment_category") or "").strip().lower()
             if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
@@ -240,70 +284,33 @@ class DecisionEngine:
                     "rules_applied": ["LEAVE_REASON_REQUIRED"],
                 }
 
-            docs_required = supporting_document_needed(entities)
-            doc_plain = str(entities.get("document_text") or "").strip()
-            waived = bool(entities.get("supporting_document_waived"))
-            if docs_required:
-                if not doc_plain:
-                    if waived:
-                        return {
-                            "outcome": "PENDING_APPROVAL",
-                            "reason": (
-                                "কাগজপত্র এখন দেননি বা skip লিখেছেন — তাই আগে **ম্যানেজার বা HR** "
-                                "একবার দেখে নেবেন, তারপর ছুটি চূড়ান্ত হবে।"
-                            ),
-                            "rules_applied": ["LEAVE_LONG_SICK_NO_DOC_ROUTE_MANAGER"],
-                            "route_to": "MANAGER",
-                        }
-                    return {
-                        "outcome": "NEEDS_CLARIFICATION",
-                        "reason": (
-                            "এই ছুটির জন্য সাধারণত **ডাক্তারের চিট বা প্রেসক্রিপশন** লাগে। "
-                            "ফাইল দিন বা লেখা পেস্ট করুন; দরকার হলে HR-এ ফোন করুন।"
-                        ),
-                        "rules_applied": ["LEAVE_LONG_SICK_DOC_REQUIRED"],
-                    }
-
-            requested = compute_requested_leave_days(entities)
+            company_id = str(crm_context.get("company_id") or "default")
+            employee_id = str(crm_context.get("employee_id") or "")
+            policy = get_company_leave_policy(company_id)
             balance = float(crm_context.get("leave_balance_days") or 0)
+            existing = list(crm_context.get("existing_leave_requests") or [])
 
-            if pay == LEAVE_PAYMENT_LWOP:
-                return {
-                    "outcome": "PENDING_APPROVAL",
-                    "reason": (
-                        "বেতন ছাড়া ছুটি — অফিসের নিয়ম অনুযায়ী আগে **ম্যানেজার বা HR** "
-                        "একবার দেখে নেবেন। আপনার আবেদন জমা হয়েছে, অনুমোদনের জন্য অপেক্ষা করুন।"
-                    ),
-                    "rules_applied": ["LEAVE_LWOP_ROUTE_MANAGER"],
-                    "route_to": "MANAGER",
-                }
-
-            if balance + 1e-9 >= requested:
-                day_word = "হাফ দিন" if "half" in scope else "পুরো দিন"
-                summary = (
-                    f"আপনার দেওয়া তথ্য অনুযায়ী প্রায় **{requested:g}** দিনের মতো ছুটি "
-                    f"({day_word}), তারিখ **{str(start)}** থেকে **{str(end or start)}**। "
-                    f"আপনার ব্যালান্সে প্রায় **{balance:g}** দিন আছে — যথেষ্ট।"
-                )
-                return {
-                    "outcome": "APPROVED",
-                    "reason": summary,
-                    "rules_applied": ["LEAVE_BALANCE_SUFFICIENT", "LEAVE_PAYLOAD_COMPLETE"],
-                }
-
-            short_by = requested - balance
-            return {
-                "outcome": "PENDING_APPROVAL",
-                "reason": (
-                    f"বেতনসহ ছুটির জন্য প্রায় **{requested:g}** দিন লাগছে, কিন্তু ব্যালান্সে "
-                    f"প্রায় **{balance:g}** দিন আছে — প্রায় **{short_by:g}** দিন কম। "
-                    "তারিখ একটু কমান, অথবা অংশ বেতন ছাড়া করুন, অথবা HR/ম্যানেজারের সাথে কথা বলুন।"
-                ),
-                "rules_applied": ["LEAVE_PAID_UNDERBALANCE_ROUTE_MANAGER"],
-                "route_to": "HR",
-                "requested_ledger_days": requested,
-                "balance_days": balance,
-            }
+            validation = validate_leave_request(
+                entities,
+                policy=policy,
+                balance_days=balance,
+                existing_records=existing,
+                company_id=company_id,
+                employee_id=employee_id,
+            )
+            decision = resolve_leave_decision(
+                entities,
+                policy=policy,
+                validation=validation,
+                crm_context=crm_context,
+            )
+            patches = decision.pop("_entity_patches", None)
+            if patches:
+                entities.update(patches)
+            for k in ("paid_leave_days", "unpaid_leave_days"):
+                if entities.get(k) is not None:
+                    decision[k] = entities[k]
+            return decision
 
         if intent == INTENT_WFH_REQUEST:
             return {

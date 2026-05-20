@@ -2,6 +2,7 @@ from typing import Any
 
 from chat.constants import (
     EXPENSE_DAY_CAP_BDT,
+    INTENT_EXPENSE_CLAIM,
     INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
@@ -116,7 +117,20 @@ def build_user_message(
     if outcome == "ERROR":
         return (reason or "An error occurred.", "error")
 
+    if outcome == "SUBMITTED" and intent == INTENT_EXPENSE_CLAIM:
+        sub = crm_payload.get("expense_submission") or {}
+        ref = str(sub.get("reference_id") or crm_payload.get("request_id") or "").strip()
+        msg = "আপনার expense request submit করা হয়েছে।"
+        if ref:
+            msg += f"\nReference ID: **{ref}**"
+        msg += (
+            "\n\nচূড়ান্ত অনুমোদন/প্রতিদান আপনার কোম্পানির CRM/Finance সিস্টেমে হবে — "
+            "এই চ্যাটবট শুধু জমা নেয়।"
+        )
+        return (msg, "success")
+
     if outcome == "AUTO_APPROVED":
+        # LEGACY / OBSOLETE: single-line auto-approve copy (orchestrator uses SUBMITTED now).
         rid = crm_payload.get("request_id", "")
         if crm_payload.get("_deduped"):
             msg = "You already submitted this expense claim earlier. No new request was created."
@@ -134,6 +148,30 @@ def build_user_message(
             msg = "আপনার ছুটির আবেদন অনুমোদন হয়েছে। ব্যালান্স ঠিক আছে।"
         if rid:
             msg += f" ট্র্যাকিং নম্বর: {rid}।"
+        return (msg, "success")
+
+    if outcome == "SUBMITTED" and intent == INTENT_LEAVE_REQUEST:
+        if crm_payload.get("_deduped"):
+            rid_d = str(crm_payload.get("request_id") or "").strip()
+            msg_d = (
+                "This leave request was already submitted. No new request was created."
+                + (f" Reference: **{rid_d}**." if rid_d else "")
+            )
+            return (msg_d, "success")
+        rid = str(crm_payload.get("request_id") or "").strip()
+        sub_ref = str((crm_payload.get("leave_submission") or {}).get("reference_id") or "").strip()
+        head = (
+            "Your leave request has been submitted. "
+            "Final approval is handled in your company's HR / CRM system — not in this chat."
+        )
+        detail = (decision or {}).get("reason") or ""
+        parts = [head]
+        if detail:
+            parts.append(str(detail).strip())
+        msg = "\n\n".join(parts)
+        ref = rid or sub_ref
+        if ref:
+            msg += f"\n\nReference: **{ref}**."
         return (msg, "success")
 
     if outcome == "REJECTED":

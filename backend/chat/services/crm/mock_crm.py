@@ -30,6 +30,33 @@ class MockCRMAdapter(CRMAdapter):
     def health(self) -> dict[str, Any]:
         return {"crm": "mock", "ok": True}
 
+    def list_employee_leave_requests(
+        self,
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        company, emp = self._identity(company_id, employee_id, session_id)
+        rows: list[dict[str, Any]] = []
+        for rid, rec in self._requests.items():
+            if (
+                rec.get("company_id") == company
+                and rec.get("employee_id") == emp
+                and rec.get("intent") == "LEAVE_REQUEST"
+            ):
+                rows.append(
+                    {
+                        "request_id": rid,
+                        "company_id": company,
+                        "employee_id": emp,
+                        "status": rec.get("status"),
+                        "leave_status": (rec.get("decision") or {}).get("leave_status"),
+                        "entities": rec.get("entities") or {},
+                    }
+                )
+        return {"leave_requests": rows}
+
     def get_leave_balance(
         self,
         *,
@@ -68,7 +95,8 @@ class MockCRMAdapter(CRMAdapter):
             ):
                 continue
             dec = rec.get("decision") or {}
-            if dec.get("outcome") != "AUTO_APPROVED":
+            outcome = str(dec.get("outcome") or "")
+            if outcome not in ("AUTO_APPROVED", "SUBMITTED"):
                 continue
             ent = rec.get("entities") or {}
             inc = str(ent.get("expense_incurred_date") or ent.get("date") or "").split("T")[
@@ -77,7 +105,12 @@ class MockCRMAdapter(CRMAdapter):
             if not inc or inc != target:
                 continue
             try:
-                total += float(ent.get("amount") or 0)
+                if ent.get("expense_items"):
+                    total += sum(
+                        float(x.get("amount") or 0) for x in (ent.get("expense_items") or [])
+                    )
+                else:
+                    total += float(ent.get("amount") or 0)
             except (TypeError, ValueError):
                 pass
         return {"expense_day_approved_total": float(total)}
@@ -179,10 +212,12 @@ class MockCRMAdapter(CRMAdapter):
             self._balances[bal_key] = self._default_balance(emp)
 
         rid = f"MOCK-{uuid.uuid4().hex[:10].upper()}"
-        # Real-feel simulation: approved leave reduces leave balance
-        if intent == "LEAVE_REQUEST" and (decision or {}).get("outcome") == "APPROVED":
-            used = self._requested_leave_days(entities or {})
-            self._balances[bal_key] = max(0.0, float(self._balances[bal_key]) - float(used))
+        # Leave balance is updated only in CRM after approval — not when logging chatbot submission.
+
+        leave_status = (decision or {}).get("leave_status")
+        crm_status = self._initial_status(decision)
+        if intent == "LEAVE_REQUEST" and leave_status:
+            crm_status = self._map_leave_lifecycle_status(str(leave_status))
 
         self._requests[rid] = {
             "request_id": rid,
@@ -193,7 +228,8 @@ class MockCRMAdapter(CRMAdapter):
             "intent": intent,
             "entities": entities,
             "decision": decision,
-            "status": self._initial_status(decision),
+            "status": crm_status,
+            "leave_status": leave_status or crm_status,
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
         if idem:
@@ -205,6 +241,7 @@ class MockCRMAdapter(CRMAdapter):
         mapping = {
             "AUTO_APPROVED": "APPROVED",
             "APPROVED": "APPROVED",
+            "SUBMITTED": "PENDING",
             "REJECTED": "REJECTED",
             "PENDING_APPROVAL": "PENDING",
             "PENDING_REVIEW": "PENDING_REVIEW",
@@ -212,6 +249,19 @@ class MockCRMAdapter(CRMAdapter):
             "NEEDS_CLARIFICATION": "DRAFT",
         }
         return mapping.get(str(outcome), "PENDING")
+
+    @staticmethod
+    def _map_leave_lifecycle_status(leave_status: str) -> str:
+        m = {
+            "approved": "APPROVED",
+            "rejected": "REJECTED",
+            "cancelled": "CANCELLED",
+            "pending": "PENDING",
+            "manager_review": "PENDING",
+            "hr_review": "PENDING",
+            "draft": "DRAFT",
+        }
+        return m.get(leave_status.lower(), "PENDING")
 
     def get_request_status(
         self,

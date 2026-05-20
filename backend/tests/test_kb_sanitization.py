@@ -27,6 +27,22 @@ def test_build_retrieval_embedding_includes_hints():
     assert "annual" in low or "pto" in low or "carry" in low
 
 
+def test_hr_hints_attendance_topics_do_not_add_acceptable_use_noise():
+    """Attendance wording must not concatenate acceptable-use retrieval hints (# mixed policy bug)."""
+    q = preprocess_query("Attendance Rules ta amake bolo")
+    hint = hr_retrieval_hint_line(q)
+    low = hint.lower()
+    assert "acceptable use" not in low
+    assert "attendance" in low
+
+
+def test_hr_hints_for_cybersecurity_query():
+    q = preprocess_query("Cybersecurity Rules ta amake bolo")
+    hint = hr_retrieval_hint_line(q)
+    low = hint.lower()
+    assert "cyber" in low or "security" in low
+
+
 def test_preprocess_query_truncation():
     long_q = "x" * 5000
     assert len(preprocess_query(long_q)) <= 4000
