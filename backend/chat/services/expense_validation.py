@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from chat.constants import EXPENSE_DAY_CAP_BDT
-from chat.services.expense_extraction import EXPENSE_CATEGORIES, normalize_category
+from chat.services.expense_extraction import (
+    EXPENSE_CATEGORIES,
+    is_travel_category,
+    normalize_category,
+)
 
 
 @dataclass
@@ -63,6 +67,18 @@ def validate_expense_items(
             warnings.append(f"ডুপ্লিকেট লাইন: {cat} — {amt:g} Tk (একই মেসেজে দুবার)।")
         seen.add(key)
         total += amt
+
+        if is_travel_category(cat):
+            frm = str(row.get("from_location") or "").strip()
+            to = str(row.get("to_location") or "").strip()
+            if not frm or not to:
+                return ExpenseValidationResult(
+                    ok=False,
+                    blocking_message=(
+                        f"**{cat}** খরচের জন্য **From** ও **To** লোকেশন দুটোই লাগবে "
+                        "(যেমন: office theke badda, অথবা from office to motijheel)।"
+                    ),
+                )
 
     projected = float(day_logged_total) + total
     if projected > float(daily_cap) + 1e-9:

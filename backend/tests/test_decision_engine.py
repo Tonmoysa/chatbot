@@ -208,6 +208,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
         "paid",
         "full",
         "cousin graduation out of Dhaka.",
+        "yes",
     )
 
     sid = None
@@ -221,7 +222,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
             trace_id=f"lvwiz-{i}",
         )
         sid = last["_session_id"]
-        if i < len(chain) - 1:
+        if msg != "yes":
             assert (
                 last["decision"]["outcome"] == "NEEDS_CLARIFICATION"
             ), last["decision"]
@@ -237,6 +238,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
         "paid",
         "full",
         "cousin graduation out of Dhaka.",
+        "yes",
     )
     for i, msg in enumerate(dup_chain):
         last2 = run_tenant_chat(

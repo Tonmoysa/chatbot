@@ -27,3 +27,25 @@ def compute_requested_leave_days(entities: dict[str, Any]) -> float:
 
     ledger = requested * multiplier
     return max(0.5, float(ledger))
+
+
+def leave_booking_signature(entities: dict[str, Any]) -> tuple[str, str, float, str, str]:
+    """Stable tuple for duplicate leave detection within a session."""
+    start_raw = entities.get("start_date") or entities.get("date")
+    end_raw = entities.get("end_date")
+    start_s = ""
+    end_s = ""
+    if start_raw:
+        try:
+            start_s = str(datetime.fromisoformat(str(start_raw).split("T")[0]).date())
+        except Exception:
+            start_s = str(start_raw).split("T")[0]
+    if end_raw:
+        try:
+            end_s = str(datetime.fromisoformat(str(end_raw).split("T")[0]).date())
+        except Exception:
+            end_s = str(end_raw).split("T")[0]
+    ledger = compute_requested_leave_days(entities or {})
+    pay = str((entities or {}).get("leave_payment_category") or "")
+    scope = str((entities or {}).get("day_scope") or "")
+    return (start_s, end_s, float(ledger), pay, scope)

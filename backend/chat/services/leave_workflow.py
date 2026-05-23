@@ -23,13 +23,28 @@ from chat.services.leave_slot_extraction import (
     extract_leave_slots,
     merge_llm_entities_into_extraction,
 )
+from chat.services.leave_confirm import (
+    build_confirmation_prompt,
+    process_confirmation_turn,
+)
+from chat.services.leave_fsm import (
+    ACTIVE_FLOW_LEAVE,
+    STATUS_ACTIVE,
+    STATUS_PAUSED,
+    apply_leave_state,
+    clear_leave_flow,
+    deep_merge_draft,
+    is_awaiting_leave_confirmation,
+    mark_review_pending,
+    normalize_workflow_state,
+    read_leave_state,
+)
 from chat.services.leave_slots import (
     SLOT_DATES,
     apply_wizard_answer,
     generate_question,
     get_missing_slots,
     prefill_draft_from_extraction,
-    summarize_captured,
 )
 
 __all__ = [
@@ -42,7 +57,9 @@ __all__ = [
     "pending_step",
     "pending_question",
     "is_leave_collecting",
+    "is_leave_in_progress",
     "is_leave_paused",
+    "is_awaiting_leave_confirmation",
     "pause_leave_session",
     "resume_leave_session",
     "deactivate_leave_session",
@@ -70,44 +87,58 @@ def clone_workflow_state(state: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def is_leave_collecting(workflow_state: dict[str, Any] | None) -> bool:
-    lr = (workflow_state or {}).get("leave_request") or {}
-    return bool(lr.get("active"))
+    from chat.services.leave_fsm import is_leave_collecting as _fsm_collecting
+
+    return _fsm_collecting(workflow_state)
 
 
 def is_leave_paused(workflow_state: dict[str, Any] | None) -> bool:
-    lr = (workflow_state or {}).get("leave_request") or {}
-    return bool(lr.get("paused")) and not bool(lr.get("active"))
+    from chat.services.leave_fsm import is_leave_paused as _fsm_paused
+
+    return _fsm_paused(workflow_state)
+
+
+def is_leave_in_progress(workflow_state: dict[str, Any] | None) -> bool:
+    from chat.services.leave_fsm import is_leave_in_progress as _fsm_in_progress
+
+    return _fsm_in_progress(workflow_state)
 
 
 def pause_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
-    wf = clone_workflow_state(workflow_state)
-    lr = wf.get("leave_request")
-    if not lr:
+    wf = normalize_workflow_state(workflow_state)
+    st = read_leave_state(wf)
+    if st.get("active_flow") != ACTIVE_FLOW_LEAVE:
         return wf
-    lr = dict(lr)
-    lr["active"] = False
-    lr["paused"] = True
-    wf["leave_request"] = lr
-    return wf
+    return apply_leave_state(
+        wf,
+        draft=dict(st.get("draft") or {}),
+        step=st.get("step"),
+        status=STATUS_PAUSED,
+        review_pending=bool(st.get("review_pending")),
+    )
 
 
 def resume_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
-    wf = clone_workflow_state(workflow_state)
-    lr = wf.get("leave_request")
-    if not lr:
+    wf = normalize_workflow_state(workflow_state)
+    st = read_leave_state(wf)
+    if st.get("active_flow") != ACTIVE_FLOW_LEAVE:
         return wf
-    lr = dict(lr)
-    lr["active"] = True
-    lr["paused"] = False
-    wf["leave_request"] = lr
-    return wf
+    return apply_leave_state(
+        wf,
+        draft=dict(st.get("draft") or {}),
+        step=st.get("step"),
+        status=STATUS_ACTIVE,
+        review_pending=bool(st.get("review_pending")),
+    )
 
 
 def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
-    if not is_leave_collecting(workflow_state):
+    if not is_leave_in_progress(workflow_state):
         return None
-    block = (workflow_state or {}).get("leave_request") or {}
-    draft = dict(block.get("draft") or {})
+    st = read_leave_state(workflow_state)
+    draft = dict(st.get("draft") or {})
+    if is_awaiting_leave_confirmation(workflow_state):
+        return build_confirmation_prompt(draft)
     missing = get_missing_slots(draft)
     if not missing:
         return None
@@ -115,16 +146,14 @@ def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
 
 
 def pending_step(workflow_state: dict[str, Any] | None) -> str | None:
-    if not is_leave_collecting(workflow_state):
+    if not is_leave_in_progress(workflow_state):
         return None
-    block = (workflow_state or {}).get("leave_request") or {}
-    return block.get("pending_slot") or _first_missing_step(dict(block.get("draft") or {}))
+    st = read_leave_state(workflow_state)
+    return st.get("step") or _first_missing_step(dict(st.get("draft") or {}))
 
 
 def deactivate_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
-    wf = clone_workflow_state(workflow_state)
-    wf.pop("leave_request", None)
-    return wf
+    return clear_leave_flow(workflow_state)
 
 
 def _infer_payment_category(message: str, draft: dict[str, Any]) -> None:
@@ -174,7 +203,13 @@ def _reason_from_message(message: str) -> str | None:
     return stripped[:2000] if len(stripped) >= 4 else None
 
 
-def merge_extractor_entities(draft: dict[str, Any], entities: dict[str, Any]) -> None:
+def merge_extractor_entities(
+    draft: dict[str, Any],
+    entities: dict[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Patch draft from entities — by default never clobber filled slots."""
     dt = entities.get("document_text")
     if dt and str(dt).strip():
         draft["document_text"] = str(dt).strip()
@@ -191,6 +226,8 @@ def merge_extractor_entities(draft: dict[str, Any], entities: dict[str, Any]) ->
         v = entities.get(key)
         if v is None or v == "":
             continue
+        if not overwrite and draft.get(key):
+            continue
         if key == "leave_payment_category":
             s = str(v).strip().lower()
             draft["leave_payment_category"] = (
@@ -206,7 +243,7 @@ def merge_extractor_entities(draft: dict[str, Any], entities: dict[str, Any]) ->
             continue
         draft[key] = v
     rs = entities.get("description")
-    if rs and str(rs).strip() and not draft.get("reason"):
+    if rs and str(rs).strip() and (overwrite or not draft.get("reason")):
         draft["reason"] = str(rs).strip()[:2000]
 
 
@@ -215,8 +252,85 @@ def _first_missing_step(draft: dict[str, Any]) -> str | None:
     return missing[0] if missing else None
 
 
+def _is_compound_slot_message(message: str) -> bool:
+    """Comma-separated or multi-field replies must use full extraction, not one-slot wizard path."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if re.search(r"[,;]| এবং | and ", raw, re.I):
+        return True
+    low = raw.lower()
+    signals = 0
+    if re.search(r"\b(paid|unpaid|lwop)\b", low):
+        signals += 1
+    if re.search(
+        r"\b(sick|casual|annual|medical|emergency|maternity|paternity)\b", low
+    ):
+        signals += 1
+    if re.search(r"\b(full|half)\b|full\s*day|half\s*day", low):
+        signals += 1
+    return signals >= 2
+
+
+def _apply_slots_from_message(
+    draft: dict[str, Any],
+    message: str,
+    entities: dict[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Parse one or more slot values from a user message into the draft."""
+    parts = [p.strip() for p in re.split(r"[,;]+", message) if p.strip()]
+    if not parts:
+        parts = [message]
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        ex = extract_leave_slots(part, skip_leave_phrase_gate=True)
+        prefill_draft_from_extraction(
+            draft, ex, external_entities=None, overwrite=overwrite
+        )
+        _infer_leave_type(part, draft)
+        _infer_payment_category(part, draft)
+        _infer_day_scope(part, draft)
+    ext = dict(entities)
+    ex_whole = extract_leave_slots(message, skip_leave_phrase_gate=True)
+    if ex_whole.leave_payment_category.confidence != "high":
+        ext.pop("leave_payment_category", None)
+    if ex_whole.day_scope.confidence != "high":
+        ext.pop("day_scope", None)
+    if ex_whole.reason.confidence != "high":
+        ext.pop("reason", None)
+        ext.pop("description", None)
+    merge_llm_entities_into_extraction(ex_whole, ext)
+    prefill_draft_from_extraction(
+        draft, ex_whole, external_entities=ext, overwrite=overwrite
+    )
+    _infer_leave_type(message, draft)
+    _infer_payment_category(message, draft)
+    _infer_day_scope(message, draft)
+    if overwrite:
+        _force_scope_from_message(message, draft)
+
+
+def _force_scope_from_message(message: str, draft: dict[str, Any]) -> bool:
+    """Overwrite day_scope when user clearly states half/full (review corrections)."""
+    low = (message or "").lower()
+    if re.search(r"\bhalf\b|হাফ|অর্ধ|half\s*day", low):
+        draft["day_scope"] = DAY_SCOPE_HALF
+        return True
+    if re.search(r"\bfull\b|পুরো|full\s*day", low) and not re.search(
+        r"\bhalf\b|হাফ", low
+    ):
+        draft["day_scope"] = DAY_SCOPE_FULL
+        return True
+    return False
+
+
 def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
-    if not pending_slot:
+    if not pending_slot or _is_compound_slot_message(message):
         return False
     t = message.strip().lower()
     if pending_slot == "leave_type":
@@ -224,7 +338,7 @@ def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
             return False
         return len(t) >= 2
     if pending_slot == "leave_payment_category":
-        return t in {"paid", "unpaid", "lwop"} or bool(re.match(r"^(paid|বেতন)", t))
+        return t in {"paid", "unpaid", "lwop"}
     if pending_slot == "day_scope":
         return t in {"full", "half"} or "full" in t or "half" in t
     if pending_slot == "supporting_document":
@@ -258,34 +372,35 @@ def process_leave_turn(
     entities: dict[str, Any],
     company_id: str = "",
 ) -> dict[str, Any]:
-    wf = clone_workflow_state(workflow_state)
-    block = wf.setdefault("leave_request", {})
-    block["active"] = True
-    draft = dict(block.get("draft") or {})
+    wf = normalize_workflow_state(workflow_state)
+    st = read_leave_state(wf)
+    if st.get("active_flow") != ACTIVE_FLOW_LEAVE:
+        wf = apply_leave_state(
+            wf, draft={}, step=None, status=STATUS_ACTIVE, review_pending=False
+        )
+        st = read_leave_state(wf)
+
+    draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message
-    pending_slot = block.get("pending_slot")
+
+    if is_awaiting_leave_confirmation(wf):
+        return process_confirmation_turn(
+            workflow_state=wf,
+            message=message,
+            draft=draft,
+            entities=entities,
+        )
+
+    pending_slot = st.get("step")
     policy = get_company_leave_policy(company_id or "default")
     extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
 
     if pending_slot and _is_direct_slot_answer(message, pending_slot):
         apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
     else:
-        ext = dict(entities)
-        if extraction.leave_payment_category.confidence != "high":
-            ext.pop("leave_payment_category", None)
-        if extraction.day_scope.confidence != "high":
-            ext.pop("day_scope", None)
-        if extraction.reason.confidence != "high":
-            ext.pop("reason", None)
-            ext.pop("description", None)
-        # Must merge the same sanitized overlay as prefill uses — merging full
-        # `entities` let LLM hallucinated reason/description bypass slot gating
-        # and auto-complete the wizard (duplicate flows then lost active state).
-        merge_llm_entities_into_extraction(extraction, ext)
-        prefill_draft_from_extraction(draft, extraction, external_entities=ext)
-        _infer_leave_type(message, draft)
-        _infer_payment_category(message, draft)
-        _infer_day_scope(message, draft)
+        before = dict(draft)
+        _apply_slots_from_message(draft, message, entities, overwrite=False)
+        draft = deep_merge_draft(before, draft)
 
     normalize_end_equals_start_if_missing(draft)
     date_err: str | None = None
@@ -295,49 +410,30 @@ def process_leave_turn(
             date_err = code
             if code == "BAD_RANGE":
                 draft.pop("end_date", None)
-            # Keep start/end on IN_PAST so the user sees what was parsed; slot layer
-            # still asks for a corrected date via date_error + SLOT_DATES.
 
     missing = get_missing_slots(
         draft, policy=policy, extraction=extraction, date_error=date_err
     )
 
     if not missing:
-        # Apply tenant/policy defaults only once every required slot is explicit.
         apply_leave_draft_defaults(draft, policy)
-        block.pop("pending_slot", None)
-        block["draft"] = draft
-        wf["leave_request"] = block
-        wf["last_completed_leave_workflow"] = {
-            "workflow_type": "leave_request",
-            "completed": True,
-            "slots_snapshot": {
-                k: draft.get(k)
-                for k in (
-                    "start_date",
-                    "end_date",
-                    "leave_type",
-                    "leave_payment_category",
-                    "day_scope",
-                    "reason",
-                )
-            },
-        }
-        wf = deactivate_leave_session(wf)
+        wf = mark_review_pending(wf, draft)
         return {
             "workflow_state": wf,
             "merged_entities": build_merged_entities_for_engine(draft),
-            "complete": True,
-            "question": None,
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_confirmation_prompt(draft),
         }
 
     slot = missing[0]
-    block["pending_slot"] = slot
-    block["draft"] = draft
-    block["workflow_type"] = "leave_request"
-    block["missing_slots"] = list(missing)
-    block["completed"] = False
-    wf["leave_request"] = block
+    wf = apply_leave_state(
+        wf,
+        draft=draft,
+        step=slot,
+        status=STATUS_ACTIVE,
+        review_pending=False,
+    )
     question = generate_question(
         slot,
         draft,
@@ -345,13 +441,10 @@ def process_leave_turn(
         date_error=date_err if slot == SLOT_DATES else None,
         extraction=extraction,
     )
-    ack = summarize_captured(draft)
-    if ack and slot not in (SLOT_DATES, "supporting_document"):
-        question = ack + "\n\n" + question
-
     return {
         "workflow_state": wf,
         "merged_entities": build_merged_entities_for_engine(draft),
         "complete": False,
+        "confirmed_submit": False,
         "question": question,
     }

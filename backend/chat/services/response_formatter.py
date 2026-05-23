@@ -60,6 +60,20 @@ def build_user_message(
         )
 
     if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
+        last = crm_payload.get("expense_last_submission") or {}
+        ref = str(last.get("reference_id") or "").strip()
+        if ref:
+            inc = str(last.get("incurred_date_iso") or "").strip()
+            items = list(last.get("items") or [])
+            total = sum(float(x.get("amount") or 0) for x in items)
+            return (
+                f"হ্যাঁ — এই চ্যাট সেশনে আপনার expense **জমা হয়েছে**।\n"
+                f"- **রেফারেন্স:** `{ref}`\n"
+                f"- **তারিখ:** {inc or 'আজ'}\n"
+                f"- **লাইন:** {len(items)} টি · **মোট:** {total:g} Tk\n\n"
+                "চূড়ান্ত অনুমোদন CRM/Finance-এ হবে।",
+                "success",
+            )
         st = crm_payload.get("status")
         if st and st != "NOT_FOUND":
             return (f"Current request status: {st}.", "success")
@@ -151,28 +165,14 @@ def build_user_message(
         return (msg, "success")
 
     if outcome == "SUBMITTED" and intent == INTENT_LEAVE_REQUEST:
-        if crm_payload.get("_deduped"):
-            rid_d = str(crm_payload.get("request_id") or "").strip()
-            msg_d = (
-                "This leave request was already submitted. No new request was created."
-                + (f" Reference: **{rid_d}**." if rid_d else "")
-            )
-            return (msg_d, "success")
+        # Structured card is built in message_polish.polish_outbound_message (orchestrator).
         rid = str(crm_payload.get("request_id") or "").strip()
         sub_ref = str((crm_payload.get("leave_submission") or {}).get("reference_id") or "").strip()
-        head = (
-            "Your leave request has been submitted. "
-            "Final approval is handled in your company's HR / CRM system — not in this chat."
-        )
-        detail = (decision or {}).get("reason") or ""
-        parts = [head]
-        if detail:
-            parts.append(str(detail).strip())
-        msg = "\n\n".join(parts)
         ref = rid or sub_ref
-        if ref:
-            msg += f"\n\nReference: **{ref}**."
-        return (msg, "success")
+        stub = (decision or {}).get("reason") or "Leave request submitted."
+        if ref and ref not in stub:
+            stub = f"{stub}\n\nReference: {ref}"
+        return (stub, "success")
 
     if outcome == "REJECTED":
         rid = crm_payload.get("request_id", "")

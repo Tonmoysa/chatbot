@@ -62,6 +62,34 @@ class CRMAdapter(ABC):
         plus expense_day_approved_total, expense_day_logged_total, expense_daily_cap_bdt.
         """
 
+    def submit_leave(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """
+        Create a leave request from the canonical chatbot payload.
+
+        Default routes through ``create_request`` for adapters that have not
+        implemented a dedicated leave endpoint yet.
+        """
+        return self.create_request(
+            company_id=company_id,
+            employee_id=employee_id,
+            session_id=session_id,
+            intent="LEAVE_REQUEST",
+            entities=payload,
+            decision={
+                "outcome": "SUBMITTED",
+                **(payload.get("crm_workflow_hint") or {}),
+            },
+            idempotency_key=idempotency_key,
+        )
+
     @abstractmethod
     def create_request(
         self,

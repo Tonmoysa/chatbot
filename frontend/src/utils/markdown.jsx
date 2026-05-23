@@ -109,6 +109,20 @@ export function MarkdownContent({ text, className = "" }) {
       continue;
     }
 
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      blocks.push(
+        <p
+          key={`block-${blockKey++}`}
+          className="mt-2 mb-1 text-[15px] font-semibold leading-snug text-inherit"
+        >
+          {renderInline(heading[2], `h-${blockKey}`)}
+        </p>
+      );
+      i += 1;
+      continue;
+    }
+
     if (/^[-*]\s+/.test(line)) {
       const items = [];
       while (i < lines.length && /^[-*]\s+/.test(lines[i])) {

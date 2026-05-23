@@ -129,9 +129,20 @@ def test_wizard_asks_payment_then_scope_after_sick_phrase(monkeypatch):
         entities={},
         company_id="company-a",
     )
-    assert r3["complete"]
-    assert r3["merged_entities"].get("leave_type") == "sick"
-    assert r3["merged_entities"].get("reason")
+    assert not r3["complete"]
+    assert not r3.get("confirmed_submit")
+    assert "জমা দেবেন" in (r3.get("question") or "") or "yes" in (r3.get("question") or "").lower()
+
+    r4 = process_leave_turn(
+        workflow_state=r3["workflow_state"],
+        message="yes",
+        entities={},
+        company_id="company-a",
+    )
+    assert r4["complete"]
+    assert r4.get("confirmed_submit")
+    assert r4["merged_entities"].get("leave_type") == "sick"
+    assert r4["merged_entities"].get("reason")
 
 
 @pytest.mark.django_db
@@ -190,5 +201,15 @@ def test_wizard_partial_message_collects_type_payment_scope_reason(monkeypatch):
         entities={},
         company_id="company-a",
     )
-    assert r5["complete"]
-    assert r5["merged_entities"].get("reason")
+    assert not r5["complete"]
+    assert "জমা দেবেন" in (r5.get("question") or "")
+
+    r6 = process_leave_turn(
+        workflow_state=r5["workflow_state"],
+        message="yes",
+        entities={},
+        company_id="company-a",
+    )
+    assert r6["complete"]
+    assert r6.get("confirmed_submit")
+    assert r6["merged_entities"].get("reason")

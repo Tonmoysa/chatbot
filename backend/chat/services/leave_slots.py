@@ -37,12 +37,15 @@ def prefill_draft_from_extraction(
     extraction: LeaveSlotExtraction,
     *,
     external_entities: dict[str, Any] | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Apply high-confidence slots into workflow draft."""
     if external_entities:
         from chat.services.leave_workflow import merge_extractor_entities
 
-        merge_extractor_entities(draft, external_entities)
+        merge_extractor_entities(
+            draft, external_entities, overwrite=overwrite
+        )
 
     for field, slot_name in (
         ("leave_type", "leave_type"),
@@ -56,6 +59,8 @@ def prefill_draft_from_extraction(
         sv = getattr(extraction, slot_name)
         if sv.confidence != "high" or sv.value is None:
             continue
+        if draft.get(field) and not overwrite:
+            continue
         val = sv.value
         if field == "leave_payment_category":
             draft[field] = "paid" if val == "paid" else "lwop"
@@ -66,10 +71,18 @@ def prefill_draft_from_extraction(
         if field == "reason" and sv.source.startswith("implied"):
             draft["_reason_implied"] = True
 
-    if extraction.start_date.confidence == "high" and not draft.get("end_date"):
+    if (
+        extraction.start_date.confidence == "high"
+        and not draft.get("end_date")
+        and draft.get("start_date")
+    ):
         draft["end_date"] = draft.get("start_date")
 
-    if extraction.days.confidence == "high" and extraction.days.value:
+    if (
+        extraction.days.confidence == "high"
+        and extraction.days.value
+        and not draft.get("days")
+    ):
         draft["days"] = extraction.days.value
 
 
@@ -273,14 +286,5 @@ def generate_question(
 
 
 def summarize_captured(draft: dict[str, Any]) -> str:
-    """Optional acknowledgment of what we already understood (for multi-slot turns)."""
-    parts: list[str] = []
-    if draft.get("leave_type"):
-        parts.append(str(draft["leave_type"]))
-    if draft.get("start_date"):
-        parts.append(str(draft["start_date"]))
-    if draft.get("leave_payment_category"):
-        parts.append(str(draft["leave_payment_category"]))
-    if not parts:
-        return ""
-    return " _(বুঝেছি: " + ", ".join(parts) + ")_"
+    """Deprecated — keep empty so UX stays natural (no debug-style acks)."""
+    return ""

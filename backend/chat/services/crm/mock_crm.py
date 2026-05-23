@@ -190,6 +190,51 @@ class MockCRMAdapter(CRMAdapter):
     def _requested_leave_days(self, entities: dict[str, Any]) -> float:
         return compute_requested_leave_days(entities or {})
 
+    def submit_leave(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        company, emp = self._identity(company_id, employee_id, session_id)
+        idem = (idempotency_key or "").strip()
+        if idem and (company, idem) in self._idempotency:
+            rid = self._idempotency[(company, idem)]
+            return {
+                "ok": True,
+                "reference_id": rid,
+                "request_id": rid,
+                "status": "accepted_for_crm",
+                "_idempotent_replay": True,
+            }
+
+        ref = f"PHP-LEAVE-{uuid.uuid4().hex[:12].upper()}"
+        record = {
+            "request_id": ref,
+            "reference_id": ref,
+            "company_id": company,
+            "employee_id": emp,
+            "session_id": session_id,
+            "idempotency_key": idem,
+            "intent": "LEAVE_REQUEST",
+            "payload": payload,
+            "status": "PENDING",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        self._requests[ref] = record
+        if idem:
+            self._idempotency[(company, idem)] = ref
+        return {
+            "ok": True,
+            "reference_id": ref,
+            "request_id": ref,
+            "status": "accepted_for_crm",
+            "detail": "Simulated leave submit; replace with PHP CRM API.",
+        }
+
     def create_request(
         self,
         *,

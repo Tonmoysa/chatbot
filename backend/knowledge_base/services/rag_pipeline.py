@@ -14,6 +14,7 @@ from chat.services.observability import log_step
 from knowledge_base.services.citation_builder import build_sources
 from knowledge_base.services.prompts import GROUNDED_SYSTEM, grounded_user_prompt
 from knowledge_base.services.retriever import retrieve_for_query
+from chat.services.message_polish import polish_policy_answer
 from knowledge_base.services.sanitization import sanitize_retrieval_context
 
 logger = logging.getLogger("hr_chatbot")
@@ -44,7 +45,8 @@ def _excerpt_fallback_answer(hits: list[Any], *, user_query: str, max_chars: int
         body = sanitize_retrieval_context(str(payload.get("chunk_text") or ""), max_chars=1200)
         if not body:
             continue
-        piece = f"**{title}**\n{body}"
+        body = polish_policy_answer(body)
+        piece = f"**{title}**\n\n{body}"
         if used + len(piece) > max_chars:
             break
         parts.append(piece)
@@ -52,10 +54,10 @@ def _excerpt_fallback_answer(hits: list[Any], *, user_query: str, max_chars: int
     if not parts:
         return ""
     lead = (
-        f"Here is what your handbook says about “{user_query.strip()[:120]}” "
-        "(from the closest matching section):\n\n"
+        f"**আপনার প্রশ্ন:** {user_query.strip()[:120]}\n\n"
+        f"হ্যান্ডবুক থেকে সংশ্লিষ্ট অংশ:\n\n"
     )
-    return lead + "\n\n".join(parts)
+    return polish_policy_answer(lead + "\n\n---\n\n".join(parts))
 
 
 def _payload_from_hit(hit: Any) -> dict[str, Any]:
@@ -171,6 +173,8 @@ def try_hr_policy_rag(
             answer = fallback
         else:
             answer = hr_policy_not_found_message()
+
+    answer = polish_policy_answer(answer)
 
     sources = build_sources(hits)
     log_step(trace_id, "rag_success", {"sources": len(sources), "company_id": company_id})

@@ -206,6 +206,26 @@ class RealCRMAdapter(CRMAdapter):
                 "expense_day_entries": [],
             }
 
+    def submit_leave(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """POST canonical leave payload — future PHP contract."""
+        return self._request(
+            "POST",
+            f"/employees/{employee_id}/leave-requests/",
+            company_id=company_id,
+            employee_id=employee_id,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            json=payload,
+        )
+
     def create_request(
         self,
         *,
@@ -217,6 +237,11 @@ class RealCRMAdapter(CRMAdapter):
         decision: dict[str, Any],
         idempotency_key: str = "",
     ) -> dict[str, Any]:
+        if intent == "LEAVE_REQUEST" and (decision or {}).get("outcome") == "SUBMITTED":
+            raise CRMError(
+                "Leave SUBMITTED must use submit_leave(), not create_request().",
+                transient=False,
+            )
         payload = {
             "company_id": company_id,
             "employee_id": employee_id,
