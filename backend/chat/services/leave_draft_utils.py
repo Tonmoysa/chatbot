@@ -95,3 +95,13 @@ def apply_leave_draft_defaults(draft: dict[str, Any], policy: Any) -> None:
             draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
     if not draft.get("day_scope"):
         draft["day_scope"] = DAY_SCOPE_FULL
+
+
+def format_select_leave_label(draft: dict[str, Any]) -> str:
+    """CRM Select Leave — paid or unpaid only."""
+    pay = str(draft.get("leave_payment_category") or "").strip().lower()
+    if pay == LEAVE_PAYMENT_PAID:
+        return "paid"
+    if pay == LEAVE_PAYMENT_LWOP:
+        return "unpaid"
+    return "—"

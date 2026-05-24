@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import MessageBubble from "./MessageBubble";
 import ChatInput from "./chat/ChatInput";
 import TypingIndicator from "./chat/TypingIndicator";
@@ -11,12 +11,44 @@ import "../styles/chat-design.css";
  * WhatsApp-style chat shell (design system under .hr-chat-card).
  * Preserves existing props: messages, loading, error, onSend, onClearError.
  */
+const BOTTOM_STICK_THRESHOLD_PX = 96;
+
 export default function ChatBox({ messages, loading, error, onSend, onClearError }) {
-  const bottomRef = useRef(null);
+  const chatBodyRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+
+  const handleSend = useCallback(
+    (payload) => {
+      stickToBottomRef.current = true;
+      onSend(payload);
+    },
+    [onSend]
+  );
+
+  const scrollToBottom = useCallback((behavior = "smooth") => {
+    const el = chatBodyRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+  }, []);
+
+  const updateStickToBottom = useCallback(() => {
+    const el = chatBodyRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom <= BOTTOM_STICK_THRESHOLD_PX;
+  }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+    const last = messages[messages.length - 1];
+    const userJustSent = last?.role === "user";
+    const shouldScroll = userJustSent || loading || stickToBottomRef.current;
+    if (!shouldScroll) return;
+
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => scrollToBottom("smooth"));
+    });
+    return () => cancelAnimationFrame(id);
+  }, [messages, loading, scrollToBottom]);
 
   const showEmpty = messages.length === 0 && !loading;
 
@@ -45,7 +77,14 @@ export default function ChatBox({ messages, loading, error, onSend, onClearError
     <div className="hr-chat-card">
         <ChatThreadHeader />
 
-        <div className="chat-body chat-scroll" role="log" aria-live="polite" aria-relevant="additions">
+        <div
+          ref={chatBodyRef}
+          className="chat-body chat-scroll"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          onScroll={updateStickToBottom}
+        >
           {showEmpty ? (
             <div className="chat-empty-greeting">
               <h2 className="chat-empty-greeting-title">How can I help you today?</h2>
@@ -56,10 +95,15 @@ export default function ChatBox({ messages, loading, error, onSend, onClearError
 
           {loading ? <TypingIndicator /> : null}
 
-          <span ref={bottomRef} className="block h-px w-full shrink-0" aria-hidden />
+          <span className="block h-px w-full shrink-0" aria-hidden />
         </div>
 
-        <ChatInput onSend={onSend} disabled={loading} error={error} onClearError={onClearError} />
+        <ChatInput
+          onSend={handleSend}
+          busy={loading}
+          error={error}
+          onClearError={onClearError}
+        />
     </div>
   );
 }

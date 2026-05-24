@@ -9,7 +9,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from chat.constants import INTENT_HR_POLICY, INTENT_LEAVE_REQUEST
+from chat.constants import (
+    EXPENSE_DAY_CAP_BDT,
+    INTENT_HR_POLICY,
+    INTENT_LEAVE_REQUEST,
+)
 from chat.services.translator import detect_user_language
 from chat.services.leave_days import compute_requested_leave_days
 

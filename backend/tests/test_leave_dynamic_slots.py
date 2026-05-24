@@ -33,9 +33,9 @@ def test_kalke_sick_leave_prefills_type_and_date():
     assert draft.get("reason")  # implied
     missing = get_missing_slots(draft)
     assert "leave_dates" not in missing
+    assert "leave_payment_category" in missing
     assert "leave_type" not in missing
     assert "reason" not in missing
-    assert "leave_payment_category" in missing
     assert "day_scope" in missing
 
 
@@ -46,7 +46,7 @@ def test_agamikal_paid_leave_skips_date_and_reason():
     missing = get_missing_slots(draft)
     assert "leave_dates" not in missing
     assert "leave_payment_category" not in missing
-    assert "leave_type" in missing
+    assert "leave_type" not in missing
     assert "day_scope" in missing
 
 
@@ -65,6 +65,7 @@ def test_today_half_day_casual():
     assert "day_scope" not in missing
     assert "leave_dates" not in missing
     assert "leave_payment_category" in missing
+    assert "leave_type" not in missing
 
 
 def test_full_paid_sick_single_turn_almost_complete():

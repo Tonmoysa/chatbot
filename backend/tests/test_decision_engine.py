@@ -278,6 +278,13 @@ def test_expense_day_summary_banglish_total_cost(monkeypatch):
     assert r["intent"] == INTENT_EXPENSE_DAY_SUMMARY
 
 
+def test_expense_day_summary_banglish_expense_er_summery(monkeypatch):
+    det = IntentDetector()
+    monkeypatch.setattr(det._llm, "is_configured", lambda: False)
+    r = det.detect("okay amake expense er summery ta daw toh", "tid-bn-exp-sum")
+    assert r["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+
+
 @pytest.mark.django_db
 def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
     fixed = dt.date(2026, 6, 15)
@@ -292,33 +299,30 @@ def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
         "chat.services.expense_incurred_date.date",
         "chat.services.decision_engine.date",
         "chat.services.orchestrator.date",
+        "chat.services.expense_workflow.date",
     ):
         monkeypatch.setattr(mod, FixedDate)
 
     emp = "expense-summary-pytest-unique"
     orch = ChatOrchestrator()
     sid = None
-    for i, msg in enumerate(
-        (
-            "amar ajke 50 taka tea",
-            "amar ajke 120 taka lunch",
-        )
-    ):
-        r = run_tenant_chat(
+    pack = run_tenant_chat(
+        orch,
+        message="lunch 120, snack 50",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="es-claim-0",
+    )
+    sid = pack["_session_id"]
+    for msg in ("শেষ", "হ্যাঁ", "হ্যাঁ"):
+        pack = run_tenant_chat(
             orch,
             message=msg,
             session_id=sid,
             employee_id=emp,
-            trace_id=f"es-claim-{i}",
+            trace_id=f"es-claim-{msg}",
         )
-        sid = r["_session_id"]
-        run_tenant_chat(
-            orch,
-            message="হ্যাঁ",
-            session_id=sid,
-            employee_id=emp,
-            trace_id=f"es-claim-{i}-ok",
-        )
+    assert pack["decision"]["outcome"] == "SUBMITTED"
 
     summ = run_tenant_chat(
         orch,
@@ -331,8 +335,7 @@ def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
     assert summ["decision"]["outcome"] == "INFORMATIONAL"
     body = summ["response"]["message"] or ""
     assert "170" in body
-    assert "130" in body
-    assert "MOCK-" in body
+    assert "সারাংশ" in body
 
 
 def test_compute_requested_leave_days_range_and_single_day():

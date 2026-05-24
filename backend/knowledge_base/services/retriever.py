@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -13,6 +14,7 @@ from chat.services.observability import log_step
 from knowledge_base.services.qdrant_service import search_vectors
 from knowledge_base.services.sanitization import (
     build_retrieval_embedding_text,
+    extract_policy_title_phrases,
     preprocess_query,
 )
 
@@ -48,6 +50,58 @@ def _tenant_filter(*, company_id: str, department: str | None):
 
 def _hit_score(hit: Any) -> float:
     return float(getattr(hit, "score", 0.0) or 0.0)
+
+
+def _payload_dict(hit: Any) -> dict[str, Any]:
+    pl = getattr(hit, "payload", None) or {}
+    if isinstance(pl, dict):
+        return pl
+    md = getattr(pl, "model_dump", None)
+    if callable(md):
+        dumped = md()
+        if isinstance(dumped, dict):
+            return dumped
+    return {}
+
+
+def _payload_title_surface(payload: dict[str, Any]) -> str:
+    doc = str(payload.get("document_title") or payload.get("source_document") or "")
+    sec = str(payload.get("section_title") or "")
+    return f"{doc} {sec}".lower()
+
+
+def _title_match_boost(query: str, payload: dict[str, Any]) -> float:
+    titles = extract_policy_title_phrases(query)
+    if not titles:
+        return 0.0
+    surface = _payload_title_surface(payload)
+    if not surface.strip():
+        return 0.0
+    boost = 0.0
+    for title in titles:
+        tl = title.lower()
+        if tl in surface:
+            boost = max(boost, 0.28)
+            continue
+        tokens = [t for t in re.split(r"\W+", tl) if len(t) >= 3]
+        if not tokens:
+            continue
+        matched = sum(1 for t in tokens if t in surface)
+        if matched == len(tokens):
+            boost = max(boost, 0.22)
+        elif matched >= max(1, len(tokens) - 1):
+            boost = max(boost, 0.14 * matched / len(tokens))
+    return boost
+
+
+def _rerank_by_policy_title(hits: list[Any], query: str) -> list[Any]:
+    if not hits or not extract_policy_title_phrases(query):
+        return hits
+    return sorted(
+        hits,
+        key=lambda h: _hit_score(h) + _title_match_boost(query, _payload_dict(h)),
+        reverse=True,
+    )
 
 
 def _min_results_floor(top_k: int, pool_size: int) -> int:
@@ -281,6 +335,7 @@ def retrieve_for_query(
             trace_id=trace_id,
             used_relaxed=used_relaxed,
         )
+        hits = _rerank_by_policy_title(hits, q)
     except Exception as exc:
         log_step(
             trace_id,

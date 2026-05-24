@@ -20,7 +20,10 @@ from chat.services.leave_draft_utils import (
 )
 from chat.services.leave_policies import get_company_leave_policy
 from chat.services.leave_slot_extraction import (
+    apply_payment_category_from_message,
+    explicit_leave_type_from_message,
     extract_leave_slots,
+    is_payment_only_message,
     merge_llm_entities_into_extraction,
 )
 from chat.services.leave_confirm import (
@@ -74,7 +77,6 @@ _LEAVE_TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
     (r"\b(casual)\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
     (r"\b(annual|vacation|pto)\b|বার্ষিক", "annual"),
-    (r"\b(unpaid|lwop)\b|বেতন\s*ছাড়া", "unpaid"),
     (r"\b(maternity)\b|মাতৃত্ব", "maternity"),
     (r"\b(paternity)\b|পিতৃত্ব", "paternity"),
     (r"\b(emergency)\b|জরুরি", "emergency"),
@@ -156,27 +158,29 @@ def deactivate_leave_session(workflow_state: dict[str, Any]) -> dict[str, Any]:
     return clear_leave_flow(workflow_state)
 
 
-def _infer_payment_category(message: str, draft: dict[str, Any]) -> None:
-    low = message.lower().strip()
-    if draft.get("leave_payment_category"):
-        return
-    if re.search(r"\b(lwop|unpaid)\b|বেতন\s*ছাড়া", low):
-        draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
-    elif re.search(r"\bpaid\b|বেতনসহ", low):
-        draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
+def _infer_payment_category(
+    message: str, draft: dict[str, Any], *, force: bool = False
+) -> bool:
+    pay = apply_payment_category_from_message(message)
+    if not pay:
+        return False
+    if not force and draft.get("leave_payment_category"):
+        return False
+    draft["leave_payment_category"] = (
+        LEAVE_PAYMENT_LWOP if pay == "lwop" else LEAVE_PAYMENT_PAID
+    )
+    return True
 
 
 def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
-    if draft.get("leave_type"):
+    if is_payment_only_message(message):
+        return
+    if draft.get("leave_type") and not explicit_leave_type_from_message(message):
         return
     low = message.lower()
     for pattern, code in _LEAVE_TYPE_PATTERNS:
         if re.search(pattern, low, re.I):
             draft["leave_type"] = code
-            if code == "unpaid":
-                draft.setdefault("leave_payment_category", LEAVE_PAYMENT_LWOP)
-            else:
-                draft.setdefault("leave_payment_category", LEAVE_PAYMENT_PAID)
             return
 
 
@@ -280,6 +284,11 @@ def _apply_slots_from_message(
     overwrite: bool = False,
 ) -> None:
     """Parse one or more slot values from a user message into the draft."""
+    if is_payment_only_message(message):
+        _infer_payment_category(message, draft, force=True)
+        _infer_day_scope(message, draft)
+        return
+
     parts = [p.strip() for p in re.split(r"[,;]+", message) if p.strip()]
     if not parts:
         parts = [message]
@@ -305,9 +314,13 @@ def _apply_slots_from_message(
         ext.pop("reason", None)
         ext.pop("description", None)
     merge_llm_entities_into_extraction(ex_whole, ext)
+    slot_overwrite = overwrite or _is_compound_slot_message(message)
     prefill_draft_from_extraction(
-        draft, ex_whole, external_entities=ext, overwrite=overwrite
+        draft, ex_whole, external_entities=ext, overwrite=slot_overwrite
     )
+    explicit_lt = explicit_leave_type_from_message(message)
+    if explicit_lt:
+        draft["leave_type"] = explicit_lt
     _infer_leave_type(message, draft)
     _infer_payment_category(message, draft)
     _infer_day_scope(message, draft)
@@ -334,9 +347,7 @@ def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
         return False
     t = message.strip().lower()
     if pending_slot == "leave_type":
-        if t in {"paid", "unpaid", "lwop", "full", "half"}:
-            return False
-        return len(t) >= 2
+        return t in {"paid", "unpaid", "lwop"}
     if pending_slot == "leave_payment_category":
         return t in {"paid", "unpaid", "lwop"}
     if pending_slot == "day_scope":

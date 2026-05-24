@@ -94,6 +94,60 @@ def test_confirmation_cancel_clears_workflow():
     assert read_leave_state(out["workflow_state"]).get("active_flow") is None
 
 
+def test_review_unpaid_hobe_keeps_sick_leave_category():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-05-25",
+        "end_date": "2026-05-25",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "review_pending": True,
+        "draft": dict(draft),
+    }
+    out = process_confirmation_turn(
+        workflow_state=wf,
+        message="unpaid hobe",
+        draft=dict(draft),
+    )
+    d = read_leave_state(out["workflow_state"]).get("draft") or {}
+    assert d.get("leave_type") == "sick"
+    assert d.get("leave_payment_category") == "lwop"
+    prompt = out.get("question") or ""
+    assert "Payment:" not in prompt
+    assert "Select Leave: sick" not in prompt
+    assert "unpaid" in prompt
+
+
+def test_review_paid_hobe_after_unpaid_restores_payment_keeps_sick():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "lwop",
+        "day_scope": "full",
+        "start_date": "2026-05-25",
+        "end_date": "2026-05-25",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "review_pending": True,
+        "draft": dict(draft),
+    }
+    out = process_confirmation_turn(
+        workflow_state=wf,
+        message="paid hobe",
+        draft=dict(draft),
+    )
+    d = read_leave_state(out["workflow_state"]).get("draft") or {}
+    assert d.get("leave_type") == "sick"
+    assert d.get("leave_payment_category") == "paid"
+
+
 def test_build_confirmation_prompt_lists_summary():
     prompt = build_confirmation_prompt(
         {
@@ -104,14 +158,58 @@ def test_build_confirmation_prompt_lists_summary():
             "reason": "family",
         }
     )
-    assert "casual" in prompt
-    assert "yes" in prompt.lower()
+    assert "Select Leave: paid" in prompt
+    assert "casual" not in prompt.split("Leave Type")[0]
+    assert "Payment:" not in prompt
     assert "edit" in prompt.lower()
 
 
 def test_is_confirmation_yes():
     assert is_confirmation_yes("yes")
     assert is_confirmation_yes("হ্যাঁ")
+
+
+def test_compound_paid_sick_full_day_overwrites_prior_annual_type(monkeypatch):
+    """Sick in a compound reply must replace an earlier wrong annual default."""
+    fixed = dt.date(2026, 5, 21)
+
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+
+    wf: dict = {
+        "leave_request": {
+            "active": True,
+            "stage": "collecting",
+            "pending_slot": "leave_payment_category",
+            "draft": {
+                "start_date": "2026-05-25",
+                "end_date": "2026-05-25",
+                "leave_type": "annual",
+            },
+        }
+    }
+    out = process_leave_turn(
+        workflow_state=wf,
+        message="paid,sick,full day",
+        entities={"leave_type": "annual", "leave_payment_category": "paid", "day_scope": "full"},
+        company_id="company-a",
+    )
+    draft = read_leave_state(out["workflow_state"]).get("draft") or {}
+    assert draft.get("leave_type") == "sick"
+    assert "annual" not in (out.get("question") or "").split("ধরন:")[-1][:20]
+
+
+def test_rule_enrich_strips_llm_leave_type_without_user_hint():
+    from chat.constants import INTENT_LEAVE_REQUEST
+    from chat.services.entity_extractor import EntityExtractor
+
+    ext = EntityExtractor()
+    enriched = ext._rule_enrich(
+        "amar kalke leave lagbe",
+        {"leave_type": "annual", "leave_payment_category": "paid"},
+        intent=INTENT_LEAVE_REQUEST,
+    )
+    assert enriched.get("leave_type") is None
 
 
 def test_compound_paid_sick_full_day_fills_all_slots(monkeypatch):

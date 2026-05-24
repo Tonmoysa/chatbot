@@ -94,10 +94,51 @@ _ITEM_PAIR_REV_RE = re.compile(
     re.I,
 )
 
+# Banglish: "50 ta lunch", "50টা lunch"
+_TA_AMOUNT_CAT_RE = re.compile(
+    rf"(?P<amt>{_AMOUNT_RE.pattern})\s*ta\s+(?P<cat>{_CATEGORY_TOKEN})\b",
+    re.I,
+)
+
+_DECLARED_TOTAL_RE = re.compile(
+    r"(?:"
+    rf"(?P<a>{_AMOUNT_RE.pattern})\s*(?:টাকা|taka|tk)?\s*(?:cost|খরচ|kharcha|khoroch)\s*hoy"
+    r"|"
+    rf"(?:mot|total|মোট)\s*(?:খরচ|cost|kharcha)?\s*(?P<a2>{_AMOUNT_RE.pattern})"
+    r")",
+    re.I,
+)
+
+# Banglish route: "uttora theke mirpur bus" (location before থেকে, not after).
+_LOC_LABEL = r"[a-zA-Z0-9\u0980-\u09FF][\w\s\-]{1,60}"
+_BANGLISH_ROUTE_CONNECTOR = r"(?:theke|thke|থেকে|from)"
+
+_ROUTE_BANGLISH_RE = re.compile(
+    rf"(?P<frm>{_LOC_LABEL})\s+{_BANGLISH_ROUTE_CONNECTOR}\s+"
+    rf"(?P<to>{_LOC_LABEL})\s+"
+    rf"(?P<cat>{_CATEGORY_TOKEN})",
+    re.I,
+)
+
+# English-first route: "from office to mirpur bus"
 _ROUTE_RE = re.compile(
     r"(?:from|theke|থেকে)\s+([a-zA-Z0-9\u0980-\u09FF\s]{2,40}?)\s+"
     r"(?:to|theke|যাওয়া|e|এ)\s+([a-zA-Z0-9\u0980-\u09FF\s]{2,40}?)\s+"
     rf"(?P<cat>{_CATEGORY_TOKEN})",
+    re.I,
+)
+
+_BANGLISH_FROM_TO_RE = re.compile(
+    rf"(?P<frm>{_LOC_LABEL})\s+{_BANGLISH_ROUTE_CONNECTOR}\s+"
+    rf"(?P<to>{_LOC_LABEL})",
+    re.I,
+)
+
+# Route + amount without category: "uttora theke mirpur 60 taka"
+_ROUTE_AMOUNT_ONLY_RE = re.compile(
+    rf"(?P<frm>{_LOC_LABEL})\s+{_BANGLISH_ROUTE_CONNECTOR}\s+"
+    rf"(?P<to>{_LOC_LABEL})\s+"
+    rf"(?P<amt>{_AMOUNT_RE.pattern})",
     re.I,
 )
 
@@ -108,6 +149,11 @@ _FROM_TO_SIMPLE_RE = re.compile(
     r"|"
     r"(?P<frm2>[a-zA-Z][\w\s\-]{1,60})\s+to\s+(?P<to2>[a-zA-Z][\w\s\-]{1,60})"
     r")",
+    re.I,
+)
+
+_HYPHEN_ROUTE_RE = re.compile(
+    rf"(?P<frm>{_LOC_LABEL})\s*-\s*(?P<to>{_LOC_LABEL})",
     re.I,
 )
 
@@ -154,6 +200,24 @@ def parse_category_token(message: str) -> str | None:
     return normalize_category(m.group(1))
 
 
+def parse_declared_day_total(message: str) -> float | None:
+    """User-stated day total, e.g. '100 taka cost hoyeche' (not per-line amounts)."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    m = _DECLARED_TOTAL_RE.search(text)
+    if not m:
+        return None
+    raw = m.group("a") or m.group("a2")
+    if not raw:
+        return None
+    try:
+        val = float(raw.replace(",", "."))
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_amount_only(message: str) -> float | None:
     """Single amount, no category — e.g. 'ajke 40 taka cost hoyeche'."""
     text = (message or "").strip()
@@ -168,19 +232,88 @@ def parse_amount_only(message: str) -> float | None:
     return val if val and val > 0 else None
 
 
+# Only strip a trailing number from a location when it is clearly an expense amount
+# (e.g. "mirpur 60 taka"), not part of the place name (e.g. "road 7", "mirpur 10").
+_AMOUNT_WITH_CURRENCY_TAIL_RE = re.compile(
+    r"\s+(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?\s+"
+    r"(?:টাকা|taka|tk|tks|bdt|৳|cost|খরচ|hoyeche)\b.*$",
+    re.I,
+)
+
+
+def _trim_route_location_tail(loc: str) -> str:
+    """Drop trailing category/fare/amount tokens accidentally captured in a location label."""
+    s = (loc or "").strip()
+    if not s:
+        return s
+    s = _AMOUNT_WITH_CURRENCY_TAIL_RE.sub("", s)
+    s = re.sub(
+        rf"\s+(?:{_CATEGORY_TOKEN}|vara|vhara|bhara|fare|ভাড়া)\b.*$",
+        "",
+        s,
+        flags=re.I,
+    )
+    return s.strip()
+
+
+def _valid_location_pair(frm: str, to: str) -> tuple[str, str] | None:
+    frm = _clean_location_label(_trim_route_location_tail(frm))
+    to = _clean_location_label(_trim_route_location_tail(to))
+    if frm and to and len(frm) >= 2 and len(to) >= 2:
+        return frm, to
+    return None
+
+
+def _looks_like_route_answer(message: str) -> bool:
+    """True when the user is likely answering a From/To prompt (not adding new lines)."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if re.search(rf"\b{_CATEGORY_TOKEN}\b", text, re.I):
+        return False
+    if _HYPHEN_ROUTE_RE.search(text):
+        return True
+    if _BANGLISH_FROM_TO_RE.search(text):
+        return True
+    if _FROM_TO_SIMPLE_RE.search(text):
+        return True
+    return bool(re.search(r"\b(to|theke|থেকে)\b", text, re.I))
+
+
 def parse_from_to_locations(message: str) -> tuple[str, str] | None:
     text = (message or "").strip()
     if not text:
         return None
+    m = _HYPHEN_ROUTE_RE.search(text)
+    if m:
+        pair = _valid_location_pair(m.group("frm") or "", m.group("to") or "")
+        if pair:
+            return pair
+    m = _BANGLISH_FROM_TO_RE.search(text)
+    if m:
+        pair = _valid_location_pair(m.group("frm") or "", m.group("to") or "")
+        if pair:
+            return pair
     m = _FROM_TO_SIMPLE_RE.search(text)
     if m:
-        frm = (m.group("frm") or m.group("frm2") or "").strip()
-        to = (m.group("to") or m.group("to2") or "").strip()
-        if frm and to:
-            return frm, to
+        pair = _valid_location_pair(
+            (m.group("frm") or m.group("frm2") or ""),
+            (m.group("to") or m.group("to2") or ""),
+        )
+        if pair:
+            return pair
+    route_m = _ROUTE_BANGLISH_RE.search(text)
+    if route_m:
+        pair = _valid_location_pair(
+            route_m.group("frm") or "", route_m.group("to") or ""
+        )
+        if pair:
+            return pair
     route_m = _ROUTE_RE.search(text)
     if route_m:
-        return route_m.group(1).strip(), route_m.group(2).strip()
+        pair = _valid_location_pair(route_m.group(1) or "", route_m.group(2) or "")
+        if pair:
+            return pair
     return None
 
 
@@ -224,7 +357,7 @@ def _span_overlaps(covered: list[tuple[int, int]], start: int, end: int) -> bool
 def _clean_location_label(raw: str) -> str:
     s = (raw or "").strip()
     s = re.sub(
-        r"^(?:first\s+cost|cost|খরচ|amar|my)\s+",
+        r"^(?:first\s+cost|cost|খরচ|amar|ami|my)\s+",
         "",
         s,
         flags=re.I,
@@ -302,11 +435,57 @@ def _attach_trailing_route(clause: str, items: list[ExpenseLineItem]) -> None:
             item.from_location, item.to_location = pair
 
 
+def _amount_nearest_category(clause: str, cat_pos: int) -> float | None:
+    best: float | None = None
+    best_dist: int | None = None
+    for m in _AMOUNT_RE.finditer(clause):
+        val = _parse_amount_match(m)
+        if val is None or val <= 0:
+            continue
+        dist = abs(((m.start() + m.end()) // 2) - cat_pos)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = val
+    return best
+
+
 def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
     found: list[ExpenseLineItem] = []
     covered: list[tuple[int, int]] = []
 
-    route_m = _ROUTE_RE.search(clause)
+    for m in _TA_AMOUNT_CAT_RE.finditer(clause):
+        amt_m = _AMOUNT_RE.search(m.group("amt") or "")
+        if not amt_m:
+            continue
+        val = _parse_amount_match(amt_m)
+        if val is None or val <= 0:
+            continue
+        covered.append((m.start(), m.end()))
+        found.append(
+            ExpenseLineItem(
+                category=normalize_category(m.group("cat")),
+                amount=val,
+            )
+        )
+
+    route_amt = _ROUTE_AMOUNT_ONLY_RE.search(clause)
+    if route_amt and not re.search(rf"\b{_CATEGORY_TOKEN}\b", clause, re.I):
+        amt_match = _AMOUNT_RE.search(route_amt.group("amt") or "")
+        val = _parse_amount_match(amt_match) if amt_match else None
+        pair = _valid_location_pair(
+            route_amt.group("frm") or "", route_amt.group("to") or ""
+        )
+        if val and val > 0 and pair:
+            return [
+                ExpenseLineItem(
+                    category="",
+                    amount=val,
+                    from_location=pair[0],
+                    to_location=pair[1],
+                )
+            ]
+
+    route_m = _ROUTE_BANGLISH_RE.search(clause) or _ROUTE_RE.search(clause)
     if route_m:
         amt_m = _AMOUNT_RE.search(clause[route_m.end() :])
         if amt_m:
@@ -315,12 +494,17 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
                 abs_start = route_m.start()
                 abs_end = route_m.end() + amt_m.end()
                 covered.append((abs_start, abs_end))
+                if route_m.groupdict().get("frm"):
+                    frm_raw, to_raw = route_m.group("frm"), route_m.group("to")
+                else:
+                    frm_raw, to_raw = route_m.group(1), route_m.group(2)
+                pair = _valid_location_pair(frm_raw or "", to_raw or "")
                 found.append(
                     ExpenseLineItem(
                         category=normalize_category(route_m.group("cat")),
                         amount=val,
-                        from_location=route_m.group(1).strip(),
-                        to_location=route_m.group(2).strip(),
+                        from_location=pair[0] if pair else (frm_raw or "").strip(),
+                        to_location=pair[1] if pair else (to_raw or "").strip(),
                     )
                 )
                 return found
@@ -367,10 +551,10 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
         return found
 
     cat_m = re.search(rf"\b({_CATEGORY_TOKEN})\b", clause, re.I)
-    amt_m = _AMOUNT_RE.search(clause)
-    if cat_m and amt_m and not _span_overlaps(covered, amt_m.start(), amt_m.end()):
-        val = _parse_amount_match(amt_m)
+    if cat_m and not _span_overlaps(covered, cat_m.start(), cat_m.end()):
+        val = _amount_nearest_category(clause, cat_m.start())
         if val and val > 0:
+            covered.append((cat_m.start(), cat_m.end()))
             found.append(
                 ExpenseLineItem(
                     category=normalize_category(cat_m.group(1)),
@@ -401,6 +585,21 @@ def extract_expense_items(message: str) -> ExtractionResult:
             malformed.append(clause[:120])
         elif re.search(_CATEGORY_TOKEN, clause, re.I):
             malformed.append(clause[:120])
+
+    # Route-only sibling clause: "rickshaw 10 taka, office to road 7"
+    for it in items:
+        if not is_travel_category(it.category):
+            continue
+        if it.from_location and it.to_location:
+            continue
+        for clause in list(malformed):
+            if re.search(rf"\b{_CATEGORY_TOKEN}\b", clause, re.I):
+                continue
+            pair = parse_from_to_locations(clause)
+            if pair:
+                it.from_location, it.to_location = pair
+                malformed.remove(clause)
+                break
 
     # Deduplicate identical category+amount in same message (accidental double-parse)
     seen: set[tuple[str, float]] = set()

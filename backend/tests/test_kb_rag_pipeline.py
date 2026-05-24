@@ -79,4 +79,4 @@ def test_try_hr_policy_rag_insufficient_evidence_message(settings):
                 "insufficient_evidence": True,
             }
             out = try_hr_policy_rag("parking policy?", "t4", company_id="company-a")
-    assert out and "closest matching section" in out["text"].lower()
+    assert out is None

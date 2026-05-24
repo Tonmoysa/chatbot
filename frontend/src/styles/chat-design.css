@@ -379,6 +379,12 @@
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  cursor: text;
+}
+
+.hr-chat-card .input-field-label {
+  margin: 0;
 }
 
 .hr-chat-card .chat-textarea {

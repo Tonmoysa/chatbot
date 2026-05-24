@@ -17,6 +17,7 @@ from chat.services.expense_extraction import (
     ExpenseLineItem,
     _AMOUNT_RE,
     _CATEGORY_TOKEN,
+    _looks_like_route_answer,
     _split_clauses,
     extract_expense_items,
     is_travel_category,
@@ -24,10 +25,28 @@ from chat.services.expense_extraction import (
     normalize_category,
     parse_amount_only,
     parse_category_token,
+    parse_declared_day_total,
     parse_from_to_locations,
 )
-from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+from chat.services.expense_incurred_date import (
+    expense_submit_date_block_reason,
+    infer_expense_incurred_date_iso,
+)
+from chat.services.expense_copy import (
+    ask_category_prompt,
+    ask_from_to_prompt,
+    ask_more_lines_prompt,
+    collect_start_prompt,
+    lang_from_block,
+    normalize_reply_lang,
+    review_confirm_footer,
+    review_head,
+    submitted_message,
+    submit_confirm_prompt,
+    total_label,
+)
 from chat.services.expense_validation import validate_expense_items
+from chat.services.translator import resolve_reply_language
 
 __all__ = [
     "process_expense_turn",
@@ -166,6 +185,39 @@ def deactivate_expense_session(workflow_state: dict[str, Any]) -> dict[str, Any]
     return wf
 
 
+def expense_pending_prompt(workflow_state: dict[str, Any] | None) -> str | None:
+    """Current wizard question for resume-after-interrupt (e.g. policy lookup)."""
+    if not is_expense_in_progress(workflow_state):
+        return None
+    block = _block(workflow_state)
+    stage = _normalize_stage(str(block.get("stage") or "collecting"))
+    inc_iso = str(block.get("incurred_date_iso") or "")
+    items = list(block.get("items") or [])
+    warnings = list(block.get("warnings") or [])
+
+    lang = lang_from_block(block)
+
+    if stage == "submit_confirm":
+        return submit_confirm_prompt(lang)
+    if stage == "review":
+        return format_expense_summary(
+            items, incurred_date_iso=inc_iso, warnings=warnings, lang=lang
+        )
+
+    pending = block.get("pending_line")
+    if isinstance(pending, dict) and pending.get("amount"):
+        step = str(block.get("pending_step") or "category")
+        amt = float(pending.get("amount") or 0)
+        if step == "from_to":
+            cat = str(pending.get("category") or "Bus")
+            return ask_from_to_prompt(cat, amt, lang)
+        return ask_category_prompt(amt, lang)
+
+    if items:
+        return ask_more_lines_prompt(lang)
+    return collect_start_prompt(lang)
+
+
 def _block(workflow_state: dict[str, Any]) -> dict[str, Any]:
     return (workflow_state or {}).get("expense_request") or {}
 
@@ -193,36 +245,90 @@ def _wants_finish_collecting(message: str) -> bool:
     return bool(re.search(r"\b(শেষ|আর\s*নেই|no\s+more)\b", t, re.I))
 
 
+_EXPENSE_RECAP_GIVE_RE = re.compile(
+    r"(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দিন|den|show|tell|give|list)\b",
+    re.I,
+)
+_EXPENSE_RECAP_KIND_RE = re.compile(
+    r"(summery|summary|সারাংশ|পর্যালোচনা|মোট|total|recap|"
+    r"list|lists|লিস্ট|breakdown|overview|lines|line\s*items|details|detail)",
+    re.I,
+)
+
+
+def wants_expense_summary(message: str) -> bool:
+    """User wants to see expense review / day recap (not a new claim line)."""
+    if _wants_finish_collecting(message):
+        return True
+    raw = message or ""
+    low = raw.lower().strip()
+    if re.search(
+        r"(expense|খরচ|খরচের).{0,40}(summery|summary|সারাংশ|পর্যালোচনা|মোট|total|recap|"
+        r"list|lists|লিস্ট|breakdown|lines)",
+        low,
+    ):
+        return True
+    if re.search(
+        r"(summery|summary|সারাংশ|পর্যালোচনা|list|lists|লিস্ট|breakdown).{0,30}"
+        r"(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",
+        low,
+    ):
+        return True
+    if re.search(
+        r"(list|lists|লিস্ট).{0,30}(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",
+        low,
+    ):
+        return True
+    if re.search(r"(ekhon|এখন|now).{0,20}(summery|summary|সারাংশ|list|লিস্ট)", low):
+        return True
+    if re.search(
+        r"(ajke|ajker|today|আজকে|আজকের).{0,35}(expense|খরচ).{0,35}"
+        r"(list|summery|summary|লিস্ট|সারাংশ|breakdown)",
+        low,
+    ) or re.search(
+        r"(ajke|ajker|today|আজকে|আজকের).{0,35}(expense|খরচ).{0,35}"
+        r"(list|summery|summary|লিস্ট|সারাংশ|breakdown)",
+        raw,
+        re.I,
+    ):
+        return True
+    if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
+        if re.search(r"\b(expense|খরচ|reimbursement|claim)\b", low) or re.search(
+            r"(খরচ|expense)", raw, re.I
+        ):
+            return True
+    return bool(
+        re.search(
+            r"\b(expense\s+summary|expense\s+list|খরচের\s+সারাংশ|খরচের\s+লিস্ট|দৈনিক\s+খরচ)\b",
+            low,
+        )
+    )
+
+
 def _category_options_text() -> str:
     return ", ".join(EXPENSE_CATEGORIES)
 
 
-def _ask_category_prompt(amount: float) -> str:
-    return (
-        f"**{amount:g} টাকা** খরচ হয়েছে — বুঝেছি।\n\n"
-        f"এটা কোন ধরনের খরচ? (CRM ফর্মের মতো)\n"
-        f"- {_category_options_text()}\n\n"
-        "উদাহরণ: lunch, bus, train, snack"
-    )
+def _ask_category_prompt(amount: float, lang: str | None = None) -> str:
+    return ask_category_prompt(amount, normalize_reply_lang(lang))
 
 
-def _ask_from_to_prompt(category: str, amount: float) -> str:
-    return (
-        f"**{category}** — **{amount:g} Tk**।\n\n"
-        "এই ধরনের খরচে **From** ও **To** লাগে (যেমন স্ক্রিনশটের ফর্মে)।\n"
-        "লিখুন: `office theke badda` বা `from office to motijheel`"
-    )
+def _ask_from_to_prompt(category: str, amount: float, lang: str | None = None) -> str:
+    return ask_from_to_prompt(category, amount, normalize_reply_lang(lang))
 
 
-def _ask_more_lines_prompt() -> str:
-    return (
-        "আর কোনো খরচ আছে? এক লাইনে লিখতে পারেন (যেমন: bus 50 office to home)।\n"
-        "না থাকলে **শেষ** বা **হ্যাঁ** লিখে summary দেখুন।"
-    )
+def _ask_more_lines_prompt(lang: str | None = None) -> str:
+    return ask_more_lines_prompt(normalize_reply_lang(lang))
 
 
-def _should_reset_pending_for_message(message: str) -> bool:
+def _should_reset_pending_for_message(
+    message: str, *, pending_step: str = ""
+) -> bool:
     """New multi-line input supersedes a single pending From/To question."""
+    if (pending_step or "").strip().lower() == "from_to" and _looks_like_route_answer(
+        message
+    ):
+        return False
     text = (message or "").strip()
     if len(_split_clauses(text)) > 1:
         return True
@@ -232,6 +338,75 @@ def _should_reset_pending_for_message(message: str) -> bool:
     if len(ext.items) + len(ext.malformed) > 1:
         return True
     return False
+
+
+def _pending_from_clause(clause: str) -> dict[str, Any] | None:
+    """Build a pending line from an uncategorized clause (amount ± route)."""
+    text = (clause or "").strip()
+    if not text:
+        return None
+    amt = parse_amount_only(text)
+    if amt is None:
+        return None
+    pair = parse_from_to_locations(text)
+    return {
+        "amount": float(amt),
+        "category": "",
+        "from_location": pair[0] if pair else "",
+        "to_location": pair[1] if pair else "",
+        "source_clause": text,
+    }
+
+
+def _resolve_pending_route(pending: dict[str, Any]) -> tuple[str, str]:
+    frm = str(pending.get("from_location") or "").strip()
+    to = str(pending.get("to_location") or "").strip()
+    if frm and to:
+        return frm, to
+    src = str(pending.get("source_clause") or "").strip()
+    if src:
+        pair = parse_from_to_locations(src)
+        if pair:
+            return pair
+    return "", ""
+
+
+def _queue_pending_amount(block: dict[str, Any], entry: dict[str, Any]) -> None:
+    if block.get("pending_line") and block["pending_line"].get("amount"):
+        queue = list(block.get("pending_queue") or [])
+        queue.append(entry)
+        block["pending_queue"] = queue
+    else:
+        block["pending_line"] = entry
+        block["pending_step"] = "category"
+        block["stage"] = "collecting"
+
+
+def _advance_pending_queue(
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    inc_iso: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """After finishing one pending line, start the next queued amount if any."""
+    lang = lang_from_block(block)
+    queue = list(block.get("pending_queue") or [])
+    if not queue:
+        block.pop("pending_queue", None)
+        return items, _ask_more_lines_prompt(lang)
+    nxt = queue.pop(0)
+    block["pending_queue"] = queue
+    block["pending_line"] = nxt
+    block["stage"] = "collecting"
+    cat = str(nxt.get("category") or "").strip()
+    amt = float(nxt.get("amount") or 0)
+    frm = str(nxt.get("from_location") or "").strip()
+    to = str(nxt.get("to_location") or "").strip()
+    if cat and is_travel_category(cat) and (not frm or not to):
+        block["pending_step"] = "from_to"
+        return items, _ask_from_to_prompt(cat, amt, lang)
+    block["pending_step"] = "category"
+    return items, _ask_category_prompt(amt, lang)
 
 
 def _ingest_extracted_lines(
@@ -246,9 +421,16 @@ def _ingest_extracted_lines(
     Returns (items, question_if_blocked_on_pending).
     """
     out = list(items)
+    lang = lang_from_block(block)
     needs_route: list[ExpenseLineItem] = []
+    uncategorized: list[ExpenseLineItem] = []
+
     for ni in ext.items:
         d = ni.to_dict()
+        cat = str(d.get("category") or "").strip()
+        if not cat:
+            uncategorized.append(ni)
+            continue
         if str(d.get("category") or "") == "Other":
             continue
         if is_travel_category(d["category"]) and (
@@ -259,30 +441,53 @@ def _ingest_extracted_lines(
             continue
         out.append(d)
 
+    pending_entries: list[dict[str, Any]] = []
+    for ni in uncategorized:
+        pending_entries.append(
+            {
+                "amount": float(ni.amount),
+                "category": "",
+                "from_location": ni.from_location or "",
+                "to_location": ni.to_location or "",
+                "source_clause": "",
+            }
+        )
+    for clause in ext.malformed:
+        entry = _pending_from_clause(clause)
+        if entry:
+            pending_entries.append(entry)
+
     if needs_route:
         first = needs_route[0]
+        route_queue: list[dict[str, Any]] = []
+        for extra in needs_route[1:]:
+            route_queue.append(
+                {
+                    "amount": float(extra.amount),
+                    "category": extra.category,
+                    "from_location": extra.from_location or "",
+                    "to_location": extra.to_location or "",
+                    "source_clause": "",
+                }
+            )
         block["pending_line"] = {
             "amount": first.amount,
             "category": first.category,
             "from_location": first.from_location or "",
             "to_location": first.to_location or "",
+            "source_clause": "",
         }
         block["pending_step"] = "from_to"
         block["stage"] = "collecting"
-        return out, _ask_from_to_prompt(first.category, float(first.amount))
+        block["pending_queue"] = route_queue + pending_entries
+        return out, _ask_from_to_prompt(first.category, float(first.amount), lang)
 
-    for clause in ext.malformed:
-        amt = parse_amount_only(clause)
-        if amt is not None:
-            block["pending_line"] = {
-                "amount": amt,
-                "category": "",
-                "from_location": "",
-                "to_location": "",
-            }
-            block["pending_step"] = "category"
-            block["stage"] = "collecting"
-            return out, _ask_category_prompt(amt)
+    if pending_entries:
+        block["pending_line"] = pending_entries[0]
+        block["pending_queue"] = pending_entries[1:]
+        block["pending_step"] = "category"
+        block["stage"] = "collecting"
+        return out, _ask_category_prompt(float(pending_entries[0]["amount"]), lang)
 
     return out, None
 
@@ -325,37 +530,54 @@ def _format_line_display(row: dict[str, Any]) -> str:
     return f"- **{cat}** · {route} · **{amt:g} Tk**"
 
 
+def format_expense_day_summary_readonly(
+    items: list[dict[str, Any]],
+    *,
+    incurred_date_iso: str = "",
+    reference_id: str = "",
+) -> str:
+    """Submitted / logged expenses for a date — read-only (no wizard confirmation)."""
+    if not items:
+        date_hint = incurred_date_iso or "আজ"
+        return (
+            f"**{date_hint}** তারিখে কোনো expense জমা পাওয়া যায়নি।\n\n"
+            "নতুন খরচ জমা দিতে লিখুন, যেমন: `lunch 100, bus 50 office to badda`"
+        )
+    total = sum(float(r.get("amount") or 0) for r in items)
+    head = (
+        "**দৈনিক খরচ — সারাংশ**"
+        if not incurred_date_iso
+        else f"**দৈনিক খরচ — সারাংশ** ({incurred_date_iso})"
+    )
+    body = "\n".join(_format_line_display(r) for r in items)
+    lines = [head, "", body, "", f"**মোট: {total:g} Tk**"]
+    if reference_id:
+        lines.extend(["", f"**রেফারেন্স:** `{reference_id}`"])
+    return "\n".join(lines)
+
+
 def format_expense_summary(
     items: list[dict[str, Any]],
     *,
     incurred_date_iso: str = "",
     warnings: list[str] | None = None,
+    lang: str | None = None,
 ) -> str:
+    reply_lang = normalize_reply_lang(lang)
     total = sum(float(r.get("amount") or 0) for r in items)
-    head = (
-        "**দৈনিক খরচ — পর্যালোচনা**"
-        if not incurred_date_iso
-        else f"**দৈনিক খরচ — পর্যালোচনা** ({incurred_date_iso})"
-    )
+    head = review_head(incurred_date_iso, reply_lang)
     body = "\n".join(_format_line_display(r) for r in items)
     warn = ""
     if warnings:
         warn = "\n\n" + "\n".join(f"⚠ {w}" for w in warnings)
     return (
-        f"{head}\n\n{body}\n\n**মোট: {total:g} Tk**{warn}\n\n"
-        "উপরের তথ্য কি ঠিক আছে?\n"
-        "- **হ্যাঁ** — পরবর্তী ধাপে যাবেন\n"
-        "- **না** — ঠিক করুন (যেমন: bus 50 না 70)"
+        f"{head}\n\n{body}\n\n**{total_label(reply_lang)}: {total:g} Tk**{warn}\n\n"
+        + review_confirm_footer(reply_lang)
     )
 
 
-def format_submit_confirm_prompt() -> str:
-    return (
-        "ডেটা ঠিক আছে।\n\n"
-        "**Expense CRM-এ জমা দেব?**\n"
-        "- **হ্যাঁ** — submit করুন\n"
-        "- **না** — আবার সম্পাদনা"
-    )
+def format_submit_confirm_prompt(lang: str | None = None) -> str:
+    return submit_confirm_prompt(normalize_reply_lang(lang))
 
 
 def format_expense_submitted_message(
@@ -363,24 +585,16 @@ def format_expense_submitted_message(
     items: list[dict[str, Any]],
     reference_id: str,
     incurred_date_iso: str = "",
+    lang: str | None = None,
 ) -> str:
     total = sum(float(r.get("amount") or 0) for r in items)
-    lines = [
-        "**Expense সফলভাবে জমা হয়েছে**",
-        "",
-        f"- **তারিখ:** {incurred_date_iso or 'আজ'}",
-        f"- **লাইন:** {len(items)} টি · **মোট:** {total:g} Tk",
-    ]
-    if reference_id:
-        lines.append(f"- **রেফারেন্স:** `{reference_id}`")
-    lines.extend(
-        [
-            "",
-            "চূড়ান্ত অনুমোদন/প্রতিদান আপনার কোম্পানির CRM/Finance সিস্টেমে হবে — "
-            "এই চ্যাট শুধু ডেটা জমা নেয়।",
-        ]
+    return submitted_message(
+        item_count=len(items),
+        total=total,
+        incurred_date_iso=incurred_date_iso,
+        reference_id=reference_id,
+        lang=normalize_reply_lang(lang),
     )
-    return "\n".join(lines)
 
 
 def build_confirmation_question() -> str:
@@ -600,12 +814,13 @@ def _try_advance_to_review(
     block["warnings"] = val.warnings
     block.pop("pending_line", None)
     block.pop("pending_step", None)
+    lang = lang_from_block(block)
     return _pack(
         wf,
         block,
         items=items,
         question=format_expense_summary(
-            items, incurred_date_iso=inc_iso, warnings=val.warnings
+            items, incurred_date_iso=inc_iso, warnings=val.warnings, lang=lang
         ),
         warnings=val.warnings,
         inc_iso=inc_iso,
@@ -625,6 +840,7 @@ def _handle_pending_line(
 ) -> dict[str, Any]:
     step = str(block.get("pending_step") or "category")
     amt = float(pending.get("amount") or 0)
+    lang = lang_from_block(block)
 
     if step == "category":
         cat = parse_category_token(message)
@@ -641,6 +857,16 @@ def _handle_pending_line(
             )
         pending["category"] = cat
         if is_travel_category(cat):
+            frm, to = _resolve_pending_route(pending)
+            if frm and to:
+                pending["from_location"], pending["to_location"] = frm, to
+                row = _finalize_pending_line(pending)
+                if row:
+                    items.append(row)
+                block.pop("pending_line", None)
+                block.pop("pending_step", None)
+                items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
+                return _pack(wf, block, items=items, question=q, inc_iso=inc_iso)
             block["pending_line"] = pending
             block["pending_step"] = "from_to"
             block["stage"] = "collecting"
@@ -648,7 +874,7 @@ def _handle_pending_line(
                 wf,
                 block,
                 items=items,
-                question=_ask_from_to_prompt(cat, amt),
+                question=_ask_from_to_prompt(cat, amt, lang),
                 inc_iso=inc_iso,
             )
         row = _finalize_pending_line(pending)
@@ -656,11 +882,12 @@ def _handle_pending_line(
             items.append(row)
         block.pop("pending_line", None)
         block.pop("pending_step", None)
+        items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
         return _pack(
             wf,
             block,
             items=items,
-            question=_ask_more_lines_prompt(),
+            question=q,
             inc_iso=inc_iso,
         )
 
@@ -670,11 +897,15 @@ def _handle_pending_line(
         if not pair and is_travel_category(cat):
             pair = _route_from_clause_prefix(message, cat)
         if not pair:
+            pair_raw = _resolve_pending_route(pending)
+            if pair_raw[0] and pair_raw[1]:
+                pair = pair_raw
+        if not pair:
             return _pack(
                 wf,
                 block,
                 items=items,
-                question=_ask_from_to_prompt(cat, amt),
+                question=_ask_from_to_prompt(cat, amt, lang),
                 inc_iso=inc_iso,
             )
         pending["from_location"], pending["to_location"] = pair
@@ -683,11 +914,12 @@ def _handle_pending_line(
             items.append(row)
         block.pop("pending_line", None)
         block.pop("pending_step", None)
+        items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
         return _pack(
             wf,
             block,
             items=items,
-            question=_ask_more_lines_prompt(),
+            question=q,
             inc_iso=inc_iso,
         )
 
@@ -697,8 +929,35 @@ def _handle_pending_line(
         wf,
         block,
         items=items,
-        question=_ask_more_lines_prompt(),
+        question=_ask_more_lines_prompt(lang),
         inc_iso=inc_iso,
+    )
+
+
+def _unallocated_total_prompt(
+    message: str, items: list[dict[str, Any]], *, lang: str | None
+) -> str | None:
+    declared = parse_declared_day_total(message)
+    if declared is None:
+        return None
+    line_sum = sum(float(r.get("amount") or 0) for r in items)
+    gap = round(declared - line_sum, 2)
+    if gap < 0.5:
+        return None
+    if lang == "en":
+        return (
+            f"You mentioned **{declared:g} Tk** total; lines so far add up to **{line_sum:g} Tk**. "
+            f"What was the other **{gap:g} Tk** for? (e.g. bus 50 office to home), or say **done**."
+        )
+    return (
+        f"আপনি মোট **{declared:g} Tk** বলেছেন; এখন পর্যন্ত লাইনে **{line_sum:g} Tk**। "
+        f"বাকি **{gap:g} Tk** কী ছিল? (যেমন: bus 50 office to home), না হলে **শেষ** লিখুন।"
+    )
+
+
+def _sync_reply_language(block: dict[str, Any], message: str) -> None:
+    block["reply_language"] = resolve_reply_language(
+        message, block.get("reply_language")
     )
 
 
@@ -722,6 +981,8 @@ def process_expense_turn(
     block = wf.setdefault("expense_request", {})
     block["active"] = True
     block["workflow_type"] = "expense_request"
+    _sync_reply_language(block, message)
+    lang = lang_from_block(block)
 
     items: list[dict[str, Any]] = list(block.get("items") or [])
     stage = _normalize_stage(str(block.get("stage") or "collecting"))
@@ -751,6 +1012,24 @@ def process_expense_turn(
                     inc_iso=inc_iso,
                     validation_blocked=True,
                 )
+            date_block = expense_submit_date_block_reason(inc_iso)
+            if date_block:
+                block["stage"] = "submit_confirm"
+                block["submit_blocked_reason"] = date_block
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=(
+                        f"{date_block}\n\n"
+                        "এই খরচের তারিখে CRM-এ এখন জমা দেওয়া যাবে না। "
+                        "আজকের খরচ হলে তারিখ ঠিক করে আবার লিখুন, অথবা ওই দিনে/পরে চেষ্টা করুন।"
+                    ),
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            block.pop("submit_blocked_reason", None)
             wf = deactivate_expense_session(wf)
             return {
                 "workflow_state": wf,
@@ -777,7 +1056,7 @@ def process_expense_turn(
                 items=items,
                 question="ঠিক আছে — আবার দেখুন:\n\n"
                 + format_expense_summary(
-                    items, incurred_date_iso=inc_iso, warnings=val.warnings
+                    items, incurred_date_iso=inc_iso, warnings=val.warnings, lang=lang
                 ),
                 warnings=val.warnings,
                 inc_iso=inc_iso,
@@ -786,7 +1065,7 @@ def process_expense_turn(
             wf,
             block,
             items=items,
-            question=format_submit_confirm_prompt(),
+            question=format_submit_confirm_prompt(lang),
             inc_iso=inc_iso,
         )
 
@@ -810,12 +1089,27 @@ def process_expense_turn(
                     inc_iso=inc_iso,
                     validation_blocked=True,
                 )
+            date_block = expense_submit_date_block_reason(inc_iso)
+            if date_block:
+                block["stage"] = "review"
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=(
+                        f"{date_block}\n\n"
+                        "তারিখ ঠিক করে আবার বলুন (যেমন **ajke** lunch 100), তারপর summary দেখুন।"
+                    ),
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
             block["stage"] = "submit_confirm"
             return _pack(
                 wf,
                 block,
                 items=items,
-                question=format_submit_confirm_prompt(),
+                question=format_submit_confirm_prompt(lang),
                 warnings=val.warnings,
                 inc_iso=inc_iso,
             )
@@ -878,7 +1172,7 @@ def process_expense_turn(
 
         block["stage"] = "review"
         q = format_expense_summary(
-            items, incurred_date_iso=inc_iso, warnings=val.warnings
+            items, incurred_date_iso=inc_iso, warnings=val.warnings, lang=lang
         )
         if corrected or _is_confirmation_no(message):
             q = "আপডেট করা হয়েছে।\n\n" + q
@@ -894,7 +1188,9 @@ def process_expense_turn(
     # --- Collecting ---
     pending = block.get("pending_line")
     if isinstance(pending, dict) and pending.get("amount"):
-        if _should_reset_pending_for_message(message):
+        if _should_reset_pending_for_message(
+            message, pending_step=str(block.get("pending_step") or "")
+        ):
             block.pop("pending_line", None)
             block.pop("pending_step", None)
         else:
@@ -937,7 +1233,7 @@ def process_expense_turn(
             wf,
             block,
             items=items,
-            question=_ask_category_prompt(loose_amt),
+            question=_ask_category_prompt(loose_amt, lang),
             inc_iso=inc_iso,
         )
 
@@ -954,6 +1250,15 @@ def process_expense_turn(
                 inc_iso=inc_iso,
             )
         if items:
+            gap_q = _unallocated_total_prompt(message, items, lang=lang)
+            if gap_q:
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=gap_q,
+                    inc_iso=inc_iso,
+                )
             adv = _try_advance_to_review(
                 wf,
                 block,
@@ -968,7 +1273,7 @@ def process_expense_turn(
                 wf,
                 block,
                 items=items,
-                question=_ask_more_lines_prompt(),
+                question=_ask_more_lines_prompt(lang),
                 inc_iso=inc_iso,
             )
 
@@ -1010,6 +1315,6 @@ def process_expense_turn(
         wf,
         block,
         items=items,
-        question=_ask_more_lines_prompt(),
+        question=_ask_more_lines_prompt(lang),
         inc_iso=inc_iso,
     )

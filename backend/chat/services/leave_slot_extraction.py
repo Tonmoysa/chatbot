@@ -73,7 +73,6 @@ _TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
     (r"\bcasual\s*leave\b|\bcasual\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
     (r"\b(annual|vacation|pto)\s*leave\b|\bannual\b|বার্ষিক", "annual"),
-    (r"\b(unpaid|lwop)\s*leave\b|\bunpaid\b|বেতন\s*ছাড়া|বিনা\s*বেতন", "unpaid"),
     (r"\bmaternity\b|মাতৃত্ব", "maternity"),
     (r"\bpaternity\b|পিতৃত্ব", "paternity"),
     (r"\bemergency\b|জরুরি", "emergency"),
@@ -89,6 +88,57 @@ _SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bhalf[- ]?day\b|\bhalf\b|হাফ|অর্ধ\s*দিন", "half"),
     (r"\bfull[- ]?day\b|\bfull\b|পুরো\s*দিন|সম্পূর্ণ\s*দিন", "full"),
 )
+
+_LEAVE_TYPE_HINT_RE = re.compile(
+    "|".join(f"(?:{pat})" for pat, _code in _TYPE_PATTERNS),
+    re.I,
+)
+
+
+def message_mentions_leave_type(message: str) -> bool:
+    """True when the user explicitly named a leave type in this message."""
+    return bool(_LEAVE_TYPE_HINT_RE.search(message or ""))
+
+
+def explicit_leave_type_from_message(message: str) -> str | None:
+    """Highest-priority leave category in the message (sick/casual/annual — not paid/unpaid)."""
+    low = (message or "").lower()
+    for pattern, code in _TYPE_PATTERNS:
+        if re.search(pattern, low, re.I):
+            return code
+    return None
+
+
+def apply_payment_category_from_message(message: str) -> str | None:
+    """Return ``paid`` or ``lwop`` when the user is setting payment only."""
+    low = (message or "").lower()
+    for pattern, pay in _PAYMENT_PATTERNS:
+        if re.search(pattern, low, re.I):
+            return pay
+    return None
+
+
+def is_payment_only_message(message: str) -> bool:
+    """
+    True for short paid/unpaid corrections (e.g. ``unpaid hobe``) that must not
+    change Select Leave / sick / casual / annual.
+    """
+    low = (message or "").lower().strip()
+    if not apply_payment_category_from_message(message):
+        return False
+    if explicit_leave_type_from_message(message):
+        return False
+    if re.search(
+        r"\b(sick|casual|annual|medical|maternity|paternity|emergency|compensatory)\b|"
+        r"অসুস্থ|জ্বর|ক্যাজুয়াল|বার্ষিক",
+        low,
+    ):
+        return False
+    if re.search(r"\b(full|half)\b|full\s*day|half\s*day|হাফ|পুরো", low):
+        return False
+    if re.search(r"\d{4}-\d{2}-\d{2}", message or ""):
+        return False
+    return True
 
 
 def _today() -> date:

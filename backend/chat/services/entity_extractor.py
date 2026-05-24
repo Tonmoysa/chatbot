@@ -2,7 +2,7 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-from chat.constants import INTENT_EXPENSE_CLAIM
+from chat.constants import INTENT_EXPENSE_CLAIM, INTENT_LEAVE_REQUEST
 from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
 from chat.services.llm_client import LLMClient
 
@@ -289,9 +289,20 @@ class EntityExtractor:
         mmock = re.search(r"\bMOCK-[A-Za-z0-9]{6,}\b", message, re.I)
         if mmock and not e.get("request_id"):
             e["request_id"] = mmock.group(0).upper()
-        if re.search(r"\bsick(?:ness)?\b|\bill(?:ness)?\b|অসুস্থ|জ্বর", low):
+        from chat.services.leave_slot_extraction import (
+            explicit_leave_type_from_message,
+            message_mentions_leave_type,
+        )
+
+        explicit_lt = explicit_leave_type_from_message(message)
+        if explicit_lt:
+            e["leave_type"] = explicit_lt
+        elif intent == INTENT_LEAVE_REQUEST and not message_mentions_leave_type(message):
+            # Do not trust LLM-invented leave types (e.g. annual after reading policy context).
+            e["leave_type"] = None
+        elif re.search(r"\bsick(?:ness)?\b|\bill(?:ness)?\b|অসুস্থ|জ্বর", low):
             e["leave_type"] = e.get("leave_type") or "sick"
-        if re.search(r"\bannual|vacation|pto\b|বার্ষিক", low):
+        elif re.search(r"\bannual|vacation|\bpto\b|বার্ষিক", low):
             e["leave_type"] = e.get("leave_type") or "annual"
         if re.search(r"\bcasual\b|ক্যাজুয়াল|নৈমিত্তিক", low):
             e["leave_type"] = e.get("leave_type") or "casual"

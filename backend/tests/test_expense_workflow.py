@@ -3,7 +3,11 @@
 import pytest
 
 from chat.constants import INTENT_EXPENSE_CLAIM
-from chat.services.expense_extraction import extract_expense_items, parse_category_token
+from chat.services.expense_extraction import (
+    extract_expense_items,
+    parse_category_token,
+    parse_from_to_locations,
+)
 from chat.services.expense_workflow import (
     format_expense_summary,
     is_expense_collecting,
@@ -14,8 +18,124 @@ from chat.services.orchestrator import ChatOrchestrator
 COMPANY_ID = "company-a"
 
 
+def test_process_expense_turn_tracks_reply_language():
+    wf: dict = {}
+    r1 = process_expense_turn(
+        workflow_state=wf,
+        message="Okay. I have to go to Cumilla and it will cost around 3000",
+    )
+    block = r1["workflow_state"].get("expense_request") or {}
+    assert block.get("reply_language") == "en"
+
+    r2 = process_expense_turn(
+        workflow_state=r1["workflow_state"],
+        message="yes",
+    )
+    block2 = r2["workflow_state"].get("expense_request") or {}
+    assert block2.get("reply_language") == "en"
+
+    r3 = process_expense_turn(
+        workflow_state={},
+        message="amar ajke bus vara 30 taka",
+    )
+    block3 = r3["workflow_state"].get("expense_request") or {}
+    assert block3.get("reply_language") == "banglish"
+
+
+def test_parse_office_to_road_7_keeps_full_location():
+    assert parse_from_to_locations("office to road 7") == ("office", "road 7")
+
+
+def test_parse_hyphen_route_mirpur_sectors():
+    assert parse_from_to_locations("mirpur 1-mirpur 10") == ("mirpur 1", "mirpur 10")
+
+
+def test_rickshaw_comma_separated_route_in_one_message():
+    ext = extract_expense_items("rickshaw 10 taka,office to road 7")
+    assert len(ext.items) == 1
+    row = ext.items[0]
+    assert row.category == "Rickshaw"
+    assert row.amount == 10.0
+    assert row.from_location == "office"
+    assert row.to_location == "road 7"
+    assert ext.malformed == []
+
+
+def test_rickshaw_hyphen_route_not_dropped_from_pending():
+    """Digits in sector-style routes must not reset the pending From/To line."""
+    wf = {"expense_request": {
+        "active": True,
+        "stage": "collecting",
+        "reply_language": "en",
+        "items": [
+            {"category": "Lunch", "amount": 100},
+            {"category": "Bus", "amount": 50, "from_location": "mirpur", "to_location": "motejheel"},
+            {"category": "Train", "amount": 100, "from_location": "motijheel", "to_location": "utora"},
+        ],
+        "pending_line": {
+            "amount": 10,
+            "category": "Rickshaw",
+            "from_location": "",
+            "to_location": "",
+        },
+        "pending_step": "from_to",
+    }}
+    r = process_expense_turn(workflow_state=wf, message="mirpur 1-mirpur 10")
+    items = r["items"]
+    rickshaws = [x for x in items if x["category"] == "Rickshaw"]
+    assert len(rickshaws) == 1
+    assert rickshaws[0]["amount"] == 10
+    assert rickshaws[0]["from_location"] == "mirpur 1"
+    assert rickshaws[0]["to_location"] == "mirpur 10"
+
+
+def test_transcript_lunch_bus_train_rickshaw_summary():
+    wf: dict = {}
+    msgs = [
+        "ami ajke 100 taka lunch ,50 taka bus ,and 100 taka train e expense hoyeche",
+        "mirpur to motejheel",
+        "motijheel to utora",
+        "rickshaw 10 taka,office to road 7",
+        "summery",
+    ]
+    for m in msgs:
+        wf = process_expense_turn(workflow_state=wf, message=m)["workflow_state"]
+    items = (wf.get("expense_request") or {}).get("items") or []
+    cats = {r["category"]: r for r in items}
+    assert "Rickshaw" in cats
+    assert cats["Rickshaw"]["amount"] == 10
+    assert cats["Rickshaw"]["from_location"] == "office"
+    assert cats["Rickshaw"]["to_location"] == "road 7"
+    assert sum(float(r["amount"]) for r in items) == 260
+
+
 def test_parse_other_category_token():
     assert parse_category_token("other") == "Other"
+
+
+def test_format_expense_summary_banglish_has_no_llm_parentheticals():
+    """Structured line items must not get conversational LLM junk like (keno 70 Tk)."""
+    items = [
+        {"category": "Bus", "amount": 50, "from_location": "office", "to_location": "motejheel"},
+        {"category": "Train", "amount": 100, "from_location": "mirpur", "to_location": "uttora"},
+        {"category": "Snack", "amount": 40, "from_location": "", "to_location": ""},
+    ]
+    msg = format_expense_summary(items, incurred_date_iso="2026-05-24", lang="banglish")
+    assert "keno" not in msg.lower()
+    assert "ki ki" not in msg.lower()
+    assert "(70" not in msg
+    assert "Bus" in msg
+    assert "50" in msg
+    assert "Snack" in msg
+    assert "40" in msg
+
+
+def test_format_expense_summary_english():
+    items = [{"category": "Lunch", "amount": 100, "from_location": "", "to_location": ""}]
+    msg = format_expense_summary(items, incurred_date_iso="2026-05-24", lang="en")
+    assert "review" in msg.lower()
+    assert "Total" in msg
+    assert "Yes" in msg
 
 
 def test_extract_bus_vara_then_sequence():
@@ -31,6 +151,108 @@ def test_extract_bus_vara_then_sequence():
     assert ("Bus", 40.0) in pairs
     assert ("Lunch", 30.0) not in pairs
     assert sum(i.amount for i in ext.items) == 170
+
+
+def test_parse_banglish_location_theke_location():
+    assert parse_from_to_locations("uttora theke mirpur") == ("uttora", "mirpur")
+    assert parse_from_to_locations("office theke badda") == ("office", "badda")
+    assert parse_from_to_locations("uttora thke mirpur") == ("uttora", "mirpur")
+    assert parse_from_to_locations("from office to motijheel") == (
+        "office",
+        "motijheel",
+    )
+
+
+def test_extract_bus_with_banglish_route_prefix():
+    ext = extract_expense_items("amar uttora thke mirpur bus vara 50 taka")
+    assert len(ext.items) == 1
+    bus = ext.items[0]
+    assert bus.category == "Bus"
+    assert bus.amount == 50.0
+    assert bus.from_location == "uttora"
+    assert bus.to_location == "mirpur"
+
+
+def test_from_to_step_accepts_banglish_route():
+    wf: dict = {}
+    r1 = process_expense_turn(workflow_state=wf, message="bus 50 taka")
+    assert (r1["workflow_state"].get("expense_request") or {}).get("pending_step") == "from_to"
+    r2 = process_expense_turn(
+        workflow_state=r1["workflow_state"],
+        message="uttora theke mirpur",
+    )
+    items = r2["items"]
+    assert len(items) == 1
+    assert items[0]["category"] == "Bus"
+    assert items[0]["from_location"] == "uttora"
+    assert items[0]["to_location"] == "mirpur"
+
+
+def test_route_amount_without_category():
+    ext = extract_expense_items("ami uttora theke mirpur 60 taka")
+    assert len(ext.items) == 1
+    row = ext.items[0]
+    assert row.amount == 60.0
+    assert row.category == ""
+    assert row.from_location == "uttora"
+    assert row.to_location == "mirpur"
+    assert parse_from_to_locations("ami uttora theke mirpur 60 taka") == (
+        "uttora",
+        "mirpur",
+    )
+
+
+def test_loose_expense_amount_queued_after_travel_from_to():
+    """30 taka without category must be asked after bike From/To is filled."""
+    msg = "amar ajker expense 30 taka,lunch 100 taka and bike 100 taka"
+    wf: dict = {}
+    r1 = process_expense_turn(workflow_state=wf, message=msg)
+    er1 = r1["workflow_state"].get("expense_request") or {}
+    assert er1.get("pending_step") == "from_to"
+    assert any(r["category"] == "Lunch" and r["amount"] == 100 for r in r1["items"])
+    queue = list(er1.get("pending_queue") or [])
+    assert any(float(e.get("amount") or 0) == 30 for e in queue)
+
+    r2 = process_expense_turn(
+        workflow_state=r1["workflow_state"],
+        message="uttora to ajimpur",
+    )
+    q2 = r2.get("question") or ""
+    assert "30" in q2
+    assert "ধরন" in q2 or "category" in q2.lower()
+    bikes = [r for r in r2["items"] if r["category"] == "Bike"]
+    assert len(bikes) == 1
+    assert bikes[0]["from_location"] == "uttora"
+    assert bikes[0]["to_location"] == "ajimpur"
+
+    r3 = process_expense_turn(
+        workflow_state=r2["workflow_state"],
+        message="snack",
+    )
+    assert any(r["category"] == "Snack" and r["amount"] == 30 for r in r3["items"])
+
+
+def test_compound_route_lunch_and_loose_amount():
+    """User transcript: route+60, lunch 100, loose 50 — train should keep route from turn 1."""
+    msg = "ami uttora theke mirpur 60 taka ,lunch 100 taka,then 50 taka cost hoyeche"
+    wf: dict = {}
+    r1 = process_expense_turn(workflow_state=wf, message=msg)
+    er1 = r1["workflow_state"].get("expense_request") or {}
+    assert er1.get("pending_step") == "category"
+    assert er1.get("pending_line", {}).get("amount") == 60
+    assert er1.get("pending_line", {}).get("from_location") == "uttora"
+    assert er1.get("pending_line", {}).get("to_location") == "mirpur"
+    assert any(r["category"] == "Lunch" and r["amount"] == 100 for r in r1["items"])
+
+    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="train")
+    er2 = r2["workflow_state"].get("expense_request") or {}
+    assert er2.get("pending_step") == "category"
+    assert er2.get("pending_line", {}).get("amount") == 50
+    trains = [r for r in r2["items"] if r["category"] == "Train"]
+    assert len(trains) == 1
+    assert trains[0]["amount"] == 60
+    assert trains[0]["from_location"] == "uttora"
+    assert trains[0]["to_location"] == "mirpur"
 
 
 def test_travel_route_after_amount():
@@ -177,7 +399,12 @@ def test_orchestrator_expense_confirm_submit():
     )
     assert first["intent"] == INTENT_EXPENSE_CLAIM
     msg1 = first["response"]["message"]
-    assert "পর্যালোচনা" in msg1 or "মোট" in msg1
+    assert (
+        "পর্যালোচনা" in msg1
+        or "মোট" in msg1
+        or "review" in msg1.lower()
+        or "total" in msg1.lower()
+    )
     assert is_expense_collecting(
         orch.memory.get_or_create_session(
             company_id=COMPANY_ID, employee_id=emp, session_id=first["_session_id"]
@@ -206,3 +433,138 @@ def test_orchestrator_expense_confirm_submit():
     ref = third["response"]["request_id"] or ""
     msg3 = third["response"]["message"] or ""
     assert ref.startswith("EXP-") or "EXP-" in msg3
+
+
+@pytest.mark.django_db
+def test_orchestrator_expense_english_reply_language():
+    """English expense turns should get English wizard copy from templates."""
+    orch = ChatOrchestrator()
+    emp = "expense-wf-en-pytest"
+
+    first = orch.run_chat(
+        company_id=COMPANY_ID,
+        message=(
+            "Okay. I have to go a side visit in Cumilla and it will cost around 3000"
+        ),
+        session_id=None,
+        employee_id=emp,
+        trace_id="exp-wf-en-1",
+    )
+    assert first["intent"] == INTENT_EXPENSE_CLAIM
+    msg1 = first["response"]["message"]
+    assert "3000" in msg1
+    assert "category" in msg1.lower() or "clear" in msg1.lower()
+    assert "keno" not in msg1.lower()
+
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID, employee_id=emp, session_id=first["_session_id"]
+    )
+    assert (session.workflow_state.get("expense_request") or {}).get("reply_language") == "en"
+
+
+def test_extract_50_ta_lunch_not_100():
+    ext = extract_expense_items("kalke amar 100 taka cost hoyeche...50 ta lunch")
+    assert len(ext.items) == 1
+    assert ext.items[0].category == "Lunch"
+    assert ext.items[0].amount == 50.0
+
+
+def test_kalke_cost_hoyeche_is_yesterday():
+    from datetime import date
+
+    from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+
+    inc = infer_expense_incurred_date_iso(
+        message="kalke amar 100 taka cost hoyeche",
+        hints={},
+        today=date(2026, 5, 24),
+    )
+    assert inc == "2026-05-23"
+
+
+def test_kalke_lagbe_is_tomorrow():
+    from datetime import date
+
+    from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+
+    inc = infer_expense_incurred_date_iso(
+        message="amar kalker jonno 300 taka lagbe",
+        hints={},
+        today=date(2026, 5, 24),
+    )
+    assert inc == "2026-05-25"
+
+
+def test_past_date_submit_allowed(monkeypatch):
+    from datetime import date
+
+    from chat.services.expense_workflow import is_expense_in_progress
+
+    fixed = date(2026, 5, 24)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.expense_workflow.date", FixedDate)
+
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-05-23",
+            "items": [{"category": "Lunch", "amount": 50}],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="yes")
+    assert pack.get("submitted")
+    assert not is_expense_in_progress(pack["workflow_state"])
+
+
+def test_future_date_submit_blocked_keeps_draft(monkeypatch):
+    from datetime import date
+
+    from chat.services.expense_workflow import is_expense_in_progress
+
+    fixed = date(2026, 5, 24)
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return fixed
+
+    monkeypatch.setattr("chat.services.expense_workflow.date", FixedDate)
+
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-05-25",
+            "items": [{"category": "Lunch", "amount": 50}],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="yes")
+    assert pack.get("validation_blocked")
+    assert not pack.get("submitted")
+    assert is_expense_in_progress(pack["workflow_state"])
+    assert (pack["workflow_state"].get("expense_request") or {}).get("stage") == "submit_confirm"
+
+
+def test_expense_submit_status_message_not_submitted():
+    from chat.constants import INTENT_EXPENSE_STATUS
+    from chat.services.orchestrator import _asks_recent_expense_submission
+    from chat.services.response_formatter import build_user_message
+
+    assert _asks_recent_expense_submission("amar expense ki submit hoyeche")
+    assert _asks_recent_expense_submission("amar expense ki joma hoyeche")
+    msg, status = build_user_message(
+        intent=INTENT_EXPENSE_STATUS,
+        entities={},
+        decision={"outcome": "INFORMATIONAL"},
+        crm_payload={"expense_wizard_active": True, "expense_wizard_stage": "submit_confirm"},
+    )
+    assert "জমা হয়নি" in msg
+    assert status == "needs_input"

@@ -62,15 +62,114 @@ def has_banglish_words(message: str) -> bool:
     return bool(tokens & _BANGLISH_WORDS)
 
 
-def detect_user_language(message: str) -> str:
-    """Return 'bn' for Bangla/Banglish queries, otherwise 'en'."""
+def detect_explicit_reply_language(message: str) -> str | None:
+    """
+    User explicitly asks for a reply language (overrides Banglish word heuristics).
+    ``banglai`` / ``bangla te`` → Bengali script, not Romanized Banglish.
+    """
+    if not message:
+        return None
+    low = message.lower()
+    raw = message
+    if re.search(r"\b(banglish|romanized|latin\s+letters)\b", low):
+        return "banglish"
+    if re.search(r"(বাংলায়|বাংলা\s*তে|বাংলা\s*করে|বাংলায়\s*বল|বাংলায়\s*বুঝ)", raw):
+        return "bn"
+    if re.search(
+        r"(^|\b)(banglai|banglay|banglate)(\b|$)|"
+        r"\bin\s+bangla\b|\bin\s+bengali\b|"
+        r"bangla\s*te\b|bangla\s*kore\b|bangla\s*version\b|"
+        r"explain.{0,30}\b(bangla|bengali|banglai|banglay)\b|"
+        r"\b(bangla|bengali|banglai|banglay)\b.{0,30}\b(explain|bolo|bol|bujhao|bujhay|describe)\b|"
+        r"\b(explain|bujhao|bujhay|describe|anubad)\b.{0,30}\b(banglai|banglay|banglate|bangla)\b",
+        low,
+    ):
+        return "bn"
+    if re.search(
+        r"\bin\s+english\b|\benglish\s*e\b|\benglish\s*version\b|ইংরেজিতে",
+        low,
+    ) or re.search(r"ইংরেজিতে", raw):
+        return "en"
+    return None
+
+
+def detect_reply_language(message: str) -> str:
+    """
+    Language the assistant should use in its reply: ``en``, ``bn`` (Bengali script),
+    or ``banglish`` (Romanized Bengali, Latin letters only).
+    """
     if not message:
         return "en"
+    explicit = detect_explicit_reply_language(message)
+    if explicit:
+        return explicit
     if has_bengali_chars(message):
         return "bn"
     if has_banglish_words(message):
-        return "bn"
+        return "banglish"
     return "en"
+
+
+# Short confirmations / wizard tokens — keep the session reply language.
+_WEAK_REPLY_RE = re.compile(
+    r"^(?:"
+    r"yes|no|yep|yeah|y|n|ok|okay|submit|summary|summery|clear|confirm|cancel|stop|done|"
+    r"thanks|thank\s*you|"
+    r"হ্যাঁ|না|ঠিক|শেষ|জমা|সারাংশ|"
+    r"ha|na"
+    r")(?:[.!?]*)$",
+    re.I | re.UNICODE,
+)
+
+
+def is_weak_language_signal(message: str) -> bool:
+    """True when the message does not carry enough language signal on its own."""
+    text = (message or "").strip()
+    if not text:
+        return True
+    if _WEAK_REPLY_RE.match(text):
+        return True
+    # e.g. "yes please" / "no thanks" — still weak if no Bangla/Banglish cues.
+    if len(text) <= 16 and not has_bengali_chars(text) and not has_banglish_words(text):
+        words = re.findall(r"[a-zA-Z]+", text.lower())
+        if words and len(words) <= 3 and all(
+            w in {"yes", "no", "yep", "yeah", "ok", "okay", "submit", "summary", "clear", "confirm", "cancel", "done", "thanks", "thank", "please"}
+            for w in words
+        ):
+            return True
+    return False
+
+
+def resolve_reply_language(message: str, stored: str | None = None) -> str:
+    """
+    Pick reply language for this turn.
+
+    Explicit requests (``banglai bolo``, ``in english``) win. Ambiguous tokens
+    such as ``yes`` / ``submit`` / ``summary`` keep ``stored`` when set.
+    """
+    explicit = detect_explicit_reply_language(message)
+    if explicit:
+        return explicit
+    if stored and is_weak_language_signal(message):
+        return stored
+    return detect_reply_language(message)
+
+
+def detect_content_language(text: str) -> str:
+    """Rough language of existing assistant/policy text (for alignment)."""
+    if not (text or "").strip():
+        return "en"
+    if has_bengali_chars(text):
+        return "bn"
+    if has_banglish_words(text):
+        return "banglish"
+    return "en"
+
+
+def detect_user_language(message: str) -> str:
+    """Return 'bn' for Bangla/Banglish queries, otherwise 'en' (legacy binary API)."""
+    lang = detect_reply_language(message)
+    return "bn" if lang in ("bn", "banglish") else "en"
 
 
 def is_translation_request(message: str) -> str | None:
@@ -128,7 +227,33 @@ def is_translation_request(message: str) -> str | None:
         # Most uses in this product translate EN → BN; default to Bangla.
         return "bn"
 
+    # "explain in bangla", "termination policy explain koro banglai"
+    if re.search(r"\bexplain\b", low) and re.search(
+        r"\b(bangla|bengali|banglai|banglay|banglate)\b", low
+    ):
+        return "bn"
+    if re.search(r"\b(explain|bujhao|bujhay|describe|anubad)\b", low) and re.search(
+        r"\b(banglai|banglay|banglate|bangla\s*te)\b", low
+    ):
+        return "bn"
+    if re.search(r"\b(banglai|banglay|banglate|bangla\s*te)\b", low) and re.search(
+        r"\b(explain|bolo|bol|koro|kor[eo]|bujhao|bujhay|anubad|translate)\b",
+        low,
+    ):
+        return "bn"
+
     return None
+
+
+_POLICY_FOOTER_TAIL_RE = re.compile(
+    r"\n*_\([^)]*(?:uploaded polic|আপলোড|tomar uploaded|policy name)[^)]*\)_\s*$",
+    re.I | re.DOTALL,
+)
+
+
+def strip_policy_footer(text: str) -> str:
+    """Remove policy citation footer before translating or re-aligning language."""
+    return _POLICY_FOOTER_TAIL_RE.sub("", (text or "")).rstrip()
 
 
 _TRANSLATION_SYSTEM = (
@@ -138,6 +263,9 @@ _TRANSLATION_SYSTEM = (
     "- Preserve numbers, section numbers, dates, times, and abbreviations exactly "
     "(e.g. PPE, ERP, CRM, KPI, HR, PIP, BDT, 9:00 AM, 3–6 months).\n"
     "- Preserve English proper nouns and product names that should not be localized.\n"
+    "- HR term safety: \"Termination\" / termination policy is job exit — NEVER translate as "
+    "\"বিকাল\" or \"bikel\" (that means evening). Use \"Termination\", \"চাকরি সমাপ্তি\", or "
+    "\"termination\" as appropriate.\n"
     "- For Bangla output, do NOT invent unusual Bangla compounds for established HR/business terms. "
     "Either keep them in English or use the common Banglish transliteration. "
     "Examples (Bangla output): \"Casual Leave\" → \"ক্যাজুয়াল ছুটি\" (or keep \"Casual Leave\"); "
@@ -152,9 +280,89 @@ _TRANSLATION_SYSTEM = (
     "- Do not invent any rules or numbers that are not in the source text."
 )
 
+_BANGLISH_REWRITE_SYSTEM = (
+    "You rewrite HR policy text in natural Banglish for Bangladesh office chat.\n"
+    "Strict rules:\n"
+    "- Use ONLY Latin letters (a-z). Do NOT use Bengali Unicode script.\n"
+    "- Preserve markdown: **bold**, - bullets, blank lines.\n"
+    "- Keep numbers, dates, and standard HR English terms when clearer: Termination, "
+    "Gross misconduct, Security breach, Casual Leave, manager, HR.\n"
+    "- NEVER use \"bikel\" for Termination (bikel means evening). Use \"termination\" or "
+    "\"job termination\".\n"
+    "- Rewrite ONLY what is in the source — do NOT invent policy rules, day counts, "
+    "entitlements, or rhetorical questions (keno, ki ki) that are not in the source.\n"
+    "- Do not add conversational commentary or duplicate advice.\n"
+    "- Output only the rewritten text — no commentary."
+)
+
 
 def _lang_name(code: str) -> str:
-    return {"bn": "Bangla (Bengali)", "en": "English"}.get(code, code)
+    return {
+        "bn": "Bangla (Bengali script — Unicode)",
+        "en": "English",
+        "banglish": "Banglish (Romanized Bengali, Latin letters only)",
+    }.get(code, code)
+
+
+def _translation_system_for(target_lang: str) -> str:
+    if target_lang == "banglish":
+        return _BANGLISH_REWRITE_SYSTEM
+    return _TRANSLATION_SYSTEM.format(lang_name=_lang_name(target_lang))
+
+
+def align_policy_answer_language(
+    answer: str,
+    *,
+    user_message: str,
+    trace_id: str,
+    llm: LLMClient | None = None,
+) -> str:
+    """
+    If the grounded policy answer language does not match how the user wrote,
+    translate or rewrite so English → English, Bangla script → Bangla, Banglish → Banglish.
+    """
+    if not (answer or "").strip():
+        return answer
+    target = detect_reply_language(user_message)
+    current = detect_content_language(answer)
+    if target == current:
+        return answer
+    translated, ok = translate_text(
+        answer,
+        target_lang=target,
+        trace_id=trace_id,
+        llm=llm,
+    )
+    return translated if ok else answer
+
+
+def align_workflow_answer_language(
+    answer: str,
+    *,
+    user_message: str,
+    stored_lang: str | None = None,
+    trace_id: str,
+    llm: LLMClient | None = None,
+) -> str:
+    """
+    Align wizard / workflow copy (expense, etc.) to the user's language.
+
+    Uses sticky ``stored_lang`` so short replies like ``yes`` stay in the
+    language the user started the workflow in.
+    """
+    if not (answer or "").strip():
+        return answer
+    target = resolve_reply_language(user_message, stored_lang)
+    current = detect_content_language(answer)
+    if target == current:
+        return answer
+    translated, ok = translate_text(
+        answer,
+        target_lang=target,
+        trace_id=trace_id,
+        llm=llm,
+    )
+    return translated if ok else answer
 
 
 # Soft cap per chunk. Bangla output uses ~2–3× more tokens than the same
@@ -269,7 +477,7 @@ def translate_text(
     client = llm or LLMClient()
     if not client.is_configured():
         return (text, False)
-    system = _TRANSLATION_SYSTEM.format(lang_name=_lang_name(target_lang))
+    system = _translation_system_for(target_lang)
 
     chunks = _split_for_translation(text)
     logger.info(

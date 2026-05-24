@@ -13,13 +13,14 @@ const QUICK_REPLIES = [
   { label: "Contact HR", prompt: "How do I contact HR?" },
 ];
 
-export default function ChatInput({ onSend, disabled, onClearError, error }) {
+export default function ChatInput({ onSend, disabled, busy, onClearError, error }) {
   const [value, setValue] = useState("");
   const [file, setFile] = useState(null);
   const [localError, setLocalError] = useState(null);
   const fileId = useId();
   const fileRef = useRef(null);
   const textareaRef = useRef(null);
+  const isBlocked = Boolean(disabled || busy);
 
   const {
     isDictating,
@@ -30,16 +31,39 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
     cancelDictation,
     confirmDictation,
     clearSpeechError,
-  } = useSpeechRecognition({ disabled });
+  } = useSpeechRecognition({ disabled: isBlocked });
 
   const waveformLevels = useVoiceWaveform(isDictating);
+
+  const focusTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el || disabled) return;
+    el.focus({ preventScroll: true });
+  }, [disabled]);
+
+  const didAutofocusRef = useRef(false);
+  useEffect(() => {
+    if (disabled || didAutofocusRef.current) return;
+    didAutofocusRef.current = true;
+    requestAnimationFrame(() => focusTextarea());
+  }, [disabled, focusTextarea]);
 
   useEffect(() => {
     const el = textareaRef.current;
     if (!el || isDictating) return;
-    el.style.height = "0px";
+    el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
   }, [value, isDictating]);
+
+  const handleInputAreaMouseDown = useCallback(
+    (e) => {
+      if (disabled) return;
+      if (e.target === textareaRef.current) return;
+      e.preventDefault();
+      focusTextarea();
+    },
+    [disabled, focusTextarea]
+  );
 
   const handleStartDictation = useCallback(async () => {
     setLocalError(null);
@@ -70,7 +94,7 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
   }, [cancelDictation]);
 
   const submit = useCallback(() => {
-    if (disabled || isDictating) return;
+    if (isBlocked || isDictating) return;
     const t = value.trim();
     if (!t) return;
     onClearError?.();
@@ -84,7 +108,7 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
       const el = textareaRef.current;
       if (el) el.style.height = "auto";
     });
-  }, [disabled, isDictating, onSend, onClearError, value, file, clearSpeechError]);
+  }, [isBlocked, isDictating, onSend, onClearError, value, file, clearSpeechError]);
 
   const onKeyDown = useCallback(
     (e) => {
@@ -98,7 +122,7 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
 
   const showError = error || speechError || localError;
   const voiceUnavailable = !capabilities.supported;
-  const canSend = !disabled && !isDictating && value.trim().length > 0;
+  const canSend = !isBlocked && !isDictating && value.trim().length > 0;
 
   if (isDictating) {
     return (
@@ -207,7 +231,7 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
               key={item.label}
               type="button"
               className="quick-btn"
-              disabled={disabled}
+              disabled={isBlocked}
               onClick={() => {
                 onClearError?.();
                 onSend(item.prompt);
@@ -225,13 +249,18 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
             </svg>
           </button>
 
-          <div className="input-wrapper">
+          <label
+            className="input-wrapper input-field-label"
+            htmlFor="chat-input-hr"
+            onMouseDown={handleInputAreaMouseDown}
+          >
             {file ? (
               <div className="file-preview-pill">
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
                 <button
                   type="button"
                   className="remove-file"
+                  onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => {
                     setFile(null);
                     if (fileRef.current) fileRef.current.value = "";
@@ -242,9 +271,6 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
                 </button>
               </div>
             ) : null}
-            <label htmlFor="chat-input-hr" className="sr-only">
-              Message
-            </label>
             <textarea
               ref={textareaRef}
               id="chat-input-hr"
@@ -254,12 +280,13 @@ export default function ChatInput({ onSend, disabled, onClearError, error }) {
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={onKeyDown}
               disabled={disabled}
-              placeholder="Type a message..."
+              aria-busy={busy || undefined}
+              placeholder={busy ? "Type your next message…" : "Type a message..."}
               style={{ maxHeight: MAX_TEXTAREA_HEIGHT }}
             />
-          </div>
+          </label>
 
-          {!value.trim() && !file && !disabled ? (
+          {!value.trim() && !file && !isBlocked ? (
             <button
               type="button"
               className={`action-btn mic-btn ${isDictating ? "recording" : ""}`}

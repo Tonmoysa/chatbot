@@ -51,9 +51,57 @@ def preprocess_query(text: str) -> str:
     return normalize_whitespace(text)[:4000]
 
 
-# Lightweight HR-topic hints concatenated ONLY for the retrieval query embedding —
-# user-facing wording in RAG prompts stays untouched (same original question).
+# Ordered most-specific first — only the first matching hint is used (avoids mixed-policy noise).
 _EMBEDDING_TOPIC_HINTS: Final[tuple[tuple[re.Pattern[str], tuple[str, ...]], ...]] = (
+    (
+        re.compile(
+            r"\b(?:cyber|cyber\s*security|cybersecurity|infosec|information\s+security|"
+            r"it\s+security|network\s+security|data\s+protection)\b|"
+            r"সাইবার|ইনফরমেশন\s*(?:সুরক্ষা|সিকিউরিটি)",
+            re.I | re.UNICODE,
+        ),
+        ("information security cybersecurity policy",),
+    ),
+    (
+        re.compile(
+            r"\bacceptable\s+use\b|\bpersonal\b.*illegal.*assets\b|"
+            r"\bcompany\s+(?:devices|equipment|computers|laptops)\b",
+            re.I | re.UNICODE,
+        ),
+        ("acceptable use company devices policy",),
+    ),
+    (
+        re.compile(
+            r"\b(?:daily\s+)?allowance\b|\bta\s*/\s*da\b|\btada\b|"
+            r"travel\s+allowance|dearness\s+allowance|"
+            r"দৈনিক\s*ভাতা|ভাতা\s*কত|টিএ|ডিএ|"
+            r"\b(?:per\s*day|protidin).{0,30}\b(?:koto|limit|cap|allowance)\b",
+            re.I | re.UNICODE,
+        ),
+        (
+            "daily travel allowance TA DA per day expense reimbursement limit entitlement",
+            "field staff conveyance meal transport policy",
+        ),
+    ),
+    (
+        re.compile(
+            r"\b(?:sick|casual|bereavement|maternity|paternity|marriage|study)\s+leave\b|\blwop\b|"
+            r"উ\/এল\b|উ\s*\/?\s*এল\b|বিশেষ ছুটি|ক্যাশুয়াল\b",
+            re.I | re.UNICODE,
+        ),
+        ("sick casual special leave entitlement", "LWOP unpaid leave policy"),
+    ),
+    (
+        re.compile(
+            r"leave\s*policy|policy\s*(?:on|about|for)?\s*leave\b|"
+            r"leave\s*(?:rules?|regulations?)\b|"
+            r"ছুটি\s*(?:নীতি|পলিসি|শর্ত|নিয়ম)|"
+            r"(?:jante|জানতে|somporke|about).*(?:leave|ছুটি)|"
+            r"(?:leave|ছুটি).*(?:jante|জানতে|somporke|bolo|বল)",
+            re.I | re.UNICODE,
+        ),
+        ("employee leave policy rules application approval",),
+    ),
     (
         re.compile(
             r"(carry\s*-?\s*forward|carried\s+forward|carrying\s+forward|\bcarry\b\s*-?\s*over\b|carryover|rollover|opening\s*balance\b|unused\s+leave|"
@@ -70,14 +118,6 @@ _EMBEDDING_TOPIC_HINTS: Final[tuple[tuple[re.Pattern[str], tuple[str, ...]], ...
         ),
     ),
     (
-        re.compile(
-            r"\b(?:sick|casual|bereavement|maternity|paternity|marriage|study)\s+leave\b|\blwop\b|"
-            r"উ\/এল\b|উ\s*\/?\s*এল\b|বিশেষ ছুটি|ক্যাশুয়াল\b",
-            re.I | re.UNICODE,
-        ),
-        ("sick casual special leave entitlement", "LWOP unpaid leave policy"),
-    ),
-    (
         re.compile(r"\b(?:remote\s+work|telework\b|wfh\b|ওএফএইচ)\b", re.I | re.UNICODE),
         ("work from home remote work policy",),
     ),
@@ -91,30 +131,135 @@ _EMBEDDING_TOPIC_HINTS: Final[tuple[tuple[re.Pattern[str], tuple[str, ...]], ...
     ),
     (
         re.compile(
-            r"\bacceptable\s+use\b|\bpersonal\b.*illegal.*assets\b|"
-            r"\bcompany\s+(?:devices|equipment|computers|laptops)\b",
-            re.I | re.UNICODE,
-        ),
-        ("acceptable use company devices policy",),
-    ),
-    (
-        re.compile(
-            r"\b(?:cyber|cyber\s*security|cybersecurity|infosec|information\s+security|"
-            r"it\s+security|network\s+security|data\s+protection)\b|"
-            r"সাইবার|ইনফরমেশন\s*(?:সুরক্ষা|সিকিউরিটি)",
-            re.I | re.UNICODE,
-        ),
-        ("cybersecurity information security data classification policy",),
-    ),
-    (
-        re.compile(
             r"\b(?:policy|rules?\b.*regulations?|handbook|guideline\b.*HR)\b|"
-            r"ছুটি\s*(?:শর্ত|নিয়ম|পলিসি)|হ্যান্ডবুক|নিয়ম\b",
+            r"হ্যান্ডবুক|নিয়ম\b",
             re.I | re.UNICODE,
         ),
         ("human resources employee handbook excerpt",),
     ),
 )
+
+_EXPLICIT_POLICY_TITLE_RES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
+    (
+        re.compile(
+            r"\binformation\s+security\s*(?:policy|policies|rules?)?\b",
+            re.I,
+        ),
+        "Information Security Policy",
+    ),
+    (
+        re.compile(
+            r"\bdata\s+privacy\b(?:\s*(?:&|and)\s*confidentiality)?\s*(?:policy)?\b",
+            re.I,
+        ),
+        "Data Privacy and Confidentiality Policy",
+    ),
+    (
+        re.compile(
+            r"\b(?:cybersecurity|cyber\s+security)\s*(?:policy|rules?)?\b",
+            re.I,
+        ),
+        "Cybersecurity Rules",
+    ),
+    (
+        re.compile(
+            r"\bcasual\s+leave\s*(?:policy|rules?)?\b",
+            re.I,
+        ),
+        "Casual Leave Policy",
+    ),
+    (
+        re.compile(
+            r"\bsick\s+leave\s*(?:policy|rules?)?\b",
+            re.I,
+        ),
+        "Sick Leave Policy",
+    ),
+    (
+        re.compile(
+            r"\bannual\s+leave\s*(?:policy|rules?)?\b",
+            re.I,
+        ),
+        "Annual Leave Policy",
+    ),
+    (
+        re.compile(
+            r"\battendance\s*(?:rules?|policy|policies)?\b",
+            re.I,
+        ),
+        "Attendance Rules",
+    ),
+    (
+        re.compile(
+            r"\bacceptable\s+use\s*(?:policy)?\b",
+            re.I,
+        ),
+        "Acceptable Use Policy",
+    ),
+    (
+        re.compile(
+            r"\bsoftware\s+development\s*(?:policy)?\b",
+            re.I,
+        ),
+        "Software Development Policy",
+    ),
+    (
+        re.compile(
+            r"\bemail\s*(?:&|and)\s*communication\s*(?:policy)?\b",
+            re.I,
+        ),
+        "Email and Communication Policy",
+    ),
+    (
+        re.compile(r"\bleave\s+without\s+pay\b|\blwop\b", re.I),
+        "Leave Without Pay",
+    ),
+    (
+        re.compile(r"\bleave\s+poli\b", re.I),
+        "Leave Policy",
+    ),
+    (
+        re.compile(
+            r"\bleave\s*(?:policy|policies|rules?|regulations?)\b",
+            re.I,
+        ),
+        "Leave Policy",
+    ),
+    (
+        re.compile(r"ছুটি\s*(?:নীতি|পলিসি|নিয়ম|শর্ত)", re.UNICODE),
+        "Leave Policy",
+    ),
+)
+
+
+_POLICY_DOCUMENT_ASK_RE = re.compile(
+    r"poli(?:cy|cies)?|poli\b|"
+    r"rules?\s*(?:ta|er)?\s*(?:bolo|bole|daw|de|den|tell|explain)|"
+    r"handbook|নীতি|পলিসি|"
+    r"bolo\s*(?:amake|me)?|amake\s+.*\s+bolo|"
+    r"\bt\s*bolo|somporke\s*(?:jante|chai)|"
+    r"what\s+is\s+(?:the\s+)?[\w\s]+\s+policy|"
+    r"tell\s+me\s+(?:about\s+)?(?:the\s+)?",
+    re.I | re.UNICODE,
+)
+
+
+def extract_policy_title_phrases(message: str) -> list[str]:
+    """Named policy titles when the user asks to see/read a policy document."""
+    raw = preprocess_query(message)
+    if not raw:
+        return []
+    if not _POLICY_DOCUMENT_ASK_RE.search(raw):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for pat, title in _EXPLICIT_POLICY_TITLE_RES:
+        if pat.search(raw):
+            key = title.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(title)
+    return out
 
 
 def _unique_join_phrases(phrases: tuple[str, ...], *, hint_cap: int) -> str:
@@ -132,13 +277,26 @@ def _unique_join_phrases(phrases: tuple[str, ...], *, hint_cap: int) -> str:
 
 
 def hr_retrieval_hint_line(query_normalized: str, *, phrase_cap_chars: int = 650) -> str:
-    phrases: list[str] = []
+    if extract_policy_title_phrases(query_normalized):
+        return ""
     for pat, tup in _EMBEDDING_TOPIC_HINTS:
         if pat.search(query_normalized):
-            phrases.append(_unique_join_phrases(tup, hint_cap=max(phrase_cap_chars // 2, 120)))
-        if phrases and sum(len(p) + 2 for p in phrases) >= phrase_cap_chars:
-            break
-    return ". ".join(p for p in phrases if p.strip()).strip()
+            return _unique_join_phrases(tup, hint_cap=phrase_cap_chars)
+    return ""
+
+
+def build_hr_policy_retrieval_query(message: str) -> str:
+    """
+    Focus vector search on the policy the user named — never replace the question
+    with a generic list of all leave types (that pulls wrong policy chunks).
+    """
+    raw = preprocess_query(message)
+    if not raw:
+        return ""
+    titles = extract_policy_title_phrases(raw)
+    if titles:
+        return f"Policy title: {titles[0]}. {raw}"[:4000]
+    return raw
 
 
 def build_retrieval_embedding_text(query: str, *, max_chars: int = 3800) -> str:

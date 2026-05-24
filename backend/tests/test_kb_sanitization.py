@@ -1,5 +1,6 @@
 from knowledge_base.services.sanitization import (
     build_retrieval_embedding_text,
+    extract_policy_title_phrases,
     hr_retrieval_hint_line,
     preprocess_query,
     sanitize_for_indexing,
@@ -28,9 +29,10 @@ def test_build_retrieval_embedding_includes_hints():
 
 
 def test_hr_hints_attendance_topics_do_not_add_acceptable_use_noise():
-    """Attendance wording must not concatenate acceptable-use retrieval hints (# mixed policy bug)."""
+    """Attendance wording must not concatenate acceptable-use retrieval hints."""
     q = preprocess_query("Attendance Rules ta amake bolo")
-    hint = hr_retrieval_hint_line(q)
+    assert extract_policy_title_phrases(q) == ["Attendance Rules"]
+    hint = hr_retrieval_hint_line("how strict is biometric attendance tracking")
     low = hint.lower()
     assert "acceptable use" not in low
     assert "attendance" in low
@@ -38,9 +40,17 @@ def test_hr_hints_attendance_topics_do_not_add_acceptable_use_noise():
 
 def test_hr_hints_for_cybersecurity_query():
     q = preprocess_query("Cybersecurity Rules ta amake bolo")
-    hint = hr_retrieval_hint_line(q)
+    assert extract_policy_title_phrases(q) == ["Cybersecurity Rules"]
+    hint = hr_retrieval_hint_line("what are the cybersecurity password rules")
     low = hint.lower()
     assert "cyber" in low or "security" in low
+
+
+def test_hr_hints_leave_policy_single_focus():
+    q = preprocess_query("leave rules ta bolo")
+    assert extract_policy_title_phrases(q) == ["Leave Policy"]
+    hint = hr_retrieval_hint_line(q)
+    assert hint == ""
 
 
 def test_preprocess_query_truncation():

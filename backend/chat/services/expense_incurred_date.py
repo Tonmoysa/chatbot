@@ -67,14 +67,21 @@ def infer_expense_incurred_date_iso(
         r"tomorrow|tomarrow|tommorow|tommorrow|tomorow|tmrw|tmw)\b)",
         re.I,
     )
+    yesterday_re = re.compile(
+        r"(গতকাল|"
+        r"\b(goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
+        re.I,
+    )
     today_re = re.compile(
-        r"(আজ(কে)?|"
+        r"(আজ(কের)?|"
         r"\b(ajke|ajker|aaj|aajke|today)\b)",
         re.I,
     )
 
     if today_re.search(message) or today_re.search(low):
         return today_d.isoformat()
+    if yesterday_re.search(message) or yesterday_re.search(low):
+        return (today_d - timedelta(days=1)).isoformat()
     if tomorrow_re.search(message) or tomorrow_re.search(low):
         return (today_d + timedelta(days=1)).isoformat()
 
@@ -85,3 +92,29 @@ def infer_expense_incurred_date_iso(
             return d.isoformat()
 
     return today_d.isoformat()
+
+
+def expense_submit_date_block_reason(
+    incurred_date_iso: str,
+    *,
+    today: date | None = None,
+) -> str | None:
+    """
+    Return a user-facing block reason when chat/CRM must not submit yet; else None.
+
+    Policy: a future incurred date cannot be submitted until that calendar day
+    (or after the expense occurs).
+    """
+    inc_d = _parse_iso_date(str(incurred_date_iso or "").strip())
+    if inc_d is None:
+        return (
+            "Expense date could not be read. Please state which day the cost was for "
+            "(e.g. today or a specific date)."
+        )
+    today_d = today or date.today()
+    if inc_d > today_d:
+        return (
+            "Company policy: submit each day's expense on that day (or after it occurs). "
+            "ভবিষ্যৎ তারিখের খরচ এখন জমা দেওয়া যাবে না—ওই দিনে বা পরে চেষ্টা করুন।"
+        )
+    return None

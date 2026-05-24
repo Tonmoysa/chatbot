@@ -95,16 +95,15 @@ def apply_wizard_answer(
     """Parse a direct answer to the last asked slot (short replies like paid / full)."""
     from chat.services.leave_workflow import (
         _infer_day_scope,
-        _infer_leave_type,
         _infer_payment_category,
         _reason_from_message,
     )
 
     msg = (message or "").strip()
     if pending_slot == SLOT_LEAVE_TYPE:
-        _infer_leave_type(msg, draft)
+        _infer_payment_category(msg, draft, force=True)
     elif pending_slot == SLOT_PAYMENT:
-        _infer_payment_category(msg, draft)
+        _infer_payment_category(msg, draft, force=True)
     elif pending_slot == SLOT_SCOPE:
         _infer_day_scope(msg, draft)
     elif pending_slot == SLOT_DATE_CLARIFY:
@@ -149,8 +148,6 @@ def get_missing_slots(
         missing.append(SLOT_DATES)
         return _order(missing)
 
-    if not (draft.get("leave_type") or "").strip():
-        missing.append(SLOT_LEAVE_TYPE)
     if not draft.get("leave_payment_category"):
         missing.append(SLOT_PAYMENT)
     if not draft.get("day_scope"):
@@ -205,6 +202,14 @@ def _reason_satisfied(draft: dict[str, Any]) -> bool:
     return False
 
 
+_SELECT_LEAVE_PROMPT = (
+    "**Select Leave** — paid নাকি unpaid?\n"
+    "• paid\n"
+    "• unpaid"
+    + _WIZ_MARKER
+)
+
+
 def generate_question(
     slot: str,
     draft: dict[str, Any],
@@ -214,38 +219,15 @@ def generate_question(
     extraction: LeaveSlotExtraction | None = None,
 ) -> str:
     """Natural, contextual prompts — no rigid Question X/Y numbering."""
-    lt = str(draft.get("leave_type") or "").strip()
-    lt_bn = {
-        "sick": "অসুস্থতার",
-        "casual": "ক্যাজুয়াল",
-        "annual": "বার্ষিক",
-    }.get(lt, "")
-
     if slot == SLOT_DATE_CLARIFY and extraction and extraction.clarification_needed:
         return extraction.clarification_needed + _WIZ_MARKER
 
-    if slot == SLOT_LEAVE_TYPE:
-        return (
-            "ছুটির **ধরন** কী?\n"
-            "উদাহরণ: sick / casual / annual / emergency "
-            "(বাংলা বা English — এক লাইনে)"
-            + _WIZ_MARKER
-        )
-
-    if slot == SLOT_PAYMENT:
-        head = f"আপনার {lt_bn} ছুটির জন্য — " if lt_bn else ""
-        if draft.get("start_date"):
-            head = f"**{draft['start_date']}** তারিখের ছুটির জন্য — "
-        return (
-            f"{head}এটা **বেতনসহ** নাকি **বেতন ছাড়া** চান?\n"
-            "• বেতনসহ / paid\n"
-            "• বেতন ছাড়া / unpaid"
-            + _WIZ_MARKER
-        )
+    if slot in (SLOT_LEAVE_TYPE, SLOT_PAYMENT):
+        return _SELECT_LEAVE_PROMPT
 
     if slot == SLOT_SCOPE:
         return (
-            "প্রতিদিন **পুরো দিন** নাকি **হাফ দিন** ছুটি?\n"
+            "**Leave Type** — Full Day নাকি Half Day?\n"
             "(full / half লিখলেও চলবে)"
             + _WIZ_MARKER
         )

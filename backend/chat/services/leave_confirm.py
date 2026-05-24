@@ -28,20 +28,14 @@ from chat.services.leave_fsm import (
 
 )
 
+from chat.services.leave_draft_utils import format_select_leave_label
 from chat.services.leave_slots import (
-
     SLOT_DATES,
-
     SLOT_LEAVE_TYPE,
-
     SLOT_PAYMENT,
-
     SLOT_REASON,
-
     SLOT_SCOPE,
-
     generate_question,
-
 )
 
 
@@ -98,9 +92,7 @@ _FIELD_ALIASES: tuple[tuple[str, str], ...] = (
 
 def build_leave_review_summary(draft: dict[str, Any]) -> str:
 
-    lt = str(draft.get("leave_type") or "—")
-
-    pay = str(draft.get("leave_payment_category") or "—")
+    select_leave = format_select_leave_label(draft)
 
     scope = str(draft.get("day_scope") or "—")
 
@@ -110,19 +102,15 @@ def build_leave_review_summary(draft: dict[str, Any]) -> str:
 
     reason = str(draft.get("reason") or "—")
 
-    pay_label = "বেতনসহ (paid)" if pay == "paid" else "বেতন ছাড়া (unpaid)" if pay == "lwop" else pay
-
     scope_label = "পুরো দিন" if scope == "full" else "হাফ দিন" if scope == "half" else scope
 
     lines = [
 
         "**ছুটি আবেদন — পর্যালোচনা**",
 
-        f"• ধরন: {lt}",
+        f"• Select Leave: {select_leave}",
 
-        f"• {pay_label}",
-
-        f"• {scope_label}",
+        f"• Leave Type: {scope_label}",
 
         f"• তারিখ: {start}" + (f" → {end}" if end != start else ""),
 

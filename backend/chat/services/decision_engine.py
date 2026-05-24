@@ -16,7 +16,10 @@ from chat.constants import (
     INTENT_UNKNOWN,
     INTENT_WFH_REQUEST,
 )
-from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+from chat.services.expense_incurred_date import (
+    expense_submit_date_block_reason,
+    infer_expense_incurred_date_iso,
+)
 from chat.services.leave_approval import resolve_leave_decision
 from chat.services.leave_policies import get_company_leave_policy
 from chat.services.leave_validation import validate_leave_request
@@ -110,21 +113,11 @@ class DecisionEngine:
                 inc_iso = entities.get("expense_incurred_date") or infer_expense_incurred_date_iso(
                     message="", hints=entities, today=date.today()
                 )
-                try:
-                    inc_d = datetime.fromisoformat(str(inc_iso).split("T")[0]).date()
-                except Exception:
+                date_block = expense_submit_date_block_reason(str(inc_iso))
+                if date_block:
                     return {
                         "outcome": "NEEDS_CLARIFICATION",
-                        "reason": "Expense date could not be read.",
-                        "rules_applied": ["EXPENSE_DATE_INVALID"],
-                    }
-                if inc_d > date.today():
-                    return {
-                        "outcome": "NEEDS_CLARIFICATION",
-                        "reason": (
-                            "Company policy: submit each day's expense on that day (or after it occurs). "
-                            "আজকের আগে/ভবিষ্যৎ তারিখের খরচ এখন জমা দেওয়া যাবে না।"
-                        ),
+                        "reason": date_block,
                         "rules_applied": ["EXPENSE_FUTURE_DATE_SUBMIT_LATER"],
                     }
                 total = sum(float(r.get("amount") or 0) for r in items)

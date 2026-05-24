@@ -15,8 +15,9 @@ from chat.constants import (
     INTENT_UNKNOWN,
     INTENT_WFH_REQUEST,
 )
+from chat.services.expense_workflow import wants_expense_summary
 from chat.services.llm_client import LLMClient
-from chat.services.policy_intent_helpers import is_rules_query
+from chat.services.policy_intent_helpers import is_expense_entitlement_query, is_rules_query
 
 
 def _strong_hr_policy(message: str) -> bool:
@@ -32,6 +33,10 @@ def _strong_hr_policy(message: str) -> bool:
         return True
     if re.search(r"\b(rule|rules|regulation|regulations|policy|policies)\b", low):
         return True
+    if re.search(r"\bleave\s+poli\b", low) or (
+        re.search(r"\bpoli\b", low) and re.search(r"\bleave\b", low)
+    ):
+        return True
     if re.search(r"(সব\s*নিয়ম|সকল\s*নিয়ম|নিয়ম|বিধি|নীতি|হ্যান্ডবুক|রুলস|পলিসি)", raw):
         return True
     if re.search(
@@ -43,7 +48,9 @@ def _strong_hr_policy(message: str) -> bool:
 
 
 def _strong_expense_claim(message: str) -> bool:
-    """Banglish / informal cost lines; do not match expense *status* queries."""
+    """Banglish / informal cost lines; do not match expense *status* or *summary* queries."""
+    if wants_expense_summary(message):
+        return False
     low = (message or "").lower()
     if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
         r"\b(status|track|where)\b", low
@@ -58,14 +65,55 @@ def _strong_expense_claim(message: str) -> bool:
     return False
 
 
+def wants_post_submit_expense_summary(message: str) -> bool:
+    """
+    Recap of logged/submitted expenses (CRM), not the in-wizard review step.
+    Used after submit or when the user asks how much they spent on a date.
+    """
+    if not wants_expense_summary(message):
+        return False
+    low = (message or "").lower()
+    raw = message or ""
+    if re.search(
+        r"\b(forgot|don't remember|do not remember|lost track|remind)\b",
+        low,
+    ) or re.search(r"(ভুলে|ভুলে\s*গেছি)", raw):
+        return True
+    if re.search(r"(summery|summary|সারাংশ|list|lists|লিস্ট).{0,25}(daw|dao|দাও)", low):
+        return True
+    if re.search(
+        r"(amar|my).{0,30}(total|mot|koto).{0,30}(cost|kharcha|khoroch|expense|taka)",
+        low,
+    ):
+        return True
+    if re.search(r"(ajke|ajker|today).{0,30}(koto|total|spent|খরচ)", low) or re.search(
+        r"(আজ|আজকে|আজকের).{0,20}(কত|মোট|খরচ)", raw
+    ):
+        return True
+    if re.search(
+        r"(ajke|ajker|today|আজকে|আজকের).{0,40}(expense|খরচ).{0,40}"
+        r"(list|summery|summary|লিস্ট|সারাংশ|breakdown)",
+        low,
+    ) or re.search(
+        r"(ajke|ajker|today|আজকে|আজকের).{0,40}(expense|খরচ).{0,40}"
+        r"(list|summery|summary|লিস্ট|সারাংশ|breakdown)",
+        raw,
+        re.I,
+    ):
+        return True
+    return False
+
+
 def _strong_expense_day_summary(message: str) -> bool:
     """Same-day spend recap (not submitting a new line item with an amount)."""
+    if wants_post_submit_expense_summary(message):
+        return True
     if _strong_expense_claim(message):
         return False
     low = (message or "").lower()
     raw = message or ""
     time_ok = bool(
-        re.search(r"\b(today|ajke|aj\s+ke|eikhon|ei\s+din)\b", low)
+        re.search(r"\b(today|ajke|ajker|aj\s+ke|eikhon|ei\s+din)\b", low)
         or re.search(r"(আজ|আজকে|এইদিন|আজকের)", raw)
     )
     # Banglish: "amar total cost koto hoyeche" — no explicit "today"; still a same-day spend recap.
@@ -121,7 +169,7 @@ Definitions:
 - LEAVE_REQUEST: user wants to book/take/apply leave
 - WFH_REQUEST: work from home
 - EXPENSE_CLAIM: submit reimbursement/expense
-- EXPENSE_DAY_SUMMARY: how much spent today / daily expense total / remaining 300 BDT limit; also Banglish like "amar total cost koto"
+- EXPENSE_DAY_SUMMARY: how much spent today / daily expense total / list or summary of today's expenses / remaining 300 BDT limit; also Banglish like "amar total cost koto" or "ajker expense er list daw"
 - EXPENSE_STATUS: track expense/reimbursement status
 - ATTENDANCE_CORRECTION: fix clock-in/out, attendance mistake
 - REQUEST_STATUS: generic status of leave/wfh/etc
@@ -279,6 +327,17 @@ _CANCEL_FORM_BN_RE = re.compile(
     r"ফর্ম\s*বাতিল|ফর্ম\s*বাদ)"
 )
 
+# Stand-alone wizard confirmations — must not be classified as chit-chat in strict mode.
+_WIZARD_CONFIRM_SHORT_RE = re.compile(
+    r"^(?:"
+    r"yes|yep|yeah|yup|ok|okay|sure|fine|alright|"
+    r"no|nope|"
+    r"হ্যাঁ|হ্যা|ঠিক\s*আছে|ঠিক|জমা\s*দাও|জমা\s*দিন|না|"
+    r"thik\s*ache|thik|hmm?\s*yes|submit\s*koro|শেষ"
+    r")\s*\.?$",
+    re.I,
+)
+
 
 def _is_fresh_start_greeting(message: str) -> bool:
     """True when the message is just a stand-alone greeting (no follow-on)."""
@@ -346,6 +405,8 @@ def _looks_like_chitchat(message: str, *, strict: bool = False) -> bool:
         return False
     if _HR_SIGNAL_RE.search(text) or _HR_SIGNAL_BN_RE.search(text):
         return False
+    if strict and _WIZARD_CONFIRM_SHORT_RE.match(text):
+        return False
     if _CHITCHAT_RE.search(text) or _CHITCHAT_BN_RE.search(text):
         return True
     if strict:
@@ -378,6 +439,12 @@ class IntentDetector:
                 "confidence": 0.99,
                 "source": "rules_override",
             }
+        if is_expense_entitlement_query(message):
+            return {
+                "intent": INTENT_HR_POLICY,
+                "confidence": 0.99,
+                "source": "rules_override_entitlement",
+            }
         # Rules / regulations / handbook queries are deterministic — never let
         # the LLM steer them into another bucket (e.g. LEAVE_REQUEST just because
         # the user typed "leave policy").
@@ -403,6 +470,15 @@ class IntentDetector:
                 if intent in ALL_INTENTS:
                     if strong_leave_request and intent != INTENT_LEAVE_REQUEST:
                         return {"intent": INTENT_LEAVE_REQUEST, "confidence": 0.99, "source": "rules_override"}
+                    if is_expense_entitlement_query(message) and intent in (
+                        INTENT_EXPENSE_CLAIM,
+                        INTENT_EXPENSE_DAY_SUMMARY,
+                    ):
+                        return {
+                            "intent": INTENT_HR_POLICY,
+                            "confidence": 0.99,
+                            "source": "rules_override_entitlement",
+                        }
                     if _strong_expense_claim(message) and intent not in (
                         INTENT_EXPENSE_CLAIM,
                         INTENT_EXPENSE_STATUS,
@@ -429,6 +505,8 @@ class IntentDetector:
 
     def _rule_intent(self, text: str, raw_message: str = "") -> str:
         # Bengali / Banglish keywords (fallback path when LLM isn't used or fails)
+        if is_expense_entitlement_query(raw_message or text):
+            return INTENT_HR_POLICY
         if _strong_expense_day_summary(raw_message or text):
             return INTENT_EXPENSE_DAY_SUMMARY
         if re.search(r"(ছুটি|chuti|chhuti|holiday)", text) and re.search(
@@ -447,6 +525,8 @@ class IntentDetector:
             r"\b(status|track|where)\b", text
         ):
             return INTENT_EXPENSE_STATUS
+        if wants_expense_summary(raw_message or text):
+            return INTENT_EXPENSE_DAY_SUMMARY
         if re.search(r"\b(expense|reimbursement|claim)\b", text):
             return INTENT_EXPENSE_CLAIM
         # Banglish cost/reimbursement phrasing without English "expense"

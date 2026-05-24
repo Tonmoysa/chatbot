@@ -11,6 +11,7 @@ from chat.constants import (
     INTENT_REQUEST_STATUS,
     INTENT_UNKNOWN,
 )
+from chat.services.expense_workflow import format_expense_day_summary_readonly
 
 
 def build_user_message(
@@ -28,8 +29,19 @@ def build_user_message(
     reason = (decision or {}).get("reason", "")
 
     if intent == INTENT_EXPENSE_DAY_SUMMARY:
-        entries = list(crm_payload.get("expense_day_entries") or [])
+        items = list(crm_payload.get("expense_day_items") or [])
         target = str(crm_payload.get("expense_incurred_date") or "").strip()
+        ref = str(crm_payload.get("expense_summary_reference_id") or "").strip()
+        if items:
+            return (
+                format_expense_day_summary_readonly(
+                    items,
+                    incurred_date_iso=target,
+                    reference_id=ref,
+                ),
+                "success",
+            )
+        entries = list(crm_payload.get("expense_day_entries") or [])
         logged = crm_payload.get("expense_day_logged_total")
         if logged is None:
             logged = sum(float(e.get("amount") or 0) for e in entries)
@@ -38,6 +50,11 @@ def build_user_message(
         approved = float(crm_payload.get("expense_day_approved_total") or 0)
         cap = float(crm_payload.get("expense_daily_cap_bdt") or EXPENSE_DAY_CAP_BDT)
         remaining = max(0.0, cap - approved)
+        if not entries and logged <= 0:
+            return (
+                format_expense_day_summary_readonly([], incurred_date_iso=target),
+                "success",
+            )
         lines: list[str] = []
         for e in entries:
             rid = str(e.get("request_id") or "")
@@ -60,6 +77,26 @@ def build_user_message(
         )
 
     if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
+        leave_last = crm_payload.get("leave_last_submission") or {}
+        leave_ref = str(leave_last.get("submission_id") or "").strip()
+        if leave_ref:
+            draft = dict(leave_last.get("draft") or {})
+            lt = str(draft.get("leave_type") or "").strip()
+            start = str(draft.get("start_date") or "").strip()
+            detail = f" · {lt}" if lt else ""
+            date_part = f" · {start}" if start else ""
+            return (
+                f"হ্যাঁ — এই চ্যাট সেশনে আপনার leave request **জমা হয়েছে**।\n"
+                f"- **রেফারেন্স:** `{leave_ref}`{detail}{date_part}\n\n"
+                "চূড়ান্ত অনুমোদন আপনার কোম্পানির HR সিস্টেমে হবে।",
+                "success",
+            )
+        if crm_payload.get("leave_not_submitted"):
+            return (
+                "না — এই চ্যাট সেশনে এখনো কোনো leave request **জমা হয়নি**।\n"
+                "ছুটি নিতে চাইলে তারিখ ও কারণ লিখে আবার শুরু করুন।",
+                "needs_input",
+            )
         last = crm_payload.get("expense_last_submission") or {}
         ref = str(last.get("reference_id") or "").strip()
         if ref:
@@ -73,6 +110,30 @@ def build_user_message(
                 f"- **লাইন:** {len(items)} টি · **মোট:** {total:g} Tk\n\n"
                 "চূড়ান্ত অনুমোদন CRM/Finance-এ হবে।",
                 "success",
+            )
+        if crm_payload.get("expense_submit_blocked"):
+            return (
+                "না — **এখনো CRM-এ জমা হয়নি**।\n"
+                f"{crm_payload.get('expense_submit_blocked')}\n\n"
+                "আজকের খরচ হলে তারিখ **ajke** দিয়ে আবার লিখুন; নাহলে ওই দিনে/পরে submit করুন।",
+                "needs_input",
+            )
+        if crm_payload.get("expense_wizard_active"):
+            stage = str(crm_payload.get("expense_wizard_stage") or "")
+            if stage == "submit_confirm":
+                return (
+                    "না — **এখনো জমা হয়নি**। উপরের প্রশ্নে **Yes** লিখে CRM-এ submit করুন।",
+                    "needs_input",
+                )
+            return (
+                "না — **এখনো জমা হয়নি**। খরচের লাইন শেষ করে summary দেখে confirm করুন।",
+                "needs_input",
+            )
+        if crm_payload.get("expense_not_submitted"):
+            return (
+                "না — এই চ্যাট সেশনে এখনো কোনো expense **CRM-এ জমা হয়নি**।\n"
+                "আজকের খরচ লিখতে পারেন (যেমন: lunch 100, bus 50 office to home)।",
+                "needs_input",
             )
         st = crm_payload.get("status")
         if st and st != "NOT_FOUND":

@@ -126,6 +126,7 @@ class MockCRMAdapter(CRMAdapter):
         company, emp = self._identity(company_id, employee_id, session_id)
         target = (incurred_date_iso or "").strip().split("T")[0]
         entries: list[dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         logged_total = 0.0
         for rid, rec in sorted(
             self._requests.items(),
@@ -141,21 +142,37 @@ class MockCRMAdapter(CRMAdapter):
             inc = str(ent.get("expense_incurred_date") or ent.get("date") or "").split("T")[0]
             if not inc or inc != target:
                 continue
-            try:
-                amt = float(ent.get("amount") or 0)
-            except (TypeError, ValueError):
-                amt = 0.0
             dec = rec.get("decision") or {}
             outcome = str(dec.get("outcome") or "")
-            entries.append(
-                {
-                    "request_id": rid,
-                    "amount": amt,
-                    "outcome": outcome,
-                    "status": rec.get("status") or "",
-                }
-            )
-            logged_total += amt
+            line_items = list(ent.get("expense_items") or [])
+            if line_items:
+                subtotal = sum(float(x.get("amount") or 0) for x in line_items)
+                logged_total += subtotal
+                for row in line_items:
+                    items.append(dict(row))
+                entries.append(
+                    {
+                        "request_id": rid,
+                        "amount": subtotal,
+                        "outcome": outcome,
+                        "status": rec.get("status") or "",
+                        "line_count": len(line_items),
+                    }
+                )
+            else:
+                try:
+                    amt = float(ent.get("amount") or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                logged_total += amt
+                entries.append(
+                    {
+                        "request_id": rid,
+                        "amount": amt,
+                        "outcome": outcome,
+                        "status": rec.get("status") or "",
+                    }
+                )
         approved = float(
             self.get_expense_day_approved_total(
                 company_id=company,
@@ -171,6 +188,7 @@ class MockCRMAdapter(CRMAdapter):
             "expense_day_logged_total": float(logged_total),
             "expense_daily_cap_bdt": float(EXPENSE_DAY_CAP_BDT),
             "expense_day_entries": entries,
+            "expense_day_items": items,
         }
 
     def _default_balance(self, employee_id: str) -> float:
