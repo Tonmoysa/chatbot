@@ -464,9 +464,58 @@ def test_orchestrator_expense_english_reply_language():
 
 def test_extract_50_ta_lunch_not_100():
     ext = extract_expense_items("kalke amar 100 taka cost hoyeche...50 ta lunch")
-    assert len(ext.items) == 1
-    assert ext.items[0].category == "Lunch"
-    assert ext.items[0].amount == 50.0
+    assert len(ext.items) == 2
+    # Lunch 50 must not steal the earlier 100.
+    lunch = [i for i in ext.items if i.category == "Lunch"]
+    assert len(lunch) == 1
+    assert lunch[0].amount == 50.0
+    uncategorized = [i for i in ext.items if not (i.category or "").strip()]
+    assert len(uncategorized) == 1
+    assert uncategorized[0].amount == 100.0
+
+
+def test_extract_cost_hoyeche_period_luch_typo():
+    """User typo: 'hoyeche.luch 20' (no space, luch not lunch)."""
+    ext = extract_expense_items("amar ajke 100 taka cost hoyeche.luch 20 taka")
+    pairs = {(i.category, i.amount) for i in ext.items}
+    assert ("Lunch", 20.0) in pairs
+    assert ext.malformed
+    assert "100" in ext.malformed[0]
+
+
+@pytest.mark.django_db
+def test_workflow_cost_hoyeche_period_luch_typo():
+    pack = process_expense_turn(
+        workflow_state={},
+        message="amar ajke 100 taka cost hoyeche.luch 20 taka",
+    )
+    items = pack["items"]
+    assert any(r.get("category") == "Lunch" and r.get("amount") == 20 for r in items)
+    block = pack["workflow_state"].get("expense_request") or {}
+    assert block.get("pending_step") == "category"
+    assert float((block.get("pending_line") or {}).get("amount") or 0) == 100.0
+
+
+def test_extract_cost_hoyeche_ellipsis_and_lunch():
+    """User-style: '100 cost hoyeche ...and lunch 20' must not drop the 100."""
+    ext = extract_expense_items("amar ajke 100 taka cost hoyeche ...and lunch 20 taka")
+    assert ("Lunch", 20.0) in {(i.category, i.amount) for i in ext.items}
+    assert ext.malformed
+    assert "100" in ext.malformed[0]
+
+
+@pytest.mark.django_db
+def test_workflow_cost_hoyeche_ellipsis_and_lunch_prompts_category():
+    wf: dict = {}
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="amar ajke 100 taka cost hoyeche ...and lunch 20 taka",
+    )
+    items = pack["items"]
+    assert any(r.get("category") == "Lunch" and r.get("amount") == 20 for r in items)
+    block = pack["workflow_state"].get("expense_request") or {}
+    assert block.get("pending_step") == "category"
+    assert float((block.get("pending_line") or {}).get("amount") or 0) == 100.0
 
 
 def test_kalke_cost_hoyeche_is_yesterday():

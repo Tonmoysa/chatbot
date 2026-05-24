@@ -63,13 +63,13 @@ def infer_expense_incurred_date_iso(
 
     tomorrow_re = re.compile(
         r"(আগামীকাল|"
-        r"\b(kalke|kalker|kal\s+er|porer\s+din|next\s+day|"
+        r"\b(kalker|kal\s+er|porer\s+din|next\s+day|"
         r"tomorrow|tomarrow|tommorow|tommorrow|tomorow|tmrw|tmw)\b)",
         re.I,
     )
     yesterday_re = re.compile(
         r"(গতকাল|"
-        r"\b(goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
+        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
         re.I,
     )
     today_re = re.compile(

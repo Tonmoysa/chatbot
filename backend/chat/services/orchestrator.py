@@ -921,10 +921,11 @@ class ChatOrchestrator:
 
             expense_turn_message = message
             if wants_expense_summary(message):
-                exp_items = list(
-                    (wf_exp.get("expense_request") or {}).get("items") or []
-                )
-                if exp_items:
+                exp_block = wf_exp.get("expense_request") or {}
+                exp_items = list(exp_block.get("items") or [])
+                pending = exp_block.get("pending_line")
+                has_pending = isinstance(pending, dict) and pending.get("amount")
+                if exp_items and not has_pending:
                     expense_turn_message = "শেষ"
 
             exp_pack = process_expense_turn(

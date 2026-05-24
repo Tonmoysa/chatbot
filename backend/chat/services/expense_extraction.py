@@ -32,6 +32,8 @@ NON_TRAVEL_CATEGORIES: frozenset[str] = frozenset({"Lunch", "Snack"})
 _CATEGORY_ALIASES: dict[str, str] = {
     "lunch": "Lunch",
     "lanch": "Lunch",
+    "luch": "Lunch",
+    "lunc": "Lunch",
     "খাওয়া": "Lunch",
     "খাবার": "Lunch",
     "snack": "Snack",
@@ -69,7 +71,7 @@ _AMOUNT_RE = re.compile(
 )
 
 _CATEGORY_TOKEN = (
-    r"(?:lunch|lanch|snacks?|bus|rickshaw|riksha|train|bike|bicycle|"
+    r"(?:lunch|lanch|luch|lunc|snacks?|bus|rickshaw|riksha|train|bike|bicycle|"
     r"cng|auto|metro(?:\s*rail)?|uber|cab|taxi|food|meal|transport|travel|"
     r"খাওয়া|খাবার|বাস|রিকশা|ট্রেন|সাইকেল|সিএনজি|মেট্রো)"
 )
@@ -343,7 +345,11 @@ def _split_clauses(message: str) -> list[str]:
         return []
     parts = re.split(
         r"[,;।\n]+|\s+এবং\s+|\s+and\s+|\s*\+\s*"
-        r"|\s+then\s+|\s+tarpor\s+|\s+abar\s+|\s+again\s+|\s+pore\s+",
+        r"|\s+then\s+|\s+tarpor\s+|\s+abar\s+|\s+again\s+|\s+pore\s+"
+        # Banglish: "...and lunch", "..and bus", or "cost hoyeche...50 ta lunch"
+        r"|\s*\.{2,}\s*and\s+|\s*\.{2,}\s+(?=\d)"
+        # "cost hoyeche.luch 20" — period before word, no space (not decimals like 3.50)
+        r"|(?<!\d)\.(?=[A-Za-z\u0980-\u09FF])",
         text,
         flags=re.I,
     )
@@ -433,6 +439,21 @@ def _attach_trailing_route(clause: str, items: list[ExpenseLineItem]) -> None:
             pair = _route_from_clause_suffix(clause, item.category, item.amount)
         if pair:
             item.from_location, item.to_location = pair
+
+
+def _uncategorized_amounts_in_clause(
+    clause: str, covered: list[tuple[int, int]]
+) -> list[ExpenseLineItem]:
+    """Amounts in the clause not already paired with a category (e.g. '100 cost hoyeche, lunch 20')."""
+    extra: list[ExpenseLineItem] = []
+    for m in _AMOUNT_RE.finditer(clause):
+        if _span_overlaps(covered, m.start(), m.end()):
+            continue
+        val = _parse_amount_match(m)
+        if val is None or val <= 0:
+            continue
+        extra.append(ExpenseLineItem(category="", amount=val))
+    return extra
 
 
 def _amount_nearest_category(clause: str, cat_pos: int) -> float | None:
@@ -548,6 +569,7 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
 
     if found:
         _attach_trailing_route(clause, found)
+        found.extend(_uncategorized_amounts_in_clause(clause, covered))
         return found
 
     cat_m = re.search(rf"\b({_CATEGORY_TOKEN})\b", clause, re.I)

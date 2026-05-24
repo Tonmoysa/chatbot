@@ -782,6 +782,27 @@ def _pack(
     }
 
 
+def _has_pending_expense_line(block: dict[str, Any]) -> bool:
+    pending = block.get("pending_line")
+    if isinstance(pending, dict) and pending.get("amount"):
+        return True
+    return bool(block.get("pending_queue"))
+
+
+def _pending_finish_block_message(block: dict[str, Any], *, lang: str) -> str:
+    pending = block.get("pending_line") if isinstance(block.get("pending_line"), dict) else {}
+    amt = float(pending.get("amount") or 0)
+    if lang == "en":
+        return (
+            f"**{amt:g} Tk** still needs a category before review "
+            f"(e.g. bus, lunch, snack). Reply with the category, then say **done**."
+        )
+    return (
+        f"আগে **{amt:g} Tk** এর category বলুন (যেমন bus, lunch, snack), "
+        f"তারপর **শেষ** বা summary লিখুন।"
+    )
+
+
 def _try_advance_to_review(
     wf: dict[str, Any],
     block: dict[str, Any],
@@ -791,6 +812,8 @@ def _try_advance_to_review(
     day_logged_total: float,
     daily_cap: float,
 ) -> dict[str, Any] | None:
+    if _has_pending_expense_line(block):
+        return None
     val = validate_expense_items(
         items,
         incurred_date_iso=inc_iso,
@@ -1208,6 +1231,14 @@ def process_expense_turn(
     if items and (
         _wants_finish_collecting(message) or _is_confirmation_yes(message)
     ):
+        if _has_pending_expense_line(block):
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=_pending_finish_block_message(block, lang=lang),
+                inc_iso=inc_iso,
+            )
         adv = _try_advance_to_review(
             wf,
             block,
