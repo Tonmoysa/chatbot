@@ -76,6 +76,16 @@ from chat.services.expense_workflow import (
     save_expense_last_submission,
     wants_expense_summary,
 )
+from chat.services.workflow_suspend import (
+    clear_suspended_expense,
+    clear_suspended_leave,
+    has_suspended_expense,
+    has_suspended_leave,
+    restore_suspended_expense,
+    restore_suspended_leave,
+    suspend_expense_for_workflow_switch,
+    suspend_leave_for_workflow_switch,
+)
 from chat.services.intent_detector import (
     _strong_expense_day_summary,
     wants_post_submit_expense_summary,
@@ -93,6 +103,7 @@ from chat.services.response_formatter import build_user_message
 from chat.services.policy_intent_helpers import (
     is_expense_entitlement_query,
     is_irrelevant_answer_complaint,
+    is_leave_wizard_misroute_complaint,
     is_rules_query,
 )
 from chat.services.translator import (
@@ -244,6 +255,14 @@ def _detect_intent_during_leave_workflow(
             "confidence": 0.99,
             "source": "leave_workflow_gate+balance",
         }
+    if _strong_expense_claim(message) or _strong_expense_day_summary(message):
+        return {
+            "intent": INTENT_EXPENSE_CLAIM
+            if _strong_expense_claim(message)
+            else INTENT_EXPENSE_DAY_SUMMARY,
+            "confidence": 0.99,
+            "source": "leave_workflow_gate+expense_switch",
+        }
     if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
         return {
             "intent": INTENT_UNKNOWN,
@@ -371,6 +390,65 @@ def _append_expense_workflow_resume(message: str, workflow_state: dict[str, Any]
     if not resume:
         return message
     return message.rstrip() + "\n\n" + resume
+
+
+def _append_suspended_leave_resume_after_switch(
+    message: str, workflow_state: dict[str, Any], *, user_message: str = ""
+) -> str:
+    """After another workflow completes, nudge the user back to a parked leave draft."""
+    if not is_leave_in_progress(workflow_state):
+        return message
+    resume = pending_question(workflow_state)
+    if not resume:
+        return message
+    from chat.services.translator import detect_user_language
+
+    lang = detect_user_language(user_message or message)
+    if lang == "bn":
+        hint = "আপনার ছুটির আবেদনটি এখনো অসম্পূর্ণ — যেখানে থেমেছিলেন সেখান থেকে চালিয়ে যান।"
+    else:
+        hint = "Your leave request is still in progress — continuing where you left off."
+    return message.rstrip() + "\n\n" + hint + "\n\n" + resume
+
+
+def _append_suspended_expense_resume_after_switch(
+    message: str, workflow_state: dict[str, Any], *, user_message: str = ""
+) -> str:
+    if not is_expense_in_progress(workflow_state):
+        return message
+    resume = expense_pending_prompt(workflow_state)
+    if not resume:
+        return message
+    from chat.services.translator import detect_user_language
+
+    lang = detect_user_language(user_message or message)
+    if lang == "bn":
+        hint = "আপনার খরচের আবেদনটি এখনো অসম্পূর্ণ — যেখানে থেমেছিলেন সেখান থেকে চালিয়ে যান।"
+    else:
+        hint = "Your expense claim is still in progress — continuing where you left off."
+    return message.rstrip() + "\n\n" + hint + "\n\n" + resume
+
+
+def _persist_workflow_state(
+    session: Any, workflow_state: dict[str, Any]
+) -> dict[str, Any]:
+    session.workflow_state = workflow_state
+    session.save(update_fields=["workflow_state", "updated_at"])
+    return session.workflow_state or {}
+
+
+def _answers_suspended_leave_step(
+    message: str, workflow_state: dict[str, Any]
+) -> bool:
+    from chat.services.workflow_suspend import KEY_SUSPENDED_LEAVE
+
+    sl = (workflow_state or {}).get(KEY_SUSPENDED_LEAVE) or {}
+    step = sl.get("step")
+    if not step:
+        return False
+    if _message_answers_wizard_step(message, step):
+        return True
+    return bool(_canonical_leave_wizard_token(message))
 
 
 def _rules_footer(*, mode: str, lang: str) -> str:
@@ -546,10 +624,43 @@ class ChatOrchestrator:
                 or wants_expense_summary(message)
                 or (not policy_interrupt and not balance_interrupt)
             ):
-                session.workflow_state = resume_expense_session(wf_state)
-                session.save(update_fields=["workflow_state", "updated_at"])
-                wf_state = session.workflow_state or {}
+                wf_state = _persist_workflow_state(
+                    session, resume_expense_session(wf_state)
+                )
                 log_step(trace_id, "expense_wizard_auto_resumed", {})
+
+        # Restore a workflow parked while the user completed another task.
+        if (
+            has_suspended_leave(wf_state)
+            and not is_leave_in_progress(wf_state)
+            and not is_expense_in_progress(wf_state)
+            and not is_cancel_now
+            and (
+                _wants_resume_leave(message)
+                or _is_leave_application_message(message)
+                or _answers_suspended_leave_step(message, wf_state)
+            )
+        ):
+            wf_state = _persist_workflow_state(
+                session, restore_suspended_leave(wf_state, force_active=True)
+            )
+            log_step(trace_id, "suspended_leave_restored", {})
+
+        if (
+            has_suspended_expense(wf_state)
+            and not is_expense_in_progress(wf_state)
+            and not is_leave_in_progress(wf_state)
+            and not is_cancel_now
+            and (
+                _wants_resume_expense(message)
+                or wants_expense_summary(message)
+                or _strong_expense_claim(message)
+            )
+        ):
+            wf_state = _persist_workflow_state(
+                session, restore_suspended_expense(wf_state)
+            )
+            log_step(trace_id, "suspended_expense_restored", {})
 
         log_step(
             trace_id,
@@ -578,7 +689,8 @@ class ChatOrchestrator:
                 "source": (intent_result.get("source") or "intent")
                 + "+entitlement_policy",
             }
-        policy_complaint = is_irrelevant_answer_complaint(message)
+        wizard_misroute_complaint = is_leave_wizard_misroute_complaint(message)
+        policy_complaint = is_irrelevant_answer_complaint(message) or wizard_misroute_complaint
 
         workflow_turn: str | None = None
         if is_leave_in_progress(wf_state) or is_expense_in_progress(wf_state):
@@ -600,9 +712,8 @@ class ChatOrchestrator:
         # Explicit cancel drops the leave draft; greetings keep the draft alive.
         if is_leave_in_progress(wf_state) and is_cancel_now:
             wf_state = deactivate_leave_session(wf_state)
-            session.workflow_state = wf_state
-            session.save(update_fields=["workflow_state", "updated_at"])
-            wf_state = session.workflow_state or {}
+            wf_state = clear_suspended_leave(wf_state)
+            wf_state = _persist_workflow_state(session, wf_state)
             wizard_dismissed_reason = "cancel"
             intent = INTENT_UNKNOWN
             intent_result = {
@@ -614,9 +725,7 @@ class ChatOrchestrator:
             log_step(trace_id, "leave_wizard_dismissed", {"reason": "cancel"})
         elif is_expense_in_progress(wf_state) and is_cancel_now:
             wf_state = deactivate_expense_session(wf_state)
-            session.workflow_state = wf_state
-            session.save(update_fields=["workflow_state", "updated_at"])
-            wf_state = session.workflow_state or {}
+            wf_state = _persist_workflow_state(session, wf_state)
             wizard_dismissed_reason = "cancel"
             intent = INTENT_UNKNOWN
             intent_result = {
@@ -626,6 +735,28 @@ class ChatOrchestrator:
                 + "+wizard_dismissed_cancel",
             }
             log_step(trace_id, "expense_wizard_dismissed", {"reason": "cancel"})
+        elif is_cancel_now and has_suspended_leave(wf_state):
+            wf_state = _persist_workflow_state(session, clear_suspended_leave(wf_state))
+            wizard_dismissed_reason = "cancel"
+            intent = INTENT_UNKNOWN
+            intent_result = {
+                **intent_result,
+                "intent": INTENT_UNKNOWN,
+                "source": (intent_result.get("source") or "intent")
+                + "+suspended_leave_dismissed_cancel",
+            }
+            log_step(trace_id, "suspended_leave_dismissed", {"reason": "cancel"})
+        elif is_cancel_now and has_suspended_expense(wf_state):
+            wf_state = _persist_workflow_state(session, clear_suspended_expense(wf_state))
+            wizard_dismissed_reason = "cancel"
+            intent = INTENT_UNKNOWN
+            intent_result = {
+                **intent_result,
+                "intent": INTENT_UNKNOWN,
+                "source": (intent_result.get("source") or "intent")
+                + "+suspended_expense_dismissed_cancel",
+            }
+            log_step(trace_id, "suspended_expense_dismissed", {"reason": "cancel"})
 
         if is_leave_in_progress(wf_state):
             hard_switch = intent in (
@@ -636,9 +767,10 @@ class ChatOrchestrator:
                 INTENT_APPROVAL_ESCALATION,
             )
             if hard_switch:
-                session.workflow_state = deactivate_leave_session(wf_state)
-                session.save(update_fields=["workflow_state", "updated_at"])
-                wf_state = session.workflow_state or {}
+                wf_state = _persist_workflow_state(
+                    session, suspend_leave_for_workflow_switch(wf_state)
+                )
+                log_step(trace_id, "leave_wizard_suspended_for_switch", {"intent": intent})
             elif intent == INTENT_HR_POLICY:
                 if is_leave_collecting(wf_state) or is_awaiting_leave_confirmation(
                     wf_state
@@ -652,6 +784,15 @@ class ChatOrchestrator:
                 leave_workflow_interrupt = True
             elif intent == INTENT_UNKNOWN:
                 if not policy_complaint and workflow_turn == TURN_CHITCHAT:
+                    if (
+                        is_leave_collecting(wf_state)
+                        and not is_leave_paused(wf_state)
+                        and not is_greeting_now
+                    ):
+                        wf_state = _persist_workflow_state(
+                            session, pause_leave_session(wf_state)
+                        )
+                        log_step(trace_id, "leave_wizard_paused_for_side_question", {})
                     leave_side_interrupt = True
                 elif workflow_turn == TURN_POLICY_QUERY:
                     leave_workflow_interrupt = True
@@ -665,9 +806,12 @@ class ChatOrchestrator:
                 INTENT_ATTENDANCE_CORRECTION,
                 INTENT_APPROVAL_ESCALATION,
             ):
-                session.workflow_state = deactivate_expense_session(wf_state)
-                session.save(update_fields=["workflow_state", "updated_at"])
-                wf_state = session.workflow_state or {}
+                wf_state = _persist_workflow_state(
+                    session, suspend_expense_for_workflow_switch(wf_state)
+                )
+                log_step(
+                    trace_id, "expense_wizard_suspended_for_switch", {"intent": intent}
+                )
             elif intent in (
                 INTENT_EXPENSE_DAY_SUMMARY,
                 INTENT_EXPENSE_STATUS,
@@ -690,10 +834,10 @@ class ChatOrchestrator:
                 expense_workflow_interrupt = True
             elif intent == INTENT_UNKNOWN:
                 if not policy_complaint and workflow_turn == TURN_CHITCHAT:
-                    if not is_expense_paused(wf_state):
-                        session.workflow_state = pause_expense_session(wf_state)
-                        session.save(update_fields=["workflow_state", "updated_at"])
-                        wf_state = session.workflow_state or {}
+                    if not is_expense_paused(wf_state) and not is_greeting_now:
+                        wf_state = _persist_workflow_state(
+                            session, pause_expense_session(wf_state)
+                        )
                         log_step(trace_id, "expense_wizard_paused_for_side_question", {})
                     expense_side_interrupt = True
         else:
@@ -827,6 +971,22 @@ class ChatOrchestrator:
             # Carry document text into the rule engine (LLM must not decide outcomes).
             entities["document_text"] = document_text
         log_step(trace_id, "entity_extraction_done", {"keys": list(entities.keys())})
+
+        if wizard_dismissed_reason is None and intent == INTENT_LEAVE_REQUEST:
+            wf_resume = getattr(session, "workflow_state", None) or {}
+            if has_suspended_leave(wf_resume) and not is_leave_in_progress(wf_resume):
+                wf_resume = _persist_workflow_state(
+                    session, restore_suspended_leave(wf_resume, force_active=True)
+                )
+                log_step(trace_id, "suspended_leave_restored_for_intent", {})
+
+        if wizard_dismissed_reason is None and intent == INTENT_EXPENSE_CLAIM:
+            wf_resume = getattr(session, "workflow_state", None) or {}
+            if has_suspended_expense(wf_resume) and not is_expense_in_progress(wf_resume):
+                wf_resume = _persist_workflow_state(
+                    session, restore_suspended_expense(wf_resume)
+                )
+                log_step(trace_id, "suspended_expense_restored_for_intent", {})
 
         lv_pack: dict[str, Any] = {}
         exp_pack: dict[str, Any] = {}
@@ -1210,7 +1370,15 @@ class ChatOrchestrator:
                         trace_id=trace_id,
                         idempotency_key=idempotency_key,
                     )
-                    session.workflow_state = sub_result.workflow_state
+                    wf_leave_sub = sub_result.workflow_state
+                    if has_suspended_expense(wf_leave_sub):
+                        wf_leave_sub = restore_suspended_expense(wf_leave_sub)
+                        log_step(
+                            trace_id,
+                            "suspended_expense_restored_after_leave_submit",
+                            {},
+                        )
+                    session.workflow_state = wf_leave_sub
                     session.save(update_fields=["workflow_state", "updated_at"])
                     crm_payload["leave_submission"] = sub_result.crm_response
                     entities["leave_submission_payload"] = sub_result.payload
@@ -1284,6 +1452,16 @@ class ChatOrchestrator:
                 decision=decision,
                 crm_payload=crm_payload,
             )
+            wf_post_msg = getattr(session, "workflow_state", None) or {}
+            if (
+                intent == INTENT_LEAVE_REQUEST
+                and decision.get("outcome") == "SUBMITTED"
+                and entities.get("leave_workflow_confirmed")
+                and is_expense_in_progress(wf_post_msg)
+            ):
+                msg = _append_suspended_expense_resume_after_switch(
+                    msg, wf_post_msg, user_message=message
+                )
             if (
                 intent == INTENT_EXPENSE_CLAIM
                 and expense_collecting_blocked
@@ -1316,13 +1494,22 @@ class ChatOrchestrator:
                     ),
                 )
                 rstatus = "success"
-                session.workflow_state = save_expense_last_submission(
+                wf_submitted = save_expense_last_submission(
                     getattr(session, "workflow_state", None) or {},
                     reference_id=sub_ref,
                     items=list(entities.get("expense_items") or []),
                     incurred_date_iso=str(entities.get("expense_incurred_date") or ""),
                 )
-                session.save(update_fields=["workflow_state", "updated_at"])
+                if has_suspended_leave(wf_submitted):
+                    wf_submitted = restore_suspended_leave(
+                        wf_submitted, force_active=True
+                    )
+                    log_step(trace_id, "suspended_leave_restored_after_expense_submit", {})
+                wf_submitted = _persist_workflow_state(session, wf_submitted)
+                if is_leave_in_progress(wf_submitted):
+                    msg = _append_suspended_leave_resume_after_switch(
+                        msg, wf_submitted, user_message=message
+                    )
             # Friendly, human-toned LLM fallback for cases where the rules /
             # intent pipeline could not produce a specific answer:
             #   1. The user message did not match any HR intent (UNKNOWN).
@@ -1334,7 +1521,25 @@ class ChatOrchestrator:
             used_conversational = False
             if policy_complaint and not response_finalized:
                 user_lang = detect_user_language(message)
-                if user_lang == "bn":
+                if wizard_misroute_complaint and not is_irrelevant_answer_complaint(
+                    message
+                ):
+                    if user_lang == "bn":
+                        msg = (
+                            "বুঝতে পারছি — আপনি ছুটির ফর্মের মধ্যে আলাদা একটা প্রশ্ন করেছিলেন, "
+                            "আর সেটাকে ছুটির «কারণ» হিসেবে ধরে ফেলা ঠিক হয়নি। "
+                            "এ ধরনের প্রশ্নের উত্তর আমাদের আপলোড করা পলিসিতে না থাকলে "
+                            "HR-কে জিজ্ঞেস করুন; আমি শুধু ছুটি, খরচ, attendance ও "
+                            "কোম্পানি নীতি নিয়ে সাহায্য করি।"
+                        )
+                    else:
+                        msg = (
+                            "I understand — you asked a separate question while the leave "
+                            "form was open, and it should not have been saved as your leave reason. "
+                            "If our uploaded policies do not cover your question, please check "
+                            "with HR. I can help with leave, expenses, attendance, and company policy."
+                        )
+                elif user_lang == "bn":
                     msg = (
                         "দুঃখিত — আগের উত্তরটি আপনার প্রশ্নের সাথে মিলছিল না। "
                         "আপলোড করা পলিসিতে এই বিষয়ে স্পষ্ট তথ্য খুঁজে পাইনি। "

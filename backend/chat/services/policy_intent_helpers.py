@@ -122,9 +122,27 @@ _BAD_ANSWER_COMPLAINT_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_LEAVE_WIZARD_MISROUTE_COMPLAINT_RE = re.compile(
+    r"(?:"
+    r"(?:ami\s+)?(?:ekta\s+)?question\s*korchi|প্রশ্ন\s*কর(?:ছি|েছিলাম)?|"
+    r"(?:but|kintu|তবে).{0,100}(?:chuti|chhuti|ছুটি).{0,50}"
+    r"(?:besoy|বিষয়|বেপার|ফর্ম|abedon|জানাই|janai).{0,40}(?:keno|কেন|why)|"
+    r"(?:chuti|chhuti|ছুটি).{0,50}(?:besoy|বিষয়|বেপার|ফর্ম|abedon).{0,40}(?:keno|কেন)|"
+    r"janai\s*dila\s*keno|জানাই\s*দিল.{0,20}কেন"
+    r")",
+    re.I | re.UNICODE,
+)
+
 
 def is_irrelevant_answer_complaint(message: str) -> bool:
     """User says the bot's previous reply did not match their question."""
     if not message:
         return False
     return bool(_BAD_ANSWER_COMPLAINT_RE.search(message))
+
+
+def is_leave_wizard_misroute_complaint(message: str) -> bool:
+    """User says the bot treated a general question as leave-form input."""
+    if not message:
+        return False
+    return bool(_LEAVE_WIZARD_MISROUTE_COMPLAINT_RE.search(message))

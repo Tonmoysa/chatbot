@@ -355,17 +355,57 @@ def _is_cancel_form_request(message: str) -> bool:
     )
 
 
+# Off-topic questions during free-text wizard steps (e.g. "can I use airplane?").
+_WIZARD_SIDE_QUESTION_RE = re.compile(
+    r"(?:"
+    r"\?\s*$|"
+    r"^\s*(?:can|could|may|might|will|would|shall|should|is|are|was|were|"
+    r"do|does|did|have|has|had|what|when|where|why|how|who|which|am\s+i|ami\s+ki)\b|"
+    r"\b(can\s+i|could\s+i|may\s+i|am\s+i\s+allowed|is\s+it\s+(?:ok|okay|allowed))\b|"
+    r"(?:ami\s+)?(?:ekta\s+)?question\s*korchi|প্রশ্ন\s*কর|"
+    r"(কি\s+পারি|পারব\s+কি|আমি\s+কি\s+)"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def looks_like_wizard_side_question(message: str) -> bool:
+    """True when the user is asking a question, not supplying a wizard slot value."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if not _WIZARD_SIDE_QUESTION_RE.search(text):
+        return False
+    low = text.lower()
+    # Still on-topic for the leave wizard (payment/type/dates), not a random HR question.
+    if re.search(
+        r"\b(leave|chuti|chhuti|chutti|sick|casual|annual|paid|unpaid|lwop|pto|"
+        r"half\s*day|full\s*day|tomorrow|today|kal|agamikal|ছুটি|বেতন)\b",
+        low,
+    ) and not re.search(
+        r"\b(airplane|aeroplane|flight|plane|train|bus|travel|hotel|visa|"
+        r"parking|smoking|commute)\b",
+        low,
+    ):
+        return False
+    return True
+
+
 def _message_answers_wizard_step(message: str, step: str | None) -> bool:
     """True if the message plausibly answers the wizard's *current* step.
 
-    Steps that accept free text (reason / supporting_document) always return
-    True so the wizard receives the message. For structured steps we check
-    for the canonical answer tokens; if none match, the message is treated
-    as side-talk by the orchestrator.
+    Free-text steps (reason / supporting_document) accept answers unless the
+    message is clearly a side question (e.g. travel eligibility), which the
+    orchestrator handles outside the slot-filling flow.
     """
     if not step:
         return False
     if step in ("reason", "supporting_document"):
+        text = (message or "").strip()
+        if not text:
+            return False
+        if looks_like_wizard_side_question(message):
+            return False
         return True
     text = (message or "").strip()
     if not text:

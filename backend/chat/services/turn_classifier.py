@@ -22,6 +22,7 @@ from chat.services.intent_detector import (
     _message_answers_wizard_step,
     _strong_expense_claim,
     _strong_hr_policy,
+    looks_like_wizard_side_question,
 )
 from chat.services.leave_confirm import (
     _looks_like_slot_correction,
@@ -149,14 +150,13 @@ def classify_workflow_turn(
         return TURN_NEW_WORKFLOW
 
     if leave_active:
+        if pending_leave_step in ("reason", "supporting_document"):
+            if looks_like_wizard_side_question(message):
+                return TURN_CHITCHAT
         if _message_answers_wizard_step(message, pending_leave_step) or _canonical_leave_wizard_token(
             message
         ):
             return TURN_SLOT_ANSWER
-        if pending_leave_step in ("reason", "supporting_document"):
-            text = (message or "").strip()
-            if text:
-                return TURN_SLOT_ANSWER
 
     if parse_edit_slot(message):
         return TURN_CORRECTION
@@ -170,7 +170,12 @@ def classify_workflow_turn(
     if expense_active and (_strong_expense_claim(message) or re.search(r"\d", message or "")):
         return TURN_SLOT_ANSWER
 
-    if leave_active or expense_active:
+    if leave_active:
+        if looks_like_wizard_side_question(message):
+            return TURN_CHITCHAT
+        return TURN_SLOT_ANSWER
+
+    if expense_active:
         return TURN_SLOT_ANSWER
 
     return TURN_CHITCHAT

@@ -195,16 +195,9 @@ def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
 
 
 def _reason_from_message(message: str) -> str | None:
-    m = message.strip()
-    if len(m) < 4:
-        return None
-    low = m.lower().strip()
-    if re.match(r"^(paid|lwop|unpaid|full|half)\b", low) and len(m.split()) <= 3:
-        return None
-    stripped = re.sub(
-        r"^(paid|lwop|unpaid|full|half)\b[\s,:-]*", "", low, flags=re.I
-    ).strip(" ,.:;-")
-    return stripped[:2000] if len(stripped) >= 4 else None
+    from chat.services.leave_slot_extraction import extract_reason_from_message
+
+    return extract_reason_from_message(message)
 
 
 def merge_extractor_entities(
@@ -273,6 +266,16 @@ def _is_compound_slot_message(message: str) -> bool:
         signals += 1
     if re.search(r"\b(full|half)\b|full\s*day|half\s*day", low):
         signals += 1
+    if re.search(
+        r"\b(tomorrow|today|kal|agamikal|next\s+week|আগামীকাল|আজ)\b",
+        low,
+    ):
+        signals += 1
+    if re.search(
+        r"\b(family|wedding|funeral|travel|program|পরিবার|অনুষ্ঠান)\b",
+        low,
+    ):
+        signals += 1
     return signals >= 2
 
 
@@ -324,6 +327,12 @@ def _apply_slots_from_message(
     _infer_leave_type(message, draft)
     _infer_payment_category(message, draft)
     _infer_day_scope(message, draft)
+    from chat.services.leave_slot_extraction import extract_reason_from_message
+
+    reason = extract_reason_from_message(message)
+    if reason and (overwrite or not draft.get("reason")):
+        draft["reason"] = reason
+        draft.pop("_reason_implied", None)
     if overwrite:
         _force_scope_from_message(message, draft)
 

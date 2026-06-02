@@ -118,13 +118,103 @@ def apply_payment_category_from_message(message: str) -> str | None:
     return None
 
 
+_REASON_FOR_RE = re.compile(
+    r"\bfor\s+(?:my\s+|our\s+|the\s+|a\s+)?(.+?)"
+    r"(?=\s+that\s+|\s+which\s+|\s+who\s+|,\s*|\.\s|$|\s+(?:will\s+be\s+)?(?:unpaid|paid|lwop)\b)",
+    re.I | re.UNICODE,
+)
+_REASON_CAUSE_RE = re.compile(
+    r"\b(?:because\s+of|due\s+to|regarding)\s+(.+?)(?=\s+that\s+|,|\.|$|\s+(?:unpaid|paid)\b)",
+    re.I | re.UNICODE,
+)
+_REASON_KEYWORD_RE = re.compile(
+    r"\b("
+    r"family\s+(?:program|function|event|matter|emergency|issue|work|gathering|wedding)|"
+    r"family\s+wedding|"
+    r"wedding|funeral|marriage|travel|personal\s+(?:work|matter)|"
+    r"medical\s+appointment|relative(?:'s)?\s+\w+|"
+    r"পরিবার(?:ের)?\s*(?:কাজ|অনুষ্ঠান|প্রোগ্রাম)|"
+    r"বিয়ে|অনুষ্ঠান|সংসার"
+    r")\b",
+    re.I | re.UNICODE,
+)
+_SIDE_QUESTION_IN_REASON_RE = re.compile(
+    r"(?:^\s*(?:can|could|may|is|are|do|does|did|what|why|how)\b|"
+    r"\b(can\s+i|could\s+i|may\s+i)\b|\?\s*$)",
+    re.I,
+)
+
+
+def _trim_reason_fragment(text: str) -> str:
+    s = (text or "").strip(" ,.-")
+    s = re.sub(r"\s+that\s+.*$", "", s, flags=re.I)
+    s = re.sub(r"\s+(?:will\s+be|is|was)\s+.*$", "", s, flags=re.I)
+    return s.strip()
+
+
+def extract_reason_from_message(message: str) -> str | None:
+    """
+    Pull a leave reason from compound or short wizard answers.
+
+    Examples: ``for my family program``, ``family wedding``, ``fever``.
+  """
+    raw = (message or "").strip()
+    if len(raw) < 4:
+        return None
+    low = raw.lower()
+    if _SIDE_QUESTION_IN_REASON_RE.search(raw):
+        return None
+    if re.match(r"^(paid|unpaid|lwop|full|half)\b", low) and len(raw.split()) <= 3:
+        return None
+
+    m = _REASON_FOR_RE.search(raw)
+    if m:
+        reason = _trim_reason_fragment(m.group(1))
+        if len(reason) >= 4:
+            return reason[:2000]
+
+    m = _REASON_CAUSE_RE.search(raw)
+    if m:
+        reason = _trim_reason_fragment(m.group(1))
+        if len(reason) >= 4:
+            return reason[:2000]
+
+    m = _REASON_KEYWORD_RE.search(raw)
+    if m:
+        return m.group(0).strip()[:2000]
+
+    # Short wizard reply (e.g. ``family program``, ``fever``) — not leave boilerplate.
+    if len(raw.split()) <= 8 and not _LEAVE_INTENT_RE.search(raw):
+        if not re.search(
+            r"\b(tomorrow|today|kal|agamikal|unpaid|paid|lwop|full|half)\b",
+            low,
+        ):
+            return raw[:2000]
+    return None
+
+
 def is_payment_only_message(message: str) -> bool:
     """
     True for short paid/unpaid corrections (e.g. ``unpaid hobe``) that must not
     change Select Leave / sick / casual / annual.
+
+    Long or multi-slot sentences (e.g. ``tomorrow … unpaid leave for family``)
+    are never payment-only — those must run full slot extraction including dates.
     """
     low = (message or "").lower().strip()
     if not apply_payment_category_from_message(message):
+        return False
+    words = re.findall(r"\S+", low)
+    if len(words) > 6:
+        return False
+    if re.search(
+        r"\b(tomorrow|tomarrow|tommorow|tommorrow|tomorow|tmrw|tmw|"
+        r"today|ajke|aj\s*ke|kalke|kalker|\bkal\b|agamikal|agami\s*kal|"
+        r"next\s+week|আগামীকাল|আজকে|আজ)\b",
+        low,
+    ):
+        return False
+    if _LEAVE_INTENT_RE.search(low) and len(words) > 3:
         return False
     if explicit_leave_type_from_message(message):
         return False
@@ -276,6 +366,10 @@ def extract_leave_slots(
             _set(out.reason, "Maternity leave", confidence="high", source="implied_maternity")
         elif lt == "paternity":
             _set(out.reason, "Paternity leave", confidence="high", source="implied_paternity")
+
+    reason = extract_reason_from_message(raw)
+    if reason and out.reason.confidence != "high":
+        _set(out.reason, reason, confidence="high", source="rules_reason")
 
     return out
 

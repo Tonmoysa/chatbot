@@ -166,9 +166,9 @@ def build_user_message(
     if outcome == "NEEDS_CLARIFICATION":
         if intent == INTENT_UNKNOWN:
             return (
-                "Hi! আমি আপনার HR assistant. আপনি কী নিয়ে সাহায্য চান?\n"
-                "উদাহরণ: leave balance, leave request, WFH request, expense claim/status, "
-                "attendance correction, HR policy, বা request status.",
+                reason
+                or "আপনার বার্তাটা একটু স্পষ্ট করবেন? ছুটি, খরচ, attendance বা "
+                "কোম্পানির নীতি — যেটা লাগে সেটা লিখুন।",
                 "needs_input",
             )
         return (reason or "Could you share a bit more detail?", "needs_input")
