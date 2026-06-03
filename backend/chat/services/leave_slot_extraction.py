@@ -127,6 +127,10 @@ _REASON_CAUSE_RE = re.compile(
     r"\b(?:because\s+of|due\s+to|regarding)\s+(.+?)(?=\s+that\s+|,|\.|$|\s+(?:unpaid|paid)\b)",
     re.I | re.UNICODE,
 )
+_REASON_BN_JONNO_RE = re.compile(
+    r"((?:famil+y|পরিবার|wedding|বিয়ে|sick|অসুস্থ)(?:\s+\w+){0,3})\s+er\s+jonno",
+    re.I | re.UNICODE,
+)
 _REASON_KEYWORD_RE = re.compile(
     r"\b("
     r"family\s+(?:program|function|event|matter|emergency|issue|work|gathering|wedding)|"
@@ -150,6 +154,13 @@ def _trim_reason_fragment(text: str) -> str:
     s = re.sub(r"\s+that\s+.*$", "", s, flags=re.I)
     s = re.sub(r"\s+(?:will\s+be|is|was)\s+.*$", "", s, flags=re.I)
     return s.strip()
+
+
+def _normalize_reason_token(reason: str) -> str:
+    s = (reason or "").strip()
+    if re.fullmatch(r"famil+y", s, re.I):
+        return "family"
+    return s
 
 
 def extract_reason_from_message(message: str) -> str | None:
@@ -179,9 +190,20 @@ def extract_reason_from_message(message: str) -> str | None:
         if len(reason) >= 4:
             return reason[:2000]
 
+    m = _REASON_BN_JONNO_RE.search(raw)
+    if m:
+        reason = _normalize_reason_token(_trim_reason_fragment(m.group(1)))
+        if len(reason) >= 3:
+            return reason[:2000]
+
     m = _REASON_KEYWORD_RE.search(raw)
     if m:
         return m.group(0).strip()[:2000]
+
+    if _LEAVE_INTENT_RE.search(raw) and re.search(r"\bfamil+y\b", low):
+        m_fam = re.search(r"\bfamil+y\b", raw, re.I)
+        if m_fam:
+            return _normalize_reason_token(m_fam.group(0))
 
     # Short wizard reply (e.g. ``family program``, ``fever``) — not leave boilerplate.
     if len(raw.split()) <= 8 and not _LEAVE_INTENT_RE.search(raw):

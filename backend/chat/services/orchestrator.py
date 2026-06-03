@@ -21,6 +21,7 @@ from chat.services.crm.factory import get_crm_adapter
 from chat.services.decision_engine import DecisionEngine
 from chat.services.entity_extractor import EntityExtractor
 from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+import chat.services.expense_incurred_date as expense_incurred_date_mod
 from chat.services.intent_detector import (
     IntentDetector,
     _is_cancel_form_request,
@@ -36,6 +37,8 @@ from chat.services.leave_confirm import (
     is_confirmation_yes,
     is_awaiting_leave_confirmation,
     parse_edit_slot,
+    wants_defer_leave_for_expense_submit,
+    wants_defer_expense_for_leave_submit,
 )
 from chat.services.turn_classifier import (
     TURN_CHITCHAT,
@@ -208,6 +211,14 @@ def _detect_intent_during_leave_workflow(
     Deterministic intent while leave_request draft exists — LLM must not override.
     """
     if is_awaiting_leave_confirmation(workflow_state):
+        if wants_defer_leave_for_expense_submit(message) and has_suspended_expense(
+            workflow_state
+        ):
+            return {
+                "intent": INTENT_EXPENSE_CLAIM,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+defer_expense_submit",
+            }
         if (
             is_confirmation_cancel(message)
             or parse_edit_slot(message)
@@ -229,6 +240,38 @@ def _detect_intent_during_leave_workflow(
                 "intent": INTENT_HR_POLICY,
                 "confidence": 0.99,
                 "source": "leave_workflow_gate+confirm_policy",
+            }
+        from chat.services.expense_workflow import wants_resume_or_show_expense
+
+        if has_suspended_expense(workflow_state) and wants_resume_or_show_expense(
+            message
+        ):
+            return {
+                "intent": INTENT_EXPENSE_CLAIM,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_expense_resume",
+            }
+        if _strong_expense_claim(message) or _strong_expense_day_summary(message):
+            return {
+                "intent": INTENT_EXPENSE_CLAIM
+                if _strong_expense_claim(message)
+                else INTENT_EXPENSE_DAY_SUMMARY,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_expense_switch",
+            }
+        # If the user sends free-form text while we're awaiting final confirmation,
+        # treat it as a leave workflow update (typically a reason tweak) rather than
+        # misclassifying it as chitchat and dropping the workflow.
+        t_msg = (message or "").strip()
+        looks_like_question = bool(
+            re.search(r"^(can\s+i|what|why|how|when|where|which)\b", t_msg, re.I)
+            or t_msg.endswith("?")
+        )
+        if t_msg and len(t_msg) >= 12 and not looks_like_question:
+            return {
+                "intent": INTENT_LEAVE_REQUEST,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_freeform",
             }
         if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
             return {
@@ -311,6 +354,22 @@ def _detect_intent_during_expense_workflow(
     balance_probe: bool,
 ) -> dict[str, Any]:
     """Deterministic intent while expense_request is active — LLM must not override."""
+    if wants_defer_expense_for_leave_submit(message) and has_suspended_leave(
+        workflow_state
+    ):
+        return {
+            "intent": INTENT_LEAVE_REQUEST,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+defer_leave_submit",
+        }
+    from chat.services.expense_workflow import wants_resume_or_show_expense
+
+    if wants_resume_or_show_expense(message):
+        return {
+            "intent": INTENT_EXPENSE_CLAIM,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+resume_show",
+        }
     if _asks_recent_leave_submission(message):
         return {
             "intent": INTENT_REQUEST_STATUS,
@@ -416,17 +475,12 @@ def _append_suspended_expense_resume_after_switch(
 ) -> str:
     if not is_expense_in_progress(workflow_state):
         return message
-    resume = expense_pending_prompt(workflow_state)
+    from chat.services.expense_workflow import format_expense_resume_message
+
+    resume = format_expense_resume_message(workflow_state, user_message=user_message or message)
     if not resume:
         return message
-    from chat.services.translator import detect_user_language
-
-    lang = detect_user_language(user_message or message)
-    if lang == "bn":
-        hint = "আপনার খরচের আবেদনটি এখনো অসম্পূর্ণ — যেখানে থেমেছিলেন সেখান থেকে চালিয়ে যান।"
-    else:
-        hint = "Your expense claim is still in progress — continuing where you left off."
-    return message.rstrip() + "\n\n" + hint + "\n\n" + resume
+    return message.rstrip() + "\n\n" + resume
 
 
 def _persist_workflow_state(
@@ -1065,7 +1119,9 @@ class ChatOrchestrator:
             wf_exp = wf_exp_gate
             day_logged = 0.0
             inc_hint = infer_expense_incurred_date_iso(
-                message=message, hints=entities, today=date.today()
+                message=message,
+                hints=entities,
+                today=expense_incurred_date_mod.date.today(),
             )
             try:
                 br = self.crm.get_expense_day_breakdown(
@@ -1080,6 +1136,11 @@ class ChatOrchestrator:
             from chat.constants import EXPENSE_DAY_CAP_BDT
 
             expense_turn_message = message
+            if wants_defer_leave_for_expense_submit(message):
+                exp_block = wf_exp.get("expense_request") or {}
+                stage_def = str(exp_block.get("stage") or "")
+                if stage_def in ("review", "submit_confirm"):
+                    expense_turn_message = "yes"
             if wants_expense_summary(message):
                 exp_block = wf_exp.get("expense_request") or {}
                 exp_items = list(exp_block.get("items") or [])
@@ -1159,9 +1220,13 @@ class ChatOrchestrator:
 
             if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
                 rid = entities.get("request_id")
-                if rid:
+                rid_s = str(rid or "").strip()
+                # Avoid false positives like parsing "request" → "uest".
+                if rid_s and not re.search(r"\d", rid_s):
+                    rid_s = ""
+                if rid_s:
                     st = self.crm.get_request_status(
-                        str(rid),
+                        rid_s,
                         company_id=company_id,
                         employee_id=employee_id,
                         session_id=session.session_id,
@@ -1210,7 +1275,9 @@ class ChatOrchestrator:
             if intent == INTENT_EXPENSE_CLAIM and not expense_collecting_blocked:
                 if not entities.get("expense_workflow_submit"):
                     inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
-                        message=message, hints=entities, today=date.today()
+                        message=message,
+                        hints=entities,
+                        today=expense_incurred_date_mod.date.today(),
                     )
                     day_tot = self.crm.get_expense_day_approved_total(
                         company_id=company_id,
@@ -1251,7 +1318,9 @@ class ChatOrchestrator:
 
             if intent == INTENT_EXPENSE_DAY_SUMMARY:
                 inc_iso = (entities.get("expense_incurred_date") or "").strip() or infer_expense_incurred_date_iso(
-                    message=message, hints=entities, today=date.today()
+                    message=message,
+                    hints=entities,
+                    today=expense_incurred_date_mod.date.today(),
                 )
                 breakdown = self.crm.get_expense_day_breakdown(
                     company_id=company_id,
@@ -2163,8 +2232,13 @@ def _asks_recent_expense_submission(message: str) -> bool:
 
 
 def _wants_resume_expense(message: str) -> bool:
-    from chat.services.expense_workflow import _is_confirmation_yes
+    from chat.services.expense_workflow import (
+        _is_confirmation_yes,
+        wants_resume_or_show_expense,
+    )
 
+    if wants_resume_or_show_expense(message):
+        return True
     if _is_confirmation_yes(message):
         return True
     low = (message or "").lower()
@@ -2180,6 +2254,8 @@ def _wants_resume_expense(message: str) -> bool:
 
 
 def _wants_resume_leave(message: str) -> bool:
+    if wants_defer_expense_for_leave_submit(message):
+        return True
     low = (message or "").lower()
     raw = message or ""
     if re.search(r"\b(continue|resume|finish)\b.*\bleave\b", low):
@@ -2189,6 +2265,14 @@ def _wants_resume_leave(message: str) -> bool:
     ):
         return True
     if re.search(r"(ছুটি\s*(ফর্ম|আবেদন).*(চালু|শেষ|আবার)|continue\s*ছুটি)", raw, re.I):
+        return True
+    if re.search(
+        r"leave\s+request.{0,20}(abar|again|on)|"
+        r"(abar|again).{0,20}leave\s+request|"
+        r"ছুটি.{0,20}(আবার|চালু|on)",
+        low,
+        re.I,
+    ):
         return True
     return False
 

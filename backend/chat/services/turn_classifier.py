@@ -14,6 +14,7 @@ from chat.services.expense_workflow import (
     _is_confirmation_no,
     _is_confirmation_yes as expense_is_confirmation_yes,
     wants_expense_summary,
+    wants_resume_or_show_expense,
 )
 from chat.services.intent_detector import (
     _is_cancel_form_request,
@@ -29,6 +30,7 @@ from chat.services.leave_confirm import (
     is_confirmation_cancel,
     is_confirmation_yes,
     parse_edit_slot,
+    wants_defer_expense_for_leave_submit,
 )
 from chat.services.policy_intent_helpers import (
     is_expense_entitlement_query,
@@ -127,6 +129,12 @@ def classify_workflow_turn(
     """
     if _is_cancel_form_request(message):
         return TURN_CANCEL
+
+    if expense_active and wants_defer_expense_for_leave_submit(message):
+        return TURN_NEW_WORKFLOW
+
+    if expense_active and wants_resume_or_show_expense(message):
+        return TURN_SLOT_ANSWER
 
     if (
         is_confirmation_yes(message)

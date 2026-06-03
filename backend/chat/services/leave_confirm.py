@@ -70,6 +70,24 @@ _EDIT_RE = re.compile(
 
 )
 
+_DEFER_EXPENSE_SUBMIT_RE = re.compile(
+    r"(?:expense|খরচ|kharcha).{0,35}(?:age|আগে|first|prothom|before).{0,25}"
+    r"(?:submit|joma|জমা|kor[eo]?|কর[ো]?)|"
+    r"(?:age|আগে|first|prothom|before).{0,25}(?:submit|joma|জমা).{0,35}(?:expense|খরচ)|"
+    r"expense\s+ta\s+age",
+    re.I | re.UNICODE,
+)
+
+_DEFER_LEAVE_SUBMIT_RE = re.compile(
+    r"(?:leave|ছুটি|chuti|chhuti).{0,35}(?:request|application|abedon|আবেদন)?"
+    r".{0,20}(?:age|আগে|first|prothom|before).{0,25}"
+    r"(?:submit|joma|জমা|kor[eo]?|কর[ো]?)|"
+    r"(?:age|আগে|first|prothom|before).{0,25}(?:submit|joma|জমা).{0,35}"
+    r"(?:leave|ছুটি|chuti|chhuti|request)|"
+    r"leave\s+request\s+ta\s+age",
+    re.I | re.UNICODE,
+)
+
 
 
 _FIELD_ALIASES: tuple[tuple[str, str], ...] = (
@@ -147,7 +165,69 @@ def build_confirmation_prompt(draft: dict[str, Any]) -> str:
     )
 
 
+def build_deferred_leave_return_prompt(
+    draft: dict[str, Any], *, message: str = ""
+) -> str:
+    """Professional review when user returns to a parked leave before submitting."""
+    from chat.services.translator import detect_user_language
 
+    lang = detect_user_language(message)
+    body = build_confirmation_prompt(draft)
+    if lang == "bn":
+        intro = (
+            "আপনার ছুটির আবেদন এখনো **জমা হয়নি**। নিচের তথ্যগুলো যাচাই করুন — "
+            "সব ঠিক থাকলে **yes** লিখে জমা দিন; বদলাতে **edit** লিখুন।\n\n"
+        )
+    elif lang == "banglish":
+        intro = (
+            "Apnar leave request ekhono submit hoyni. Nicher info check korun — "
+            "thik thakle **yes** diye submit korun; change korte **edit**.\n\n"
+        )
+    else:
+        intro = (
+            "Your leave request is **not submitted yet**. Please review the details below — "
+            "reply **yes** to submit, or **edit** to change a field.\n\n"
+        )
+    return intro + body
+
+
+
+
+
+def wants_defer_leave_for_expense_submit(message: str) -> bool:
+    """User wants to finish a parked expense before confirming leave (not leave yes)."""
+    t = (message or "").strip()
+    if not t:
+        return False
+    if _DEFER_LEAVE_SUBMIT_RE.search(t):
+        return False
+    if _DEFER_EXPENSE_SUBMIT_RE.search(t):
+        return True
+    low = t.lower()
+    return bool(
+        re.search(r"\b(expense|খরচ)\b", low, re.I)
+        and re.search(r"\b(submit|joma|জমা)\b", low, re.I)
+        and re.search(r"\b(age|আগে|first|prothom|before|on)\s*(koro|kor|কর)\b", low, re.I)
+        and not re.search(r"\b(leave|chuti|chhuti|ছুটি|request)\b", low, re.I)
+    )
+
+
+def wants_defer_expense_for_leave_submit(message: str) -> bool:
+    """User wants to finish a parked leave (often submit) before continuing expense."""
+    t = (message or "").strip()
+    if not t:
+        return False
+    if _DEFER_EXPENSE_SUBMIT_RE.search(t):
+        return False
+    if _DEFER_LEAVE_SUBMIT_RE.search(t):
+        return True
+    low = t.lower()
+    return bool(
+        re.search(r"\b(leave|chuti|chhuti|request|ছুটি)\b", low, re.I)
+        and re.search(r"\b(submit|joma|জমা)\b", low, re.I)
+        and re.search(r"\b(age|আগে|first|prothom|before|on)\s*(koro|kor|কর)\b", low, re.I)
+        and not re.search(r"\b(expense|খরচ|kharcha)\b", low, re.I)
+    )
 
 
 def is_confirmation_yes(message: str) -> bool:
@@ -158,9 +238,22 @@ def is_confirmation_yes(message: str) -> bool:
 
         return False
 
+    if wants_defer_leave_for_expense_submit(t):
+
+        return False
+
+    if wants_defer_expense_for_leave_submit(t):
+
+        return False
+
     if _CONFIRM_YES_RE.match(t):
 
         return True
+
+    if re.search(r"\b(expense|খরচ)\b", t, re.I) and re.search(
+        r"\b(submit|joma|জমা)\b", t, re.I
+    ):
+        return False
 
     return bool(re.search(r"\b(confirm|submit|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I)) and not _EDIT_RE.search(t)
 
@@ -300,6 +393,27 @@ def _looks_like_slot_correction(message: str) -> bool:
 
         return False
 
+    if wants_defer_expense_for_leave_submit(message):
+
+        return False
+
+    from chat.services.intent_detector import (
+        _strong_expense_claim,
+        _strong_expense_day_summary,
+    )
+
+    if _strong_expense_claim(message) or _strong_expense_day_summary(message):
+        return False
+
+    # Free-form reason updates often arrive at the confirmation screen
+    # (users add context instead of typing "yes"). Treat long non-question text
+    # as a slot correction so we can patch the draft (typically `reason`).
+    t = (message or "").strip()
+    if t and len(t) >= 12 and not t.endswith("?") and not re.search(
+        r"^(can\s+i|what|why|how|when|where|which)\b", t, re.I
+    ):
+        return True
+
     return bool(
 
         re.search(
@@ -370,6 +484,30 @@ def process_confirmation_turn(
 
         }
 
+    if wants_defer_expense_for_leave_submit(message) and not is_confirmation_yes(message):
+
+        wf = apply_leave_state(
+
+            wf, draft=d, step=None, status=STATUS_ACTIVE, review_pending=True
+
+        )
+
+        return {
+
+            "workflow_state": wf,
+
+            "merged_entities": build_merged_entities_for_engine(d),
+
+            "complete": False,
+
+            "confirmed_submit": False,
+
+            "question": build_deferred_leave_return_prompt(d, message=message),
+
+            "cancelled": False,
+
+        }
+
 
 
     edit_slot = parse_edit_slot(message)
@@ -428,13 +566,37 @@ def process_confirmation_turn(
 
     if _looks_like_slot_correction(message):
 
-        patch_draft_from_message(d, message, entities)
+        changed = patch_draft_from_message(d, message, entities)
 
         wf = apply_leave_state(
 
             wf, draft=d, step=None, status=STATUS_ACTIVE, review_pending=True
 
         )
+
+        t = (message or "").strip()
+        # Only auto-submit on "reason-like" corrections that strongly look like a leave
+        # reason (e.g. travel/ceremony). Otherwise keep the explicit "yes" confirm step.
+        reasonish = bool(
+            re.search(
+                r"\b(travel|village|ceremon|funeral|wedding)\b|"
+                r"(অনুষ্ঠান|গ্রাম|বিয়ে|জানাজা)",
+                t,
+                re.I,
+            )
+        )
+        if changed and reasonish and len(t) >= 12 and not t.endswith("?"):
+            # Treat free-form corrections (typically adding a reason) as an implicit
+            # confirmation to submit, matching legacy wizard behavior.
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(d),
+                "complete": True,
+                "confirmed_submit": True,
+                "question": None,
+                "cancelled": False,
+                "draft_patched": True,
+            }
 
         return {
 

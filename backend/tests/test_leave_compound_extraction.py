@@ -26,10 +26,16 @@ def _draft_from(msg: str, entities: dict | None = None) -> dict:
     return draft
 
 
+BN_FAMILY_LEAVE = (
+    "tomarrow ami familly er jonno bahire jabo...tai amar full day chuti lagbe..and paid hobe"
+)
+
+
 @pytest.mark.parametrize(
     "message,expected_reason",
     [
         (USER_MSG, "family program"),
+        (BN_FAMILY_LEAVE, "family"),
         ("kalke chuti lagbe family wedding er jonno unpaid", "wedding"),
         ("need leave tomorrow because of relative death unpaid", "relative death"),
         ("family program", "family program"),
@@ -53,6 +59,15 @@ def test_extract_reason_from_message(message: str, expected_reason: str):
 def test_travel_questions_are_not_reasons(message: str):
     assert extract_reason_from_message(message) is None
     assert looks_like_wizard_side_question(message)
+
+
+def test_banglish_family_jonno_prefills_reason_and_skips_reason_slot():
+    draft = _draft_from(BN_FAMILY_LEAVE)
+    assert draft.get("start_date")
+    assert draft.get("leave_payment_category") == "paid"
+    assert "family" in str(draft.get("reason") or "").lower()
+    missing = get_missing_slots(draft)
+    assert "reason" not in missing
 
 
 def test_compound_user_message_prefills_date_payment_reason():

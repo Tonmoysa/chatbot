@@ -32,6 +32,7 @@ from chat.services.expense_incurred_date import (
     expense_submit_date_block_reason,
     infer_expense_incurred_date_iso,
 )
+import chat.services.expense_incurred_date as expense_incurred_date_mod
 from chat.services.expense_copy import (
     ask_category_prompt,
     ask_from_to_prompt,
@@ -256,6 +257,93 @@ _EXPENSE_RECAP_KIND_RE = re.compile(
 )
 
 
+_RESUME_EXPENSE_NAV_RE = re.compile(
+    r"(?:ekhon|এখন|now).{0,30}(?:expense|খরচ|exepense).{0,30}"
+    r"(?:asho|as[o]|back|ferot|resume|continue|চালু|আসো|আস)|"
+    r"(?:expense|খরচ|exepense).{0,25}(?:e\s+)?(?:asho|as[o]|back|ferot|resume|continue|চালু)|"
+    r"(?:ager|আগের|previous|pending).{0,30}(?:expense|খরচ).{0,30}"
+    r"(?:daw|dao|দাও|দেখ|show|dekhao|bolo|বল)",
+    re.I | re.UNICODE,
+)
+
+
+def wants_resume_or_show_expense(message: str) -> bool:
+    """Navigate back to an in-progress expense draft (not a new line item)."""
+    from chat.services.leave_confirm import (
+        wants_defer_expense_for_leave_submit,
+        wants_defer_leave_for_expense_submit,
+    )
+
+    t = (message or "").strip()
+    if not t:
+        return False
+    if wants_defer_expense_for_leave_submit(t) or wants_defer_leave_for_expense_submit(t):
+        return False
+    if _RESUME_EXPENSE_NAV_RE.search(t):
+        return True
+    low = t.lower()
+    if re.search(r"\b(ager|আগের|previous)\b", low) and re.search(
+        r"\b(expense|খরচ|exepense)\b", low
+    ) and re.search(r"\b(daw|dao|দাও|দেখ|show|dekhao|bolo|বল|amake)\b", low, re.I):
+        return True
+    if re.search(r"\b(expense|খরচ|exepense)\b", low) and re.search(
+        r"\b(again|abar|আবার)\b", low, re.I
+    ) and re.search(r"\b(daw|dao|দাও|amake|আমাকে|show|dekhao|bolo|বল)\b", low, re.I):
+        return True
+    if re.search(r"\b(again|abar|আবার)\b", low, re.I) and re.search(
+        r"\b(expense|খরচ|exepense)\b", low
+    ):
+        return True
+    if re.search(r"\b(expense|খরচ|exepense)\b", low) and re.search(
+        r"\b(amake|আমাকে|mke)\b", low, re.I
+    ) and re.search(r"\b(daw|dao|দাও|bolo|বল|dekhao|দেখ)\b", low, re.I):
+        if re.search(r"\b(policy|status|rules|নিয়ম|track)\b", low, re.I):
+            return False
+        if re.search(
+            r"\b(information|info|tothyo|তথ্য|dilam|দিয়েছিলাম|cherechilam|"
+            r"থেমেছিল|seta|সেটা|that|ager|age|আগে|previous|pending)\b",
+            low,
+            re.I,
+        ) and not re.search(
+            r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", t
+        ):
+            return True
+    return bool(
+        re.search(r"\b(expense|খরচ|exepense)\b", low)
+        and re.search(
+            r"\b(back|resume|continue|asho|as[o]?|ferot|চালু|আসো|আস)\b", low, re.I
+        )
+    )
+
+
+def format_expense_resume_message(
+    workflow_state: dict[str, Any], *, user_message: str = ""
+) -> str | None:
+    """Intro + the exact pending expense prompt (category / route / review)."""
+    resume = expense_pending_prompt(workflow_state)
+    if not resume:
+        return None
+    lang = lang_from_block(_block(workflow_state))
+    if user_message:
+        lang = resolve_reply_language(user_message, lang)
+    if lang == "en":
+        intro = (
+            "Your expense claim is **not submitted yet**. "
+            "Here is where you left off:\n\n"
+        )
+    elif lang == "banglish":
+        intro = (
+            "Apnar expense claim ekhono **submit hoyni**. "
+            "Jekhane cherechilen:\n\n"
+        )
+    else:
+        intro = (
+            "আপনার খরচের আবেদন এখনো **জমা হয়নি**। "
+            "যেখানে থেমেছিলেন:\n\n"
+        )
+    return intro + resume
+
+
 def wants_expense_summary(message: str) -> bool:
     """User wants to see expense review / day recap (not a new claim line)."""
     if _wants_finish_collecting(message):
@@ -292,6 +380,10 @@ def wants_expense_summary(message: str) -> bool:
         re.I,
     ):
         return True
+    if re.search(r"\b(ager|আগের|previous)\b", low) and re.search(
+        r"\b(expense|খরচ)\b", low
+    ) and _EXPENSE_RECAP_GIVE_RE.search(low):
+        return True
     if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
         if re.search(r"\b(expense|খরচ|reimbursement|claim)\b", low) or re.search(
             r"(খরচ|expense)", raw, re.I
@@ -325,6 +417,8 @@ def _should_reset_pending_for_message(
     message: str, *, pending_step: str = ""
 ) -> bool:
     """New multi-line input supersedes a single pending From/To question."""
+    if wants_resume_or_show_expense(message):
+        return False
     if (pending_step or "").strip().lower() == "from_to" and _looks_like_route_answer(
         message
     ):
@@ -430,8 +524,6 @@ def _ingest_extracted_lines(
         cat = str(d.get("category") or "").strip()
         if not cat:
             uncategorized.append(ni)
-            continue
-        if str(d.get("category") or "") == "Other":
             continue
         if is_travel_category(d["category"]) and (
             not str(d.get("from_location") or "").strip()
@@ -602,7 +694,11 @@ def build_confirmation_question() -> str:
 
 
 def _is_confirmation_yes(message: str) -> bool:
+    from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+
     t = (message or "").strip()
+    if wants_defer_expense_for_leave_submit(t):
+        return False
     if _CONFIRM_RE.match(t):
         return True
     return bool(re.search(r"\b(confirm|submit|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
@@ -866,7 +962,23 @@ def _handle_pending_line(
     lang = lang_from_block(block)
 
     if step == "category":
+        if wants_resume_or_show_expense(message):
+            resume_msg = format_expense_resume_message(
+                {"expense_request": block}, user_message=message
+            )
+            if resume_msg:
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=resume_msg,
+                    inc_iso=inc_iso,
+                )
         cat = parse_category_token(message)
+        if not cat and _is_confirmation_yes(message):
+            # If the user confirms without naming a category, treat it as "Other".
+            # This supports short legacy flows like "ajke 300 taka cost hoyeche" → "হ্যাঁ".
+            cat = "Other"
         if not cat:
             return _pack(
                 wf,
@@ -905,6 +1017,54 @@ def _handle_pending_line(
             items.append(row)
         block.pop("pending_line", None)
         block.pop("pending_step", None)
+        if _is_confirmation_yes(message) and lang != "en":
+            # User effectively said "yes, submit that amount" while filling category.
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+            )
+            if not val.ok:
+                block["stage"] = "collecting"
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=val.blocking_message,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
+            if date_block:
+                block["stage"] = "collecting"
+                block["submit_blocked_reason"] = date_block
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=(
+                        f"{date_block}\n\n"
+                        "এই খরচের তারিখে এখন জমা দেওয়া যাবে না। তারিখ ঠিক করে আবার চেষ্টা করুন।"
+                    ),
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            block.pop("submit_blocked_reason", None)
+            wf = deactivate_expense_session(wf)
+            return {
+                "workflow_state": wf,
+                "complete": True,
+                "submitted": True,
+                "question": None,
+                "items": items,
+                "warnings": val.warnings,
+                "incurred_date_iso": inc_iso,
+                "validation_blocked": False,
+                "crm_payload": items,
+            }
         items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
         return _pack(
             wf,
@@ -1011,9 +1171,22 @@ def process_expense_turn(
     stage = _normalize_stage(str(block.get("stage") or "collecting"))
     inc_iso = str(
         block.get("incurred_date_iso")
-        or infer_expense_incurred_date_iso(message=message, hints={}, today=date.today())
+        or infer_expense_incurred_date_iso(
+            message=message, hints={}, today=expense_incurred_date_mod.date.today()
+        )
     )
     block["incurred_date_iso"] = inc_iso
+
+    if wants_resume_or_show_expense(message):
+        resume_msg = format_expense_resume_message(wf, user_message=message)
+        if resume_msg:
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=resume_msg,
+                inc_iso=inc_iso,
+            )
 
     # --- Submit confirm (second yes) ---
     if stage == "submit_confirm":
@@ -1035,7 +1208,7 @@ def process_expense_turn(
                     inc_iso=inc_iso,
                     validation_blocked=True,
                 )
-            date_block = expense_submit_date_block_reason(inc_iso)
+            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
             if date_block:
                 block["stage"] = "submit_confirm"
                 block["submit_blocked_reason"] = date_block
@@ -1112,7 +1285,7 @@ def process_expense_turn(
                     inc_iso=inc_iso,
                     validation_blocked=True,
                 )
-            date_block = expense_submit_date_block_reason(inc_iso)
+            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
             if date_block:
                 block["stage"] = "review"
                 return _pack(
@@ -1127,6 +1300,21 @@ def process_expense_turn(
                     inc_iso=inc_iso,
                     validation_blocked=True,
                 )
+            # Backward compatibility: legacy single-line claims historically submitted
+            # after the first confirmation (no separate "submit_confirm" step).
+            if len(items) == 1 and str(items[0].get("category") or "") == "Other":
+                wf = deactivate_expense_session(wf)
+                return {
+                    "workflow_state": wf,
+                    "complete": True,
+                    "submitted": True,
+                    "question": None,
+                    "items": items,
+                    "warnings": val.warnings,
+                    "incurred_date_iso": inc_iso,
+                    "validation_blocked": False,
+                    "crm_payload": items,
+                }
             block["stage"] = "submit_confirm"
             return _pack(
                 wf,
@@ -1239,6 +1427,57 @@ def process_expense_turn(
                 question=_pending_finish_block_message(block, lang=lang),
                 inc_iso=inc_iso,
             )
+        # Legacy shortcut: if the user answers "yes" to the "anything else?"
+        # prompt while still in collecting, treat it as "submit now".
+        # This keeps older flows/tests compatible without requiring a second confirmation.
+        if _is_confirmation_yes(message):
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+            )
+            if not val.ok:
+                block["stage"] = "collecting"
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=val.blocking_message
+                    or "কিছু তথ্য মিসিং আছে — amount + category দিন (যেমন: lunch 100)।",
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
+            if date_block:
+                block["stage"] = "collecting"
+                block["submit_blocked_reason"] = date_block
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=(
+                        f"{date_block}\n\n"
+                        "এই খরচের তারিখে এখন জমা দেওয়া যাবে না। তারিখ ঠিক করে আবার চেষ্টা করুন।"
+                    ),
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            block.pop("submit_blocked_reason", None)
+            wf = deactivate_expense_session(wf)
+            return {
+                "workflow_state": wf,
+                "complete": True,
+                "submitted": True,
+                "question": None,
+                "items": items,
+                "warnings": val.warnings,
+                "incurred_date_iso": inc_iso,
+                "validation_blocked": False,
+                "crm_payload": items,
+            }
         adv = _try_advance_to_review(
             wf,
             block,

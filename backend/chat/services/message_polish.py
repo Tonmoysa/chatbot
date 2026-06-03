@@ -77,23 +77,33 @@ def collapse_pdf_line_breaks(text: str) -> str:
 def normalize_markdown_bullets(text: str) -> str:
     """Convert PDF bullets to markdown list markers the UI renderer understands."""
     lines: list[str] = []
+    pending_bullet = False
     for line in text.split("\n"):
         s = line.strip()
         if s in ("●", "•", "◦", "▪"):
+            pending_bullet = True
             continue
         m = _BULLET_START.match(s)
         if m:
             body = (m.group(1) or "").strip()
             lines.append(f"- {body}" if body else "-")
+            pending_bullet = False
             continue
         sm = _SECTION_START.match(s)
         if sm and not sm.group(2).strip():
             lines.append(f"**{sm.group(1)}.**")
+            pending_bullet = False
             continue
         if sm and len(sm.group(2)) < 60:
             lines.append(f"**{sm.group(1)}. {sm.group(2).strip()}**")
+            pending_bullet = False
             continue
-        lines.append(line)
+        if pending_bullet and s:
+            lines.append(f"- {s}")
+            pending_bullet = False
+        else:
+            lines.append(line)
+            pending_bullet = False
     return "\n".join(lines)
 
 

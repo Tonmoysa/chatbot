@@ -26,7 +26,7 @@ from knowledge_base.services.sanitization import (
 logger = logging.getLogger("hr_chatbot")
 
 _NOT_FOUND = (
-    "I could not find a clear answer to that question in your uploaded policies. "
+    "I could not find this policy (or a clear answer) in your uploaded policies. "
     "Try asking with the policy name or topic (for example, \"expense policy\" or "
     "\"daily expense limit\"), or contact HR for confirmation."
 )

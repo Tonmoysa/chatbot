@@ -63,6 +63,8 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "meal": "Lunch",
     "transport": "Bus",
     "travel": "Bus",
+    "other": "Other",
+    "misc": "Other",
 }
 
 _AMOUNT_RE = re.compile(
@@ -73,12 +75,14 @@ _AMOUNT_RE = re.compile(
 _CATEGORY_TOKEN = (
     r"(?:lunch|lanch|luch|lunc|snacks?|bus|rickshaw|riksha|train|bike|bicycle|"
     r"cng|auto|metro(?:\s*rail)?|uber|cab|taxi|food|meal|transport|travel|"
+    r"other|misc|"
     r"খাওয়া|খাবার|বাস|রিকশা|ট্রেন|সাইকেল|সিএনজি|মেট্রো)"
 )
 
 # Words between category and amount in natural BN/EN (e.g. "bus vara 30 taka").
 _CAT_TO_AMT_GAP = (
     r"(?:vara|vhara|bhara|fare|ভাড়া|ভাড়ায়|খরচ|করেছি|করেছ|হয়েছে|"
+    r"expense|expenses|exp|"
     r"e|te|এ|তে|a|er|for|on|এর|এ)"
 )
 

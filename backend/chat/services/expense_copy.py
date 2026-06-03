@@ -108,7 +108,7 @@ def review_head(incurred_date_iso: str, lang: ReplyLang) -> str:
     if lang == "en":
         base = "**Daily expense — review**"
     elif lang == "banglish":
-        base = "**Daily expense — review**"
+        base = "**দৈনিক খরচ — পর্যালোচনা**"
     else:
         base = "**দৈনিক খরচ — পর্যালোচনা**"
     if incurred_date_iso:
@@ -120,7 +120,7 @@ def total_label(lang: ReplyLang) -> str:
     if lang == "en":
         return "Total"
     if lang == "banglish":
-        return "Mot"
+        return "মোট"
     return "মোট"
 
 

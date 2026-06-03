@@ -49,8 +49,20 @@ def _strong_hr_policy(message: str) -> bool:
 
 def _strong_expense_claim(message: str) -> bool:
     """Banglish / informal cost lines; do not match expense *status* or *summary* queries."""
-    if wants_expense_summary(message):
+    from chat.services.expense_workflow import wants_resume_or_show_expense
+
+    if wants_expense_summary(message) or wants_resume_or_show_expense(message):
         return False
+    # Structured category+amount lines (e.g. "lunch 100, train 60 uttora to mirpur")
+    # should be treated as an expense claim even if the user doesn't say "expense/cost".
+    try:
+        from chat.services.expense_extraction import extract_expense_items
+
+        ext = extract_expense_items(message or "")
+        if ext.items:
+            return True
+    except Exception:
+        pass
     low = (message or "").lower()
     if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
         r"\b(status|track|where)\b", low

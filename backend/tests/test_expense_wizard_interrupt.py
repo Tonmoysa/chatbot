@@ -15,10 +15,15 @@ from chat.services.expense_workflow import (
     wants_expense_summary,
 )
 from chat.services.intent_detector import _looks_like_chitchat
+from chat.services.leave_confirm import is_confirmation_yes, wants_defer_leave_for_expense_submit
+from chat.services.leave_fsm import read_leave_state
+from chat.services.leave_workflow import is_leave_in_progress
 from chat.services.orchestrator import (
     ChatOrchestrator,
     _detect_intent_during_expense_workflow,
+    _detect_intent_during_leave_workflow,
 )
+from chat.services.workflow_suspend import has_suspended_expense, suspend_expense_for_workflow_switch
 
 COMPANY_ID = "company-a"
 
@@ -296,6 +301,7 @@ def test_double_yes_submits_expense():
     assert "জমা" in out["response"]["message"] or "EXP-" in out["response"]["message"]
 
 
+@pytest.mark.django_db
 def test_leave_submit_status_during_expense_wizard():
     from chat.services.leave_fsm import mark_submitted
 
@@ -340,3 +346,110 @@ def test_leave_submit_status_during_expense_wizard():
     assert "PHP-LEAVE-STATUS1" in msg
     assert "জমা হয়েছে" in msg
     assert "Company policy: submit each day's expense" not in msg
+
+
+def test_defer_expense_submit_is_not_leave_confirmation_yes():
+    msg = "expense ta age submit koro"
+    assert wants_defer_leave_for_expense_submit(msg)
+    assert not is_confirmation_yes(msg)
+
+
+def test_leave_confirm_gate_defers_to_expense_when_parked():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "review_pending": True,
+        "draft": {
+            "start_date": "2026-06-03",
+            "leave_payment_category": "paid",
+            "day_scope": "full",
+            "reason": "family",
+        },
+        "suspended_expense": {
+            "expense_request": {
+                "active": True,
+                "stage": "submit_confirm",
+                "items": [{"category": "Lunch", "amount": 50}],
+            }
+        },
+    }
+    out = _detect_intent_during_leave_workflow(
+        "expense ta age submit koro",
+        wf,
+        balance_probe=False,
+    )
+    assert out["intent"] == INTENT_EXPENSE_CLAIM
+    assert "defer_expense" in out.get("source", "")
+
+
+@pytest.mark.django_db
+def test_defer_expense_submit_at_leave_review_submits_expense_not_leave(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    orch = ChatOrchestrator()
+    emp = "defer-exp-submit-pytest"
+    wf: dict = {}
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="lunch 50, bus 30 mirpur to baridhara, snack 100",
+    )
+    for _ in range(8):
+        stage = (pack.get("workflow_state", {}).get("expense_request") or {}).get("stage")
+        if stage == "review":
+            pack = process_expense_turn(
+                workflow_state=pack["workflow_state"],
+                message="শেষ",
+            )
+            break
+        pack = process_expense_turn(
+            workflow_state=pack["workflow_state"],
+            message="শেষ",
+        )
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="yes",
+    )
+    assert (pack.get("workflow_state", {}).get("expense_request") or {}).get("stage") == "submit_confirm"
+
+    leave_wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "review_pending": True,
+        "draft": {
+            "start_date": "2026-06-03",
+            "end_date": "2026-06-03",
+            "leave_payment_category": "paid",
+            "day_scope": "full",
+            "reason": "family",
+            "leave_type": "casual",
+        },
+    }
+    leave_wf = suspend_expense_for_workflow_switch(
+        {**leave_wf, "expense_request": pack["workflow_state"]["expense_request"]}
+    )
+    assert has_suspended_expense(leave_wf)
+    assert read_leave_state(leave_wf).get("review_pending")
+
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID,
+        session_id="defer-exp-sess",
+        employee_id=emp,
+    )
+    session.workflow_state = leave_wf
+    session.save(update_fields=["workflow_state", "updated_at"])
+
+    out = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="expense ta age submit koro",
+        session_id=session.session_id,
+        employee_id=emp,
+        trace_id="defer-exp-submit",
+    )
+    assert out["intent"] == INTENT_EXPENSE_CLAIM
+    assert out["decision"]["outcome"] == "SUBMITTED"
+    assert "PHP-LEAVE" not in (out["response"]["message"] or "")
+    session.refresh_from_db()
+    assert read_leave_state(session.workflow_state).get("review_pending")
+    assert is_leave_in_progress(session.workflow_state)
