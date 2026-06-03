@@ -403,7 +403,53 @@ def process_leave_turn(
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message
 
-    if is_awaiting_leave_confirmation(wf):
+    from chat.services.leave_confirm import (
+        SLOT_EDIT_MENU,
+        _begin_edit_slot,
+        _finish_edit_return_review,
+        build_confirmation_prompt,
+        is_edit_abort,
+        parse_edit_field_choice,
+        process_confirmation_turn,
+        restore_leave_review_from_edit,
+        try_apply_inline_edit_value,
+        wants_navigate_back_to_leave_review,
+        wants_resume_or_show_expense,
+    )
+    from chat.services.leave_fsm import KEY_EDIT_SNAPSHOT
+    from chat.services.expense_workflow import (
+        format_expense_resume_message,
+        resume_expense_session,
+    )
+    from chat.services.workflow_suspend import (
+        has_suspended_expense,
+        suspend_leave_for_workflow_switch,
+    )
+
+    if wants_resume_or_show_expense(message) and has_suspended_expense(wf):
+        wf = suspend_leave_for_workflow_switch(wf)
+        wf = resume_expense_session(wf)
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": format_expense_resume_message(wf, user_message=message),
+        }
+
+    if wf.get(KEY_EDIT_SNAPSHOT) and (
+        is_edit_abort(message) or wants_navigate_back_to_leave_review(message)
+    ):
+        wf, snap = restore_leave_review_from_edit(wf)
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(snap),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_confirmation_prompt(snap),
+        }
+
+    if is_awaiting_leave_confirmation(wf) or st.get("step") == SLOT_EDIT_MENU:
         return process_confirmation_turn(
             workflow_state=wf,
             message=message,
@@ -415,7 +461,22 @@ def process_leave_turn(
     policy = get_company_leave_policy(company_id or "default")
     extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
 
-    if pending_slot and _is_direct_slot_answer(message, pending_slot):
+    in_edit_flow = bool(wf.get(KEY_EDIT_SNAPSHOT)) or st.get("step") == SLOT_EDIT_MENU
+    switch_slot = (
+        parse_edit_field_choice(message)
+        if in_edit_flow
+        else None
+    )
+    if switch_slot and switch_slot != pending_slot:
+        pack = _begin_edit_slot(wf, draft, switch_slot)
+        d2 = dict(read_leave_state(pack["workflow_state"]).get("draft") or draft)
+        if try_apply_inline_edit_value(d2, switch_slot, message):
+            return _finish_edit_return_review(pack["workflow_state"], d2)
+        return pack
+
+    if pending_slot and try_apply_inline_edit_value(draft, pending_slot, message):
+        pass
+    elif pending_slot and _is_direct_slot_answer(message, pending_slot):
         apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
     else:
         before = dict(draft)

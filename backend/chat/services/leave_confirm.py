@@ -13,21 +13,14 @@ from typing import Any
 
 
 from chat.services.leave_fsm import (
-
+    KEY_EDIT_SNAPSHOT,
     STATUS_ACTIVE,
-
     apply_leave_state,
-
     clear_leave_flow,
-
     is_awaiting_leave_confirmation,
-
     normalize_workflow_state,
-
     read_leave_state,
-
 )
-
 from chat.services.leave_draft_utils import format_select_leave_label
 from chat.services.leave_slots import (
     SLOT_DATES,
@@ -37,6 +30,8 @@ from chat.services.leave_slots import (
     SLOT_SCOPE,
     generate_question,
 )
+
+SLOT_EDIT_MENU = "edit_menu"
 
 
 
@@ -158,7 +153,7 @@ def build_confirmation_prompt(draft: dict[str, Any]) -> str:
 
         "• **yes** — জমা দিন\n"
 
-        "• **edit** — কোনো তথ্য বদলান (যেমন: edit date)\n"
+        "• **edit** — কোনো তথ্য বদলান (তারিখ, paid/unpaid, পুরো/হাফ দিন, কারণ)\n"
 
         "• **cancel** — বাতিল"
 
@@ -279,21 +274,267 @@ def is_confirmation_cancel(message: str) -> bool:
 
 
 
-def parse_edit_slot(message: str) -> str | None:
-
-    if not _EDIT_RE.search(message or ""):
-
+def parse_edit_field_choice(message: str) -> str | None:
+    """Map user text to a slot id (edit menu or phrases like ``date`` / ``তারিখ``)."""
+    low = (message or "").strip().lower()
+    if not low:
         return None
-
-    low = (message or "").lower()
-
     for pattern, slot in _FIELD_ALIASES:
-
         if re.search(pattern, low, re.I):
-
             return slot
-
+    if re.search(r"^(tarikh|tarik|date|dates|din|day|days)$", low):
+        return SLOT_DATES
+    if re.search(r"^(paid|unpaid|payment|salary|select\s*leave)$", low):
+        return SLOT_PAYMENT
+    if re.search(r"^(reason|why|cause|kar[oa]n)$", low):
+        return SLOT_REASON
+    if re.search(r"^(full|half|scope|duration)$", low):
+        return SLOT_SCOPE
+    if re.search(r"^(type|leave\s*type|sick|casual|annual)$", low):
+        return SLOT_LEAVE_TYPE
     return None
+
+
+def parse_edit_slot(message: str) -> str | None:
+    if not _EDIT_RE.search(message or ""):
+        return None
+    return parse_edit_field_choice(message)
+
+
+_EDIT_ABORT_RE = re.compile(
+    r"(?:"
+    r"edit\s*(?:korbo\s*)?na|edit\s*chai\s*na|edit\s*nah|na\s*edit|"
+    r"edit\s*bondho|edit\s*cancel|cancel\s*edit|"
+    r"back\s*to\s*review|^(?:back|nevermind|never\s*mind)$|"
+    r"ager\s*(?:ta|gula|summary)|আগের\s*(?:টা|তথ্য|সারাংশ)|"
+    r"বদলাব\s*না|বদলাতে\s*চাই\s*না|edit\s*korbo\s*nah|"
+    r"ঠিক\s*আছে.*(?:edit|বদল)|(?:edit|বদল).*ঠিক\s*আছে"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def is_edit_abort(message: str) -> bool:
+    """User leaves edit mode and wants the previous review summary back."""
+    t = (message or "").strip()
+    if not t:
+        return False
+    if is_confirmation_yes(t) or is_confirmation_cancel(t):
+        return False
+    return bool(_EDIT_ABORT_RE.search(t))
+
+
+def wants_navigate_back_to_leave_review(message: str) -> bool:
+    """Return to the leave review screen (not answering the current slot)."""
+    t = (message or "").strip()
+    if not t:
+        return False
+    if wants_resume_or_show_expense(t):
+        return False
+    from chat.services.workflow_suspend import wants_resume_suspended_leave
+
+    return wants_resume_suspended_leave(t) or is_edit_abort(t)
+
+
+def try_apply_inline_edit_value(
+    draft: dict[str, Any], slot: str, message: str
+) -> bool:
+    """Apply half/full, paid/unpaid, or reason text when included with the field pick."""
+    from chat.services.leave_workflow import (
+        _force_scope_from_message,
+        _infer_payment_category,
+        _reason_from_message,
+    )
+
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if slot == SLOT_SCOPE:
+        return _force_scope_from_message(raw, draft)
+    if slot in (SLOT_PAYMENT, SLOT_LEAVE_TYPE):
+        before = draft.get("leave_payment_category")
+        _infer_payment_category(raw, draft, force=True)
+        return bool(draft.get("leave_payment_category")) and (
+            draft.get("leave_payment_category") != before
+            or before is None
+        )
+    if slot == SLOT_REASON:
+        if low in {"reason", "কারণ", "kar", "keno", "why", "cause"}:
+            return False
+        reason = _reason_from_message(raw)
+        if reason and len(reason.strip()) >= 3:
+            draft["reason"] = reason.strip()
+            draft.pop("_reason_implied", None)
+            return True
+        cleaned = re.sub(
+            r"^(?:reason|কারণ|kar[oa]n)\s*[:,-]?\s*",
+            "",
+            raw,
+            flags=re.I,
+        ).strip()
+        if len(cleaned) >= 4:
+            draft["reason"] = cleaned
+            draft.pop("_reason_implied", None)
+            return True
+    return False
+
+
+def wants_resume_or_show_expense(message: str) -> bool:
+    from chat.services.expense_workflow import wants_resume_or_show_expense as _w
+
+    return _w(message)
+
+
+def _finish_edit_return_review(
+    workflow_state: dict[str, Any], draft: dict[str, Any]
+) -> dict[str, Any]:
+    from chat.services.leave_fsm import mark_review_pending
+    from chat.services.leave_workflow import build_merged_entities_for_engine
+
+    wf = normalize_workflow_state(workflow_state)
+    wf.pop(KEY_EDIT_SNAPSHOT, None)
+    d = dict(draft)
+    wf = mark_review_pending(wf, d)
+    return {
+        "workflow_state": wf,
+        "merged_entities": build_merged_entities_for_engine(d),
+        "complete": False,
+        "confirmed_submit": False,
+        "question": build_confirmation_prompt(d),
+        "cancelled": False,
+    }
+
+
+def build_edit_field_menu_prompt(draft: dict[str, Any], *, message: str = "") -> str:
+    from chat.services.translator import detect_user_language
+
+    lang = detect_user_language(message)
+    select_leave = format_select_leave_label(draft)
+    scope = str(draft.get("day_scope") or "—")
+    start = str(draft.get("start_date") or "—")
+    end = str(draft.get("end_date") or start)
+    reason = str(draft.get("reason") or "—")
+    scope_label = "পুরো দিন" if scope == "full" else "হাফ দিন" if scope == "half" else scope
+    date_line = start if end == start else f"{start} → {end}"
+
+    if lang == "bn":
+        return (
+            "ঠিক আছে — **কোন তথ্য বদলাতে** চান? নিচের যেকোনোটা লিখুন:\n\n"
+            "• **তারিখ** — `date` / `তারিখ`\n"
+            "• **Select Leave (paid/unpaid)** — `payment` / `paid`\n"
+            "• **পুরো বা হাফ দিন** — `scope` / `full` / `half`\n"
+            "• **কারণ** — `reason` / `কারণ`\n\n"
+            f"**এখন যা আছে:** তারিখ {date_line} · {select_leave} · {scope_label} · কারণ: {reason}\n\n"
+            "বদলাতে চান না হলে **`back`** বা **`edit korbo na`** লিখুন — "
+            "আগের পর্যালোচনায় ফিরে যাবেন।"
+        )
+    if lang == "banglish":
+        return (
+            "Thik ache — **kon field change** korte chan? Ekta likhun:\n\n"
+            "• **date** / tarikh\n"
+            "• **payment** / paid / unpaid\n"
+            "• **scope** / full / half\n"
+            "• **reason**\n\n"
+            f"Ekhon: {date_line} · {select_leave} · {scope_label} · reason: {reason}\n\n"
+            "Change na chaile **`back`** ba **`edit korbo na`** — review e fire jaben."
+        )
+    return (
+        "Sure — **which field would you like to change?** Reply with one of:\n\n"
+        "• **date(s)** — `date`\n"
+        "• **paid / unpaid** — `payment`\n"
+        "• **full or half day** — `scope`\n"
+        "• **reason** — `reason`\n\n"
+        f"**Current:** {date_line} · {select_leave} · {scope_label} · reason: {reason}\n\n"
+        "To keep everything as-is, reply **`back`** or **`no edit`** — "
+        "I'll show your review again."
+    )
+
+
+def restore_leave_review_from_edit(
+    workflow_state: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Restore draft + review screen after edit menu or mid-slot abort."""
+    return _restore_edit_snapshot(workflow_state)
+
+
+def _restore_edit_snapshot(workflow_state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    wf = normalize_workflow_state(workflow_state)
+    snap = dict(wf.get(KEY_EDIT_SNAPSHOT) or read_leave_state(wf).get("draft") or {})
+    wf.pop(KEY_EDIT_SNAPSHOT, None)
+    wf = apply_leave_state(
+        wf, draft=snap, step=None, status=STATUS_ACTIVE, review_pending=True
+    )
+    return wf, snap
+
+
+def _begin_edit_slot(
+    workflow_state: dict[str, Any],
+    draft: dict[str, Any],
+    slot: str,
+) -> dict[str, Any]:
+    from chat.services.leave_workflow import build_merged_entities_for_engine
+
+    d = dict(draft)
+    clear_slot_for_edit(d, slot)
+    wf = normalize_workflow_state(workflow_state)
+    snap = wf.get(KEY_EDIT_SNAPSHOT)
+    wf = apply_leave_state(
+        wf, draft=d, step=slot, status=STATUS_ACTIVE, review_pending=False
+    )
+    if snap:
+        wf[KEY_EDIT_SNAPSHOT] = snap
+    q = generate_question(slot, d, remaining=1)
+    return {
+        "workflow_state": wf,
+        "merged_entities": build_merged_entities_for_engine(d),
+        "complete": False,
+        "confirmed_submit": False,
+        "question": q,
+        "cancelled": False,
+    }
+
+
+def _process_edit_menu_turn(
+    *,
+    workflow_state: dict[str, Any],
+    message: str,
+    draft: dict[str, Any],
+) -> dict[str, Any]:
+    from chat.services.leave_workflow import build_merged_entities_for_engine
+
+    wf = normalize_workflow_state(workflow_state)
+    d = dict(draft)
+
+    if is_edit_abort(message):
+        wf, snap = _restore_edit_snapshot(wf)
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(snap),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_confirmation_prompt(snap),
+            "cancelled": False,
+        }
+
+    slot = parse_edit_field_choice(message)
+    if slot:
+        pack = _begin_edit_slot(wf, d, slot)
+        d2 = dict(read_leave_state(pack["workflow_state"]).get("draft") or d)
+        if try_apply_inline_edit_value(d2, slot, message):
+            return _finish_edit_return_review(pack["workflow_state"], d2)
+        if patch_draft_from_message(d2, message, None):
+            return _finish_edit_return_review(pack["workflow_state"], d2)
+        return pack
+
+    return {
+        "workflow_state": wf,
+        "merged_entities": build_merged_entities_for_engine(d),
+        "complete": False,
+        "confirmed_submit": False,
+        "question": build_edit_field_menu_prompt(d, message=message),
+        "cancelled": False,
+    }
 
 
 
@@ -462,7 +703,23 @@ def process_confirmation_turn(
 
     d = dict(draft if draft is not None else st.get("draft") or {})
 
+    if st.get("step") == SLOT_EDIT_MENU:
+        return _process_edit_menu_turn(
+            workflow_state=wf, message=message, draft=d
+        )
 
+    if wf.get(KEY_EDIT_SNAPSHOT) and wants_navigate_back_to_leave_review(message):
+        wf, snap = _restore_edit_snapshot(wf)
+        from chat.services.leave_workflow import build_merged_entities_for_engine
+
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(snap),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_confirmation_prompt(snap),
+            "cancelled": False,
+        }
 
     if is_confirmation_cancel(message):
 
@@ -512,34 +769,26 @@ def process_confirmation_turn(
 
     edit_slot = parse_edit_slot(message)
 
-    if edit_slot or (not is_confirmation_yes(message) and _EDIT_RE.search(message or "")):
+    if edit_slot:
+        return _begin_edit_slot(wf, d, edit_slot)
 
-        slot = edit_slot or SLOT_DATES
-
-        clear_slot_for_edit(d, slot)
-
+    if not is_confirmation_yes(message) and _EDIT_RE.search(message or ""):
+        snap = dict(d)
         wf = apply_leave_state(
-
-            wf, draft=d, step=slot, status=STATUS_ACTIVE, review_pending=False
-
+            wf,
+            draft=d,
+            step=SLOT_EDIT_MENU,
+            status=STATUS_ACTIVE,
+            review_pending=False,
         )
-
-        q = generate_question(slot, d, remaining=1)
-
+        wf[KEY_EDIT_SNAPSHOT] = snap
         return {
-
             "workflow_state": wf,
-
             "merged_entities": build_merged_entities_for_engine(d),
-
             "complete": False,
-
             "confirmed_submit": False,
-
-            "question": q,
-
+            "question": build_edit_field_menu_prompt(d, message=message),
             "cancelled": False,
-
         }
 
 

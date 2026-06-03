@@ -260,9 +260,12 @@ _EXPENSE_RECAP_KIND_RE = re.compile(
 _RESUME_EXPENSE_NAV_RE = re.compile(
     r"(?:ekhon|এখন|now).{0,30}(?:expense|খরচ|exepense).{0,30}"
     r"(?:asho|as[o]|back|ferot|resume|continue|চালু|আসো|আস)|"
-    r"(?:expense|খরচ|exepense).{0,25}(?:e\s+)?(?:asho|as[o]|back|ferot|resume|continue|চালু)|"
+    r"(?:expense|খরচ|exepense).{0,25}(?:e\s+)?(?:asho|as[o]|back|ferot|resume|continue|চালু)"
+    r"(?:\s*(?:koro|kor|কর|দাও|dao|daw))?|"
     r"(?:ager|আগের|previous|pending).{0,30}(?:expense|খরচ).{0,30}"
-    r"(?:daw|dao|দাও|দেখ|show|dekhao|bolo|বল)",
+    r"(?:daw|dao|দাও|দেখ|show|dekhao|bolo|বল)|"
+    r"(?:^|\b)(?:expense|খরচ|exepense)\s+e\s+(?:back|asho|as[o]|ferot|return|resume)"
+    r"(?:\s*(?:koro|kor|কর|দাও|dao|daw))?",
     re.I | re.UNICODE,
 )
 

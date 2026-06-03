@@ -242,6 +242,151 @@ def test_compound_paid_sick_full_day_fills_all_slots(monkeypatch):
     assert "হাফ" not in (out.get("question") or "") or out.get("complete") is False
 
 
+def test_bare_edit_shows_field_menu_not_date_prompt():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-04",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": dict(draft),
+        "review_pending": True,
+    }
+    out = process_confirmation_turn(
+        workflow_state=wf,
+        message="edit",
+        draft=dict(draft),
+    )
+    q = out.get("question") or ""
+    assert "কোন তারিখ" not in q
+    assert "কোন তথ্য বদলাতে" in q or "which field" in q.lower()
+    st = read_leave_state(out["workflow_state"])
+    assert st.get("step") == "edit_menu"
+
+
+def test_edit_abort_restores_review_summary():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-04",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": dict(draft),
+        "review_pending": True,
+    }
+    mid = process_confirmation_turn(
+        workflow_state=wf,
+        message="edit",
+        draft=dict(draft),
+    )
+    out = process_confirmation_turn(
+        workflow_state=mid["workflow_state"],
+        message="edit korbo na",
+        draft=dict(draft),
+    )
+    assert "জমা দেবেন" in (out.get("question") or "")
+    assert read_leave_state(out["workflow_state"]).get("review_pending") is True
+    assert out["workflow_state"].get("leave_edit_snapshot") is None
+
+
+def test_edit_menu_pick_date_then_asks_dates():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-04",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": dict(draft),
+        "review_pending": True,
+    }
+    mid = process_confirmation_turn(
+        workflow_state=wf,
+        message="edit",
+        draft=dict(draft),
+    )
+    out = process_confirmation_turn(
+        workflow_state=mid["workflow_state"],
+        message="date",
+        draft=dict(draft),
+    )
+    assert "তারিখ" in (out.get("question") or "").lower() or "date" in (out.get("question") or "").lower()
+
+
+def test_edit_scope_step_reason_switches_field():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-04",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": dict(draft),
+        "step": "day_scope",
+        "leave_edit_snapshot": dict(draft),
+    }
+    from chat.services.leave_workflow import process_leave_turn
+
+    out = process_leave_turn(
+        workflow_state=wf,
+        message="reason",
+        entities={},
+        company_id="company-a",
+    )
+    q = out.get("question") or ""
+    assert "Reason" in q or "reason" in q.lower()
+    assert "Full Day" not in q or "Half Day" not in q
+
+
+def test_edit_menu_half_day_applies_without_scope_reask():
+    draft = {
+        "leave_type": "sick",
+        "leave_payment_category": "paid",
+        "day_scope": "full",
+        "start_date": "2026-06-04",
+        "end_date": "2026-06-04",
+        "reason": "অসুস্থতা / sick leave",
+    }
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": dict(draft),
+        "review_pending": True,
+    }
+    mid = process_confirmation_turn(
+        workflow_state=wf, message="edit", draft=dict(draft)
+    )
+    from chat.services.leave_workflow import process_leave_turn
+
+    out = process_leave_turn(
+        workflow_state=mid["workflow_state"],
+        message="half day",
+        entities={},
+        company_id="company-a",
+    )
+    d = read_leave_state(out["workflow_state"]).get("draft") or {}
+    assert d.get("day_scope") == "half"
+    assert "জমা দেবেন" in (out.get("question") or "")
+
+
 def test_review_half_day_correction_updates_scope():
     draft = {
         "leave_type": "sick",

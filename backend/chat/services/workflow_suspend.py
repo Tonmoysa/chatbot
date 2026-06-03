@@ -8,11 +8,13 @@ Snapshots live in ``suspended_leave`` / ``suspended_expense`` on workflow_state.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from chat.services.expense_workflow import clone_workflow_state as clone_expense_wf
 from chat.services.leave_fsm import (
     ACTIVE_FLOW_LEAVE,
+    KEY_EDIT_SNAPSHOT,
     STATUS_ACTIVE,
     STATUS_PAUSED,
     apply_leave_state,
@@ -23,6 +25,46 @@ from chat.services.leave_fsm import (
 
 KEY_SUSPENDED_LEAVE = "suspended_leave"
 KEY_SUSPENDED_EXPENSE = "suspended_expense"
+
+# Banglish / Bengali / English — user phrasing varies; keep patterns broad.
+_NAV_VERB = (
+    r"(?:back|return|resume|asho|as[o]|ferot|ফির|আস|চালু|continue|jao|যা|"
+    r"e\s+back|e\s+asho|e\s+as[o])"
+)
+_RESUME_SUSPENDED_LEAVE_RE = re.compile(
+    r"(?:"
+    rf"(?:leave|chuti|chhuti|chutti|ছুটি)(?:\s*(?:request|form|abedon|application|আবেদন))?"
+    rf".{{0,35}}{_NAV_VERB}(?:\s*(?:koro|kor|কর|দাও|dao|daw))?|"
+    rf"{_NAV_VERB}.{{0,30}}(?:leave|chuti|chhuti|ছুটি)|"
+    r"leave\s+request.{0,35}(?:back|return|resume|e\s+back|again|abar|asho|as[o])|"
+    r"(?:ছুটি|leave).{0,30}(?:back|ferot|return|e\s+back|আবার|ফির|আসো|আস)|"
+    r"back\s+to\s+leave"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def wants_resume_suspended_leave(message: str) -> bool:
+    """User wants to return to a parked leave draft (any phrasing)."""
+    t = (message or "").strip()
+    if not t:
+        return False
+    try:
+        from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+
+        if wants_defer_expense_for_leave_submit(t):
+            return True
+    except Exception:
+        pass
+    return bool(_RESUME_SUSPENDED_LEAVE_RE.search(t))
+
+
+def switch_active_expense_to_suspended_leave(workflow_state: dict[str, Any]) -> dict[str, Any]:
+    """Park the current expense wizard and restore the suspended leave snapshot."""
+    wf = dict(workflow_state or {})
+    if (wf.get("expense_request") or {}).get("active"):
+        wf = suspend_expense_for_workflow_switch(wf)
+    return restore_suspended_leave(wf, force_active=True)
 
 
 def has_suspended_leave(workflow_state: dict[str, Any] | None) -> bool:
@@ -62,6 +104,8 @@ def suspend_leave_for_workflow_switch(workflow_state: dict[str, Any]) -> dict[st
         "review_pending": bool(st.get("review_pending")),
         "crm_draft_id": str(st.get("crm_draft_id") or ""),
     }
+    if wf.get(KEY_EDIT_SNAPSHOT):
+        snapshot[KEY_EDIT_SNAPSHOT] = dict(wf.get(KEY_EDIT_SNAPSHOT) or {})
     wf = clear_leave_flow(wf)
     wf[KEY_SUSPENDED_LEAVE] = snapshot
     return wf
@@ -80,7 +124,7 @@ def restore_suspended_leave(
     if force_active or status == STATUS_PAUSED:
         status = STATUS_ACTIVE
     crm_id = str(sl.get("crm_draft_id") or "").strip() or None
-    return apply_leave_state(
+    wf = apply_leave_state(
         wf,
         draft=dict(sl.get("draft") or {}),
         step=sl.get("step"),
@@ -88,6 +132,10 @@ def restore_suspended_leave(
         review_pending=bool(sl.get("review_pending")),
         crm_draft_id=crm_id,
     )
+    snap_edit = sl.get(KEY_EDIT_SNAPSHOT)
+    if snap_edit:
+        wf[KEY_EDIT_SNAPSHOT] = snap_edit
+    return wf
 
 
 def clear_suspended_leave(workflow_state: dict[str, Any]) -> dict[str, Any]:

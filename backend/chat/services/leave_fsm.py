@@ -28,6 +28,7 @@ KEY_SUBMITTED_AT = "submitted_at"
 KEY_IDEMPOTENCY_KEY = "idempotency_key"
 KEY_CRM_DRAFT_ID = "crm_draft_id"
 KEY_LOCKED = "locked"
+KEY_EDIT_SNAPSHOT = "leave_edit_snapshot"
 
 
 def deep_merge_draft(existing: dict[str, Any] | None, patch: dict[str, Any] | None) -> dict[str, Any]:

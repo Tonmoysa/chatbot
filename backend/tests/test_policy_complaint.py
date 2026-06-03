@@ -11,6 +11,7 @@ from chat.services.policy_intent_helpers import is_irrelevant_answer_complaint
         "but amar question er sathe toh ei ans gular kono relation nai",
         "ei answer amar question er sathe related na",
         "wrong answer — not related to my question",
+        "ei dhoroner kono besoy toh policy te nai....tahole tumi eta kivabe pele?",
     ],
 )
 def test_irrelevant_answer_complaint_detected(message: str) -> None:
