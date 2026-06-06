@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from chat.services.expense_locations import strip_location_punctuation
+
 # Canonical categories for CRM payload
 EXPENSE_CATEGORIES: tuple[str, ...] = (
     "Lunch",
@@ -163,6 +165,17 @@ _HYPHEN_ROUTE_RE = re.compile(
     re.I,
 )
 
+# Tight "place to place" scan — enumerate around each ``to`` token (see _iter_simple_to_candidates).
+_LOC_WORD = r"[a-zA-Z0-9\u0980-\u09FF][\w\-]*"
+_SIMPLE_TO_SEP_RE = re.compile(r"\s+to\s+", re.I)
+
+# Preamble / expense words that should not appear inside a location label.
+_ROUTE_JUNK_WORDS_RE = re.compile(
+    r"\b(?:ajke|aajke|amar|ami|my|expense|expenses|hoyeche|hocche|cost|kharch|"
+    r"খরচ|taka|টাকা|tk|then|abar|first|note|kor|korechi|kore|lagche|laglo)\b",
+    re.I,
+)
+
 
 @dataclass
 class ExpenseLineItem:
@@ -270,6 +283,147 @@ def _valid_location_pair(frm: str, to: str) -> tuple[str, str] | None:
     return None
 
 
+def _looks_like_location_label(label: str) -> bool:
+    """True when text looks like a place name, not expense preamble or category."""
+    s = (label or "").strip()
+    if len(s) < 2 or len(s) > 45:
+        return False
+    if _ROUTE_JUNK_WORDS_RE.search(s):
+        return False
+    if re.search(rf"\b({_CATEGORY_TOKEN})\b", s, re.I):
+        return False
+    if _AMOUNT_RE.search(s):
+        return False
+    if len(s.split()) > 4:
+        return False
+    return True
+
+
+def _nearest_category_distance(text: str, pos: int) -> int:
+    best = 10_000
+    for m in re.finditer(rf"\b({_CATEGORY_TOKEN})\b", text, re.I):
+        mid = (m.start() + m.end()) // 2
+        best = min(best, abs(pos - mid))
+    return best
+
+
+def _score_route_pair(
+    frm: str, to: str, start: int, end: int, text: str
+) -> int:
+    """
+    Rank route candidates in a long clause: prefer real place names near a category token.
+    """
+    score = 0
+    if _looks_like_location_label(frm):
+        score += 50
+    else:
+        score -= 60
+    if _looks_like_location_label(to):
+        score += 50
+    else:
+        score -= 60
+    score -= len(frm.split()) + len(to.split())
+    score -= _nearest_category_distance(text, (start + end) // 2) // 3
+    score += start // 20
+    return score
+
+
+def _pick_best_route_pair(
+    text: str,
+    pattern: re.Pattern[str],
+    *,
+    frm_group: str = "frm",
+    to_group: str = "to",
+    frm_alt: str | None = None,
+    to_alt: str | None = None,
+) -> tuple[str, str] | None:
+    """Among all regex matches, return the highest-scoring valid From/To pair."""
+    best: tuple[str, str] | None = None
+    best_score: int | None = None
+    for m in pattern.finditer(text):
+        frm_raw = m.group(frm_group) or (m.group(frm_alt) if frm_alt else "") or ""
+        to_raw = m.group(to_group) or (m.group(to_alt) if to_alt else "") or ""
+        pair = _valid_location_pair(frm_raw, to_raw)
+        if not pair:
+            continue
+        score = _score_route_pair(pair[0], pair[1], m.start(), m.end(), text)
+        if best_score is None or score > best_score:
+            best_score = score
+            best = pair
+    return best
+
+
+def _extend_trailing_sector(text: str, end: int, label: str) -> tuple[str, int]:
+    """Attach a trailing sector number: ``road`` + ``7`` → ``road 7``."""
+    m = re.match(r"^\s+(\d{1,2})\b", text[end:])
+    if m:
+        return f"{label} {m.group(1)}", end + m.end()
+    return label, end
+
+
+def _iter_simple_to_candidates(
+    text: str,
+) -> list[tuple[str, str, int, int]]:
+    """
+    Enumerate 'X to Y' spans around each ``to`` token (overlapping allowed).
+    Picks real routes like ``mirpur to badda`` inside long preambles.
+    """
+    out: list[tuple[str, str, int, int]] = []
+    for sep in _SIMPLE_TO_SEP_RE.finditer(text):
+        before = text[: sep.start()]
+        after = text[sep.end() :]
+        for n_frm in range(1, 5):
+            m_frm = re.search(
+                rf"(\S+(?:\s+\S+){{{n_frm - 1}}})\s*$",
+                before,
+            )
+            if not m_frm:
+                continue
+            for n_to in range(1, 5):
+                m_to = re.match(
+                    rf"^(\S+(?:\s+\S+){{{n_to - 1}}})(?:\s|$|[,.])",
+                    after,
+                )
+                if not m_to:
+                    continue
+                frm_raw = m_frm.group(1)
+                to_raw = m_to.group(1)
+                start = m_frm.start(1)
+                end = sep.end() + m_to.end(1)
+                to_raw, end = _extend_trailing_sector(text, end, to_raw)
+                out.append((frm_raw, to_raw, start, end))
+    return out
+
+
+def _pick_best_simple_to_pair(text: str) -> tuple[str, str] | None:
+    """Best 'X to Y' pair in text — ignores preamble before the real route."""
+    candidates: list[tuple[tuple[str, str], int]] = []
+
+    for frm_raw, to_raw, start, end in _iter_simple_to_candidates(text):
+        pair = _valid_location_pair(frm_raw, to_raw)
+        if not pair:
+            continue
+        score = _score_route_pair(pair[0], pair[1], start, end, text)
+        candidates.append((pair, score))
+
+    for m in _FROM_TO_SIMPLE_RE.finditer(text):
+        if m.group("frm") or m.group("to"):
+            frm_raw = (m.group("frm") or "").strip()
+            to_raw = (m.group("to") or "").strip()
+        else:
+            frm_raw = (m.group("frm2") or "").strip()
+            to_raw = (m.group("to2") or "").strip()
+        pair = _valid_location_pair(frm_raw, to_raw)
+        if not pair:
+            continue
+        score = _score_route_pair(pair[0], pair[1], m.start(), m.end(), text)
+        candidates.append((pair, score))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[1])[0]
+
+
 def _looks_like_route_answer(message: str) -> bool:
     """True when the user is likely answering a From/To prompt (not adding new lines)."""
     text = (message or "").strip()
@@ -295,19 +449,12 @@ def parse_from_to_locations(message: str) -> tuple[str, str] | None:
         pair = _valid_location_pair(m.group("frm") or "", m.group("to") or "")
         if pair:
             return pair
-    m = _BANGLISH_FROM_TO_RE.search(text)
-    if m:
-        pair = _valid_location_pair(m.group("frm") or "", m.group("to") or "")
-        if pair:
-            return pair
-    m = _FROM_TO_SIMPLE_RE.search(text)
-    if m:
-        pair = _valid_location_pair(
-            (m.group("frm") or m.group("frm2") or ""),
-            (m.group("to") or m.group("to2") or ""),
-        )
-        if pair:
-            return pair
+    pair = _pick_best_route_pair(text, _BANGLISH_FROM_TO_RE)
+    if pair:
+        return pair
+    pair = _pick_best_simple_to_pair(text)
+    if pair:
+        return pair
     route_m = _ROUTE_BANGLISH_RE.search(text)
     if route_m:
         pair = _valid_location_pair(
@@ -372,35 +519,53 @@ def _clean_location_label(raw: str) -> str:
         s,
         flags=re.I,
     ).strip()
-    return s
+    return strip_location_punctuation(s)
 
 
 def _route_from_clause_suffix(
     clause: str, category: str, amount: float
 ) -> tuple[str, str] | None:
     """
-    Parse From/To after category+amount, e.g. "bus 50 office to badda".
+    Parse From/To after category+amount, e.g. "bus 50 office to badda"
+    or reverse order "100 taka bus mirpur to badda".
     """
     target_cat = normalize_category(category)
     target_amt = round(float(amount), 2)
+
+    def _pair_after_match(m: re.Match[str], val: float | None) -> tuple[str, str] | None:
+        if val is None or round(val, 2) != target_amt:
+            return None
+        suffix = clause[m.end() :].strip()
+        if not suffix:
+            return None
+        pair = parse_from_to_locations(suffix)
+        if not pair:
+            return None
+        frm, to = _clean_location_label(pair[0]), _clean_location_label(pair[1])
+        if frm and to and len(frm) >= 2 and len(to) >= 2:
+            return frm, to
+        return None
+
     for m in _ITEM_PAIR_RE.finditer(clause):
         if normalize_category(m.group("cat")) != target_cat:
             continue
         amt_m = _AMOUNT_RE.search(m.group(0))
         if not amt_m:
             continue
-        val = _parse_amount_match(amt_m)
-        if val is None or round(val, 2) != target_amt:
+        pair = _pair_after_match(m, _parse_amount_match(amt_m))
+        if pair:
+            return pair
+
+    for m in _ITEM_PAIR_REV_RE.finditer(clause):
+        if normalize_category(m.group("cat")) != target_cat:
             continue
-        suffix = clause[m.end() :].strip()
-        if not suffix:
+        amt_m = _AMOUNT_RE.search(m.group("amt") or "")
+        if not amt_m:
             continue
-        pair = parse_from_to_locations(suffix)
-        if not pair:
-            continue
-        frm, to = _clean_location_label(pair[0]), _clean_location_label(pair[1])
-        if frm and to and len(frm) >= 2 and len(to) >= 2:
-            return frm, to
+        pair = _pair_after_match(m, _parse_amount_match(amt_m))
+        if pair:
+            return pair
+
     return None
 
 

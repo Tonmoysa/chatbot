@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from chat.constants import EXPENSE_DAY_CAP_BDT
+from chat.services.expense_locations import (
+    detect_travel_location_typos,
+    location_context_from_rows,
+)
+from chat.services.expense.normalization import expense_category_needs_clarification
 from chat.services.expense_extraction import (
     EXPENSE_CATEGORIES,
     is_travel_category,
@@ -20,6 +25,7 @@ class ExpenseValidationResult:
     ok: bool
     warnings: list[str] = field(default_factory=list)
     blocking_message: str | None = None
+    line_flags: dict[int, list[str]] = field(default_factory=dict)
 
 
 def validate_expense_items(
@@ -28,6 +34,8 @@ def validate_expense_items(
     incurred_date_iso: str = "",
     day_logged_total: float = 0.0,
     daily_cap: float = EXPENSE_DAY_CAP_BDT,
+    message: str = "",
+    apply_location_fixes: bool = False,
 ) -> ExpenseValidationResult:
     if not items:
         return ExpenseValidationResult(
@@ -38,11 +46,27 @@ def validate_expense_items(
         )
 
     warnings: list[str] = []
+    line_flags: dict[int, list[str]] = {}
     seen: set[tuple[str, float]] = set()
     total = 0.0
+    loc_ctx = location_context_from_rows(items)
 
-    for row in items:
-        cat = normalize_category(str(row.get("category") or "Other"))
+    for idx, row in enumerate(items):
+        raw_cat = str(row.get("category") or "").strip()
+        if expense_category_needs_clarification(raw_cat, message=message):
+            try:
+                amt = float(row.get("amount") or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            return ExpenseValidationResult(
+                ok=False,
+                blocking_message=(
+                    f"**{amt:g} Tk** এর category জানা নেই — review এর আগে বলুন "
+                    "(যেমন: lunch, bus, snack, rickshaw)।"
+                ),
+            )
+
+        cat = normalize_category(raw_cat)
         if cat not in EXPENSE_CATEGORIES:
             warnings.append(f"অজানা ক্যাটাগরি '{cat}' — Other হিসেবে রাখা হয়েছে।")
             row["category"] = "Other"
@@ -79,6 +103,19 @@ def validate_expense_items(
                         "(যেমন: office theke badda, অথবা from office to motijheel)।"
                     ),
                 )
+            for typo in detect_travel_location_typos(row, context=loc_ctx):
+                role = "To" if typo["field"] == "to_location" else "From"
+                note = (
+                    f"**{cat}** · {role}: **{typo['original']}** — "
+                    f"আপনি কি **{typo['suggestion']}** বোঝাচ্ছেন?"
+                )
+                if apply_location_fixes:
+                    row[typo["field"]] = typo["suggestion"]
+                    warnings.append(note)
+                else:
+                    line_flags.setdefault(idx, []).append(
+                        f"⚠️ ({typo['suggestion']}?)"
+                    )
 
     projected = float(day_logged_total) + total
     if projected > float(daily_cap) + 1e-9:
@@ -88,4 +125,6 @@ def validate_expense_items(
             "চূড়ান্ত অনুমোদন CRM/Finance করবে।"
         )
 
-    return ExpenseValidationResult(ok=True, warnings=warnings)
+    return ExpenseValidationResult(
+        ok=True, warnings=warnings, line_flags=line_flags
+    )

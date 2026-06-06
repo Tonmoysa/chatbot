@@ -39,6 +39,13 @@ def effective_leave_bucket(draft: dict[str, Any]) -> str:
     reason_l = str(draft.get("reason") or "").lower()
     if lt in {"sick", "medical", "health"}:
         return "sick"
+    try:
+        from chat.services.leave.normalization import text_has_sick_signal
+
+        if text_has_sick_signal(reason_l):
+            return "sick"
+    except ImportError:
+        pass
     if any(w in reason_l for w in ("sick", "ill", "fever", "medical", "doctor", "অসুস্থ")):
         return "sick"
     return "other"
@@ -93,8 +100,7 @@ def apply_leave_draft_defaults(draft: dict[str, Any], policy: Any) -> None:
             draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
         else:
             draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
-    if not draft.get("day_scope"):
-        draft["day_scope"] = DAY_SCOPE_FULL
+    # day_scope is never defaulted — user must say full/half explicitly.
 
 
 def format_select_leave_label(draft: dict[str, Any]) -> str:

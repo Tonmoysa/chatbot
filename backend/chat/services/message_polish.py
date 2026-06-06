@@ -11,6 +11,7 @@ from typing import Any
 
 from chat.constants import (
     EXPENSE_DAY_CAP_BDT,
+    INTENT_EXPENSE_CLAIM,
     INTENT_HR_POLICY,
     INTENT_LEAVE_REQUEST,
 )
@@ -209,6 +210,25 @@ def polish_clarification_message(text: str) -> str:
     return t.strip()
 
 
+_EXPENSE_WIZARD_POLISH_RULES = frozenset(
+    {"EXPENSE_WORKFLOW_COLLECTING", "EXPENSE_WORKFLOW_REVIEW"}
+)
+_EXPENSE_WIZARD_SKIP_POLISH_RULES = frozenset(
+    {
+        "EXPENSE_WORKFLOW_SUBMIT_CONFIRM",
+        "EXPENSE_WORKFLOW_SUBMITTED",
+        "EXPENSE_WORKFLOW_EMPTY",
+    }
+)
+
+
+def _should_llm_polish_expense_wizard(rules_applied: list[str] | None) -> bool:
+    rules = {str(r or "") for r in (rules_applied or [])}
+    if rules & _EXPENSE_WIZARD_SKIP_POLISH_RULES:
+        return False
+    return bool(rules & _EXPENSE_WIZARD_POLISH_RULES)
+
+
 def polish_outbound_message(
     message: str,
     *,
@@ -218,6 +238,7 @@ def polish_outbound_message(
     entities: dict[str, Any] | None = None,
     decision: dict[str, Any] | None = None,
     crm_payload: dict[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> str:
     """
     Final pass before persisting assistant text — intent-aware formatting.
@@ -252,6 +273,37 @@ def polish_outbound_message(
         )
 
     if outcome == "NEEDS_CLARIFICATION":
+        rules = list(decision.get("rules_applied") or [])
+        if (
+            intent == INTENT_EXPENSE_CLAIM
+            and trace_id
+            and _should_llm_polish_expense_wizard(rules)
+        ):
+            expense_facts = entities.get("expense_message_facts")
+            if isinstance(expense_facts, dict) and (
+                expense_facts.get("polishable_part") or expense_facts.get("ask_envelope")
+            ):
+                from chat.services.message_polish_llm import (
+                    polish_expense_message_with_envelope,
+                )
+
+                polished = polish_expense_message_with_envelope(
+                    expense_facts,
+                    user_message=user_message,
+                    trace_id=trace_id,
+                )
+                if polished:
+                    return polish_clarification_message(polished)
+            from chat.services.message_polish_llm import polish_template_message
+
+            polished = polish_template_message(
+                msg,
+                user_message=user_message,
+                message_type="expense_wizard",
+                trace_id=trace_id,
+                min_length=30,
+            )
+            return polish_clarification_message(polished)
         return polish_clarification_message(msg)
 
     if intent == INTENT_LEAVE_REQUEST:

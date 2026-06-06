@@ -1,5 +1,4 @@
-import re
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from chat.constants import (
@@ -27,8 +26,6 @@ from chat.services.leave_workflow import (
     LEAVE_PAYMENT_LWOP,
     LEAVE_PAYMENT_PAID,
 )
-
-_AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
 
 
 class DecisionEngine:
@@ -132,150 +129,71 @@ class DecisionEngine:
                     "_crm_outcome_hint": "AUTO_APPROVED",
                 }
 
-            # LEGACY / OBSOLETE: single-amount auto-approve / HR-routing in chatbot.
-            # Replaced by expense_workflow.py + expense_submission_service.py.
-            # Kept for direct DecisionEngine unit tests and backward compatibility only.
-            amount = entities.get("amount")
-            if amount is None:
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Expense amount is required for routing.",
-                    "rules_applied": ["EXPENSE_AMOUNT_REQUIRED"],
-                }
-            try:
-                val = float(amount)
-            except (TypeError, ValueError):
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Expense amount is invalid.",
-                    "rules_applied": ["EXPENSE_AMOUNT_INVALID"],
-                }
-            inc_iso = entities.get("expense_incurred_date") or infer_expense_incurred_date_iso(
-                message="", hints=entities, today=date.today()
-            )
-            try:
-                inc_d = datetime.fromisoformat(str(inc_iso).split("T")[0]).date()
-            except Exception:
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": "Expense date could not be read. Please state which day the cost was for (e.g. today or a specific date).",
-                    "rules_applied": ["EXPENSE_DATE_INVALID"],
-                }
-            today_d = date.today()
-            if inc_d > today_d:
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": (
-                        "Company policy: submit each day's expense on that day (or after it occurs). "
-                        "আজকের আগে/ভবিষ্যৎ তারিখের খরচ এখন জমা দেওয়া যাবে না—ওই দিনে বা পরে চেষ্টা করুন।"
-                    ),
-                    "rules_applied": ["EXPENSE_FUTURE_DATE_SUBMIT_LATER"],
-                }
-            # If user claims an amount but uploads a receipt, try to validate basic consistency.
-            doc_amount = _extract_reasonable_amount(doc_text) if doc_text else None
-            is_uber = bool(re.search(r"\buber\b", doc_text, re.I)) if doc_text else False
-            if doc_text and doc_amount is not None:
-                if abs(float(doc_amount) - float(val)) > 5.0:
-                    return {
-                        "outcome": "PENDING_APPROVAL",
-                        "reason": f"Receipt amount ({doc_amount}) does not match claimed amount ({val}); routed to HR for review.",
-                        "rules_applied": ["EXPENSE_RECEIPT_AMOUNT_MISMATCH_PENDING_HR"],
-                        "route_to": "HR",
-                    }
-            day_so_far = float(crm_context.get("expense_day_approved_total") or 0)
-            cap = float(self.EXPENSE_AUTO_THRESHOLD)
-            if day_so_far + val > cap + 1e-9:
-                if not doc_text:
-                    return {
-                        "outcome": "NEEDS_CLARIFICATION",
-                        "reason": (
-                            f"Same-day auto-approve budget is {cap:.0f} total across all small claims. "
-                            f"You already have {day_so_far:.0f} approved for {inc_d.isoformat()}; "
-                            f"adding {val:.0f} would exceed that. Please upload a receipt/document for HR review."
-                        ),
-                        "rules_applied": ["EXPENSE_DAILY_CAP_EXCEEDED_RECEIPT_REQUIRED"],
-                    }
-                return {
-                    "outcome": "PENDING_APPROVAL",
-                    "reason": (
-                        f"Same-day total would exceed the {cap:.0f} auto-approve budget for {inc_d.isoformat()}; "
-                        "sent to HR for approval."
-                    ),
-                    "rules_applied": [
-                        "EXPENSE_DAILY_CAP_EXCEEDED_PENDING_HR",
-                        "EXPENSE_ROUTED_TO_HR",
-                    ],
-                    "route_to": "HR",
-                    "receipt": {"merchant_hint": "UBER" if is_uber else None, "doc_amount": doc_amount},
-                }
-            if val > self.EXPENSE_AUTO_THRESHOLD:
-                if not doc_text:
-                    return {
-                        "outcome": "NEEDS_CLARIFICATION",
-                        "reason": "Amount exceeds auto-approve limit. Please upload a receipt/document for HR review.",
-                        "rules_applied": ["EXPENSE_GT_THRESHOLD_RECEIPT_REQUIRED"],
-                    }
-                return {
-                    "outcome": "PENDING_APPROVAL",
-                    "reason": f"Amount {val} exceeds auto-approve threshold {self.EXPENSE_AUTO_THRESHOLD}; sent to HR for approval.",
-                    "rules_applied": ["EXPENSE_GT_THRESHOLD_PENDING", "EXPENSE_ROUTED_TO_HR"],
-                    "route_to": "HR",
-                    "receipt": {"merchant_hint": "UBER" if is_uber else None, "doc_amount": doc_amount},
-                }
+            # All expense claims must go through the wizard (collect → review → confirm).
             return {
-                "outcome": "AUTO_APPROVED",
-                "reason": f"Amount {val} within auto-approve threshold.",
-                "rules_applied": ["EXPENSE_LTE_THRESHOLD_AUTO"],
+                "outcome": "NEEDS_CLARIFICATION",
+                "reason": (
+                    "Expense claims must be collected through the expense wizard "
+                    "(category, amount, review, then confirm)."
+                ),
+                "rules_applied": ["EXPENSE_USE_WIZARD"],
             }
 
         if intent == INTENT_LEAVE_REQUEST:
             """
             Enterprise leave path: tenant policy, overlap guard, balance split,
             duration-based approval tiers. LLM does not approve.
+
+            Field-level clarification is owned by the leave wizard; once the user
+            confirms the draft (``leave_workflow_confirmed``), skip duplicate checks.
             """
-            pay = str(entities.get("leave_payment_category") or "").strip().lower()
-            if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": (
-                        "এখনও বোঝা যাচ্ছে না ছুটিটা বেতনসহ নাকি বেতন ছাড়া। "
-                        "একটু লিখুন: বেতনসহ / paid — অথবা বেতন ছাড়া / unpaid।"
-                    ),
-                    "rules_applied": ["LEAVE_PAYMENT_UNKNOWN"],
-                }
+            if not entities.get("leave_workflow_confirmed"):
+                pay = str(entities.get("leave_payment_category") or "").strip().lower()
+                if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "এখনও বোঝা যাচ্ছে না ছুটিটা বেতনসহ নাকি বেতন ছাড়া। "
+                            "একটু লিখুন: বেতনসহ / paid — অথবা বেতন ছাড়া / unpaid।"
+                        ),
+                        "rules_applied": ["LEAVE_PAYMENT_UNKNOWN"],
+                    }
 
-            scope = str(entities.get("day_scope") or "").strip().lower()
-            if scope not in ("full", "half", "half_day", "half-day"):
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": (
-                        "পুরো দিন নাকি হাফ দিন — একটু স্পষ্ট করে লিখুন (যেমন: পুরো দিন / হাফ দিন)।"
-                    ),
-                    "rules_applied": ["LEAVE_DAY_SCOPE_UNKNOWN"],
-                }
+                scope = str(entities.get("day_scope") or "").strip().lower()
+                if scope not in ("full", "half", "half_day", "half-day"):
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "পুরো দিন নাকি হাফ দিন — একটু স্পষ্ট করে লিখুন "
+                            "(যেমন: পুরো দিন / হাফ দিন)।"
+                        ),
+                        "rules_applied": ["LEAVE_DAY_SCOPE_UNKNOWN"],
+                    }
 
-            days_needed = entities.get("days")
-            start = entities.get("start_date")
-            end = entities.get("end_date")
-            if not start and not end and days_needed is None:
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": (
-                        "কোন তারিখে ছুটি চান সেটা পুরো হয়নি। এক দিন হলে একটা তারিখ দিন; "
-                        "একাধিক দিন হলে শুরু আর শেষ তারিখ দিন (যেমন 2026-05-12 থেকে 2026-05-14)।"
-                    ),
-                    "rules_applied": ["LEAVE_DATES_REQUIRED"],
-                }
+                days_needed = entities.get("days")
+                start = entities.get("start_date")
+                end = entities.get("end_date")
+                if not start and not end and days_needed is None:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "কোন তারিখে ছুটি চান সেটা পুরো হয়নি। এক দিন হলে একটা তারিখ দিন; "
+                            "একাধিক দিন হলে শুরু আর শেষ তারিখ দিন "
+                            "(যেমন 2026-05-12 থেকে 2026-05-14)।"
+                        ),
+                        "rules_applied": ["LEAVE_DATES_REQUIRED"],
+                    }
 
-            rs = str(entities.get("reason") or "").strip()
-            if len(rs) < 4:
-                return {
-                    "outcome": "NEEDS_CLARIFICATION",
-                    "reason": (
-                        "ছুটি **কেন** লাগছে — এক লাইনে লিখুন (পরিবার, অসুস্থতা, ভ্রমণ ইত্যাদি)।"
-                    ),
-                    "rules_applied": ["LEAVE_REASON_REQUIRED"],
-                }
+                rs = str(entities.get("reason") or "").strip()
+                if len(rs) < 4:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "ছুটি **কেন** লাগছে — এক লাইনে লিখুন "
+                            "(পরিবার, অসুস্থতা, ভ্রমণ ইত্যাদি)।"
+                        ),
+                        "rules_applied": ["LEAVE_REASON_REQUIRED"],
+                    }
 
             company_id = str(crm_context.get("company_id") or "default")
             employee_id = str(crm_context.get("employee_id") or "")
@@ -332,24 +250,3 @@ class DecisionEngine:
             "rules_applied": ["FALLBACK"],
         }
 
-
-def _extract_reasonable_amount(text: str) -> float | None:
-    """
-    Heuristic: pick the largest 1-6 digit amount found, ignoring tiny numbers.
-    This is intentionally conservative and only used for basic mismatch detection.
-    """
-    if not text:
-        return None
-    candidates: list[float] = []
-    for m in _AMOUNT_RE.finditer(text):
-        whole = m.group(1)
-        frac = m.group(2) or ""
-        try:
-            n = float(f"{whole}.{frac}" if frac else whole)
-        except Exception:
-            continue
-        if 10 <= n <= 500_000:
-            candidates.append(n)
-    if not candidates:
-        return None
-    return float(max(candidates))

@@ -7,6 +7,7 @@ from chat.constants import (
     INTENT_HR_POLICY,
     INTENT_LEAVE_REQUEST,
     INTENT_REQUEST_STATUS,
+    INTENT_UNKNOWN,
 )
 from chat.services.expense_workflow import (
     is_expense_in_progress,
@@ -57,6 +58,60 @@ def test_wants_expense_summary_banglish():
     assert wants_expense_summary("expense er summery ta bolo")
     assert wants_expense_summary("okay ekhon summery ta bolo")
     assert wants_expense_summary("শেষ")
+
+
+@pytest.mark.django_db
+def test_eid_kobe_during_active_expense_does_not_resume_wizard(monkeypatch):
+    """Unrelated calendar trivia must not hijack an in-progress expense draft."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    orch = ChatOrchestrator()
+    emp = "exp-eid-interrupt"
+    r1 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="metro 100 uttora to motijheel, lunch 50",
+        session_id=None,
+        employee_id=emp,
+        trace_id="exp-eid-1",
+    )
+    sid = r1["_session_id"]
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID, employee_id=emp, session_id=sid
+    )
+    assert is_expense_in_progress(session.workflow_state)
+    items_before = list(
+        (session.workflow_state.get("expense_request") or {}).get("items") or []
+    )
+    assert len(items_before) >= 1
+
+    r2 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="eid kobe?",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="exp-eid-2",
+    )
+    session.refresh_from_db()
+    msg = r2["response"]["message"] or ""
+    assert r2["intent"] == INTENT_UNKNOWN
+    assert "note kora hoyeche" not in msg.lower()
+    assert "Ar kono kharcha" not in msg
+    assert (
+        "বাইরে" in msg
+        or "সাহায্য" in msg
+        or "scope" in msg.lower()
+        or "HR" in msg
+    )
+    assert "draft" in msg.lower() or "expense" in msg.lower() or "খরচ" in msg
+    block = session.workflow_state.get("expense_request") or {}
+    assert block.get("active") is True
+    assert len(block.get("items") or []) == len(items_before)
 
 
 @pytest.mark.django_db

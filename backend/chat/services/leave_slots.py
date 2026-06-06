@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from chat.services.leave_draft_utils import supporting_document_needed
 from chat.services.leave_policies import CompanyLeavePolicy
 from chat.services.leave_slot_extraction import LeaveSlotExtraction
 
@@ -18,19 +17,6 @@ SLOT_DATES = "leave_dates"
 SLOT_REASON = "reason"
 SLOT_DOCUMENT = "supporting_document"
 SLOT_DATE_CLARIFY = "date_clarification"
-
-_SLOT_ASK_ORDER = (
-    SLOT_DATE_CLARIFY,
-    SLOT_DATES,
-    SLOT_LEAVE_TYPE,
-    SLOT_PAYMENT,
-    SLOT_SCOPE,
-    SLOT_REASON,
-    SLOT_DOCUMENT,
-)
-
-_WIZ_MARKER = "_(ছুটি আবেদন — নিচে উত্তর দিন)_"
-
 
 def prefill_draft_from_extraction(
     draft: dict[str, Any],
@@ -44,7 +30,7 @@ def prefill_draft_from_extraction(
         from chat.services.leave_workflow import merge_extractor_entities
 
         merge_extractor_entities(
-            draft, external_entities, overwrite=overwrite
+            draft, external_entities, overwrite=overwrite, message=""
         )
 
     for field, slot_name in (
@@ -139,75 +125,14 @@ def get_missing_slots(
     date_error: str | None = None,
 ) -> list[str]:
     """Return ordered list of slots still needed (dynamic, not fixed 1..5)."""
-    missing: list[str] = []
+    from chat.services.leave.workflow_schema import get_leave_workflow_schema
 
-    if extraction and extraction.vague_date and not draft.get("start_date"):
-        missing.append(SLOT_DATE_CLARIFY)
-
-    if date_error:
-        missing.append(SLOT_DATES)
-        return _order(missing)
-
-    if not draft.get("leave_payment_category"):
-        missing.append(SLOT_PAYMENT)
-    if not draft.get("day_scope"):
-        missing.append(SLOT_SCOPE)
-    if not draft.get("start_date"):
-        missing.append(SLOT_DATES)
-
-    from chat.services.leave_draft_utils import (
-        normalize_end_equals_start_if_missing,
-        validate_dates,
+    return get_leave_workflow_schema().missing_fields(
+        draft,
+        policy=policy,
+        extraction=extraction,
+        date_error=date_error,
     )
-
-    normalize_end_equals_start_if_missing(draft)
-    if draft.get("start_date"):
-        ok, err = validate_dates(draft)
-        if not ok and err:
-            if SLOT_DATES not in missing:
-                missing.append(SLOT_DATES)
-
-    if not _reason_satisfied(draft):
-        missing.append(SLOT_REASON)
-
-    if supporting_document_needed(draft):
-        if not draft.get("supporting_document_waived"):
-            doc = str(draft.get("document_text") or "").strip()
-            if not doc:
-                missing.append(SLOT_DOCUMENT)
-
-    return _order(missing)
-
-
-def _order(slots: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for s in _SLOT_ASK_ORDER:
-        if s in slots and s not in seen:
-            out.append(s)
-            seen.add(s)
-    return out
-
-
-def _reason_satisfied(draft: dict[str, Any]) -> bool:
-    if len(str(draft.get("reason") or "").strip()) >= 4:
-        return True
-    if draft.get("_reason_implied"):
-        return True
-    lt = str(draft.get("leave_type") or "").lower()
-    if lt in ("sick", "medical") and draft.get("start_date"):
-        draft.setdefault("reason", "অসুস্থতা / sick leave")
-        draft["_reason_implied"] = True
-        return True
-    return False
-
-
-_SELECT_LEAVE_PROMPT = (
-    "**Select Leave** — paid নাকি unpaid?\n"
-    "• paid\n"
-    "• unpaid"
-    + _WIZ_MARKER
-)
 
 
 def generate_question(
@@ -217,54 +142,21 @@ def generate_question(
     remaining: int,
     date_error: str | None = None,
     extraction: LeaveSlotExtraction | None = None,
+    missing: list[str] | None = None,
 ) -> str:
     """Natural, contextual prompts — no rigid Question X/Y numbering."""
-    if slot == SLOT_DATE_CLARIFY and extraction and extraction.clarification_needed:
-        return extraction.clarification_needed + _WIZ_MARKER
+    from chat.services.leave.conversation_manager import LeaveConversationManager
 
-    if slot in (SLOT_LEAVE_TYPE, SLOT_PAYMENT):
-        return _SELECT_LEAVE_PROMPT
-
-    if slot == SLOT_SCOPE:
-        return (
-            "**Leave Type** — Full Day নাকি Half Day?\n"
-            "(full / half লিখলেও চলবে)"
-            + _WIZ_MARKER
-        )
-
-    if slot == SLOT_DATES:
-        if date_error == "IN_PAST":
-            return (
-                "আজকের আগের তারিখে ছুটি দেওয়া যাবে না। আজ বা পরের দিন দিন।"
-                + _WIZ_MARKER
-            )
-        if date_error == "BAD_RANGE":
-            return (
-                "শেষ তারিখ যেন প্রথম তারিখের আগে না হয় — আবার লিখুন।"
-                + _WIZ_MARKER
-            )
-        return (
-            "**কোন তারিখ(গুলো)** ছুটি চান?\n"
-            "• এক দিন: কাল / আগামীকাল / ২০২৬-০৫-১৫\n"
-            "• একাধিক: ২০২৬-০৫-১২ থেকে ২০২৬-০৫-১৪"
-            + _WIZ_MARKER
-        )
-
-    if slot == SLOT_REASON:
-        return (
-            "Reason টা এক লাইনে লিখুন।\n"
-            "(যেমন: sick, family কাজ, travel — বাংলা/English যেকোনো)"
-            + _WIZ_MARKER
-        )
-
-    if slot == SLOT_DOCUMENT:
-        return (
-            "এই ছুটির জন্য **ডাক্তারের চিট** বা কাগজ দিতে পারেন?\n"
-            "আপলোড/পেস্ট করুন, অথবা এখন না হলে **skip** লিখুন — ম্যানেজার দেখবেন।"
-            + _WIZ_MARKER
-        )
-
-    return "আর একটু তথ্য দরকার — নিচে লিখে পাঠান।" + _WIZ_MARKER
+    slots_missing = list(missing) if missing is not None else get_missing_slots(
+        draft, extraction=extraction, date_error=date_error
+    )
+    return LeaveConversationManager().build_follow_up(
+        draft,
+        primary_slot=slot,
+        missing=slots_missing,
+        date_error=date_error,
+        extraction=extraction,
+    )
 
 
 def summarize_captured(draft: dict[str, Any]) -> str:

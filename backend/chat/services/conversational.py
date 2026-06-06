@@ -114,6 +114,7 @@ def conversational_reply(
     context_lines: list[str] | None,
     trace_id: str,
     llm: LLMClient | None = None,
+    workflow_hint: str | None = None,
 ) -> str | None:
     """Generate a friendly, human-toned reply.
 
@@ -138,11 +139,15 @@ def conversational_reply(
     }.get(user_lang, "")
 
     history = _format_history(context_lines)
+    hint_block = ""
+    if workflow_hint:
+        hint_block = f"\n\nWORKFLOW CONTEXT:\n{workflow_hint.strip()}\n"
     user_prompt = (
         f"{lang_hint}\n\n"
         f"Recent dialogue (oldest first, newest last):\n"
         f"{history or '(no prior turns)'}\n\n"
-        f"User just said: {message}\n\n"
+        f"User just said: {message}\n"
+        f"{hint_block}\n"
         "Write the assistant reply now (plain text, no quotes, no system tags)."
     )
 

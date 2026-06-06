@@ -90,6 +90,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # --- HR microservice configuration ---
 HR_SERVICE_API_KEY = os.environ.get("HR_SERVICE_API_KEY", "")
 USE_MOCK_CRM = os.environ.get("USE_MOCK", "true").lower() in ("1", "true", "yes")
+
 PHP_CRM_BASE_URL = os.environ.get("PHP_CRM_BASE_URL", "").rstrip("/")
 PHP_CRM_API_KEY = os.environ.get("PHP_CRM_API_KEY", "")
 
@@ -100,6 +101,11 @@ LLM_API_BASE_URL = os.environ.get("LLM_API_BASE_URL", "https://api.openai.com/v1
 LLM_API_KEY = os.environ.get("LLM_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "25"))
+LLM_MESSAGE_POLISH = os.environ.get("LLM_MESSAGE_POLISH", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Voice / STT (Phase 2 — OpenAI Whisper; unused when frontend uses Web Speech API)
 OPENAI_WHISPER_API_KEY = os.environ.get(

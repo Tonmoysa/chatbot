@@ -10,9 +10,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from chat.services.expense.expense_confirm import (
+    is_confirmation_no as expense_is_confirmation_no,
+    is_confirmation_yes as expense_is_confirmation_yes,
+    looks_like_expense_correction,
+)
+from chat.services.expense.routing import looks_like_expense_wizard_continuation
 from chat.services.expense_workflow import (
-    _is_confirmation_no,
-    _is_confirmation_yes as expense_is_confirmation_yes,
     wants_expense_summary,
     wants_resume_or_show_expense,
 )
@@ -34,6 +38,7 @@ from chat.services.leave_confirm import (
 )
 from chat.services.policy_intent_helpers import (
     is_expense_entitlement_query,
+    is_general_knowledge_out_of_scope,
     is_rules_query,
 )
 
@@ -83,24 +88,6 @@ def _is_leave_application_message(message: str) -> bool:
     )
 
 
-def _looks_like_expense_correction(message: str) -> bool:
-    low = message or ""
-    if re.search(
-        r"\b(remove|delete|বাদ|bad\s*d(iy|i)ao|remove\s*কর)\b",
-        low,
-        re.I,
-    ):
-        return True
-    if re.search(r"\b(bus|lunch|train|snack|dinner|breakfast|bike|cab)\b", low, re.I):
-        if re.search(r"\b(na|না)\b", low, re.I) and re.search(r"\d", low):
-            return True
-        if re.search(r"\b(hobe|হবে|update|change)\b", low, re.I) and re.search(
-            r"\d", low
-        ):
-            return True
-    return False
-
-
 def _canonical_leave_wizard_token(message: str) -> bool:
     t = (message or "").strip().lower()
     if not t or len(t) > 48:
@@ -136,11 +123,14 @@ def classify_workflow_turn(
     if expense_active and wants_resume_or_show_expense(message):
         return TURN_SLOT_ANSWER
 
+    if expense_active and looks_like_expense_correction(message):
+        return TURN_CORRECTION
+
     if (
         is_confirmation_yes(message)
         or is_confirmation_cancel(message)
         or expense_is_confirmation_yes(message)
-        or _is_confirmation_no(message)
+        or expense_is_confirmation_no(message)
         or wants_expense_summary(message)
     ):
         return TURN_CONFIRM
@@ -172,10 +162,7 @@ def classify_workflow_turn(
     if _looks_like_slot_correction(message):
         return TURN_CORRECTION
 
-    if expense_active and _looks_like_expense_correction(message):
-        return TURN_CORRECTION
-
-    if expense_active and (_strong_expense_claim(message) or re.search(r"\d", message or "")):
+    if expense_active and looks_like_expense_wizard_continuation(message):
         return TURN_SLOT_ANSWER
 
     if leave_active:
@@ -184,6 +171,10 @@ def classify_workflow_turn(
         return TURN_SLOT_ANSWER
 
     if expense_active:
-        return TURN_SLOT_ANSWER
+        if looks_like_wizard_side_question(message):
+            return TURN_CHITCHAT
+        if is_general_knowledge_out_of_scope(message):
+            return TURN_CHITCHAT
+        return TURN_CHITCHAT
 
     return TURN_CHITCHAT

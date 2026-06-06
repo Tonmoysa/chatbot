@@ -46,6 +46,17 @@ def test_parse_office_to_road_7_keeps_full_location():
     assert parse_from_to_locations("office to road 7") == ("office", "road 7")
 
 
+def test_parse_from_to_ignores_preamble_in_long_clause():
+    """Full-clause scan must not treat expense preamble as the From location."""
+    clause = "ajke amar expense hoyeche 100 taka bus mirpur to badda"
+    assert parse_from_to_locations(clause) == ("mirpur", "badda")
+
+
+def test_parse_from_to_prefers_route_near_travel_category():
+    msg = "amar ajke 100 taka bus mirpur to badda lunch 50"
+    assert parse_from_to_locations(msg) == ("mirpur", "badda")
+
+
 def test_parse_hyphen_route_mirpur_sectors():
     assert parse_from_to_locations("mirpur 1-mirpur 10") == ("mirpur 1", "mirpur 10")
 
@@ -238,21 +249,26 @@ def test_compound_route_lunch_and_loose_amount():
     wf: dict = {}
     r1 = process_expense_turn(workflow_state=wf, message=msg)
     er1 = r1["workflow_state"].get("expense_request") or {}
-    assert er1.get("pending_step") == "category"
-    assert er1.get("pending_line", {}).get("amount") == 60
-    assert er1.get("pending_line", {}).get("from_location") == "uttora"
-    assert er1.get("pending_line", {}).get("to_location") == "mirpur"
+    assert er1.get("pending_step") == "clarify"
     assert any(r["category"] == "Lunch" and r["amount"] == 100 for r in r1["items"])
+    issue_amounts = {
+        float(i.get("amount") or 0)
+        for i in (er1.get("clarification_issues") or [])
+        if i.get("kind") == "missing_category"
+    }
+    assert 50.0 in issue_amounts
 
-    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="train")
+    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="train, snack")
     er2 = r2["workflow_state"].get("expense_request") or {}
-    assert er2.get("pending_step") == "category"
-    assert er2.get("pending_line", {}).get("amount") == 50
     trains = [r for r in r2["items"] if r["category"] == "Train"]
+    snacks = [r for r in r2["items"] if r["category"] == "Snack"]
     assert len(trains) == 1
     assert trains[0]["amount"] == 60
     assert trains[0]["from_location"] == "uttora"
     assert trains[0]["to_location"] == "mirpur"
+    assert len(snacks) == 1
+    assert snacks[0]["amount"] == 50
+    assert er2.get("stage") == "review"
 
 
 def test_travel_route_after_amount():
@@ -262,6 +278,31 @@ def test_travel_route_after_amount():
     assert by_cat["Bus"].to_location == "badda"
     assert by_cat["Rickshaw"].from_location == "badda"
     assert by_cat["Rickshaw"].to_location == "motijheel"
+
+
+def test_travel_route_after_reverse_amount_category():
+    """Banglish: amount before category, route after — '100 taka bus mirpur to badda'."""
+    ext = extract_expense_items("100 taka bus mirpur to badda")
+    assert len(ext.items) == 1
+    row = ext.items[0]
+    assert row.category == "Bus"
+    assert row.amount == 100.0
+    assert row.from_location == "mirpur"
+    assert row.to_location == "badda"
+
+
+def test_compound_message_reverse_bus_route_with_preamble():
+    msg = (
+        "ajke amar expense hoyeche 100 taka bus mirpur to badda "
+        "then lunch 100 taka then metro rail 30 taka"
+    )
+    ext = extract_expense_items(msg)
+    by_cat = {i.category: i for i in ext.items}
+    assert by_cat["Bus"].amount == 100.0
+    assert by_cat["Bus"].from_location == "mirpur"
+    assert by_cat["Bus"].to_location == "badda"
+    assert by_cat["Lunch"].amount == 100.0
+    assert by_cat["Metro Rail"].amount == 30.0
 
 
 def test_extract_multi_item_bangla():
@@ -383,7 +424,7 @@ def test_transcript_multi_then_lunch_and_no_other():
     assert cats.get("Bus") == 40
     assert cats.get("Lunch") == 60
     assert "Other" not in cats
-    assert (r2["workflow_state"].get("expense_request") or {}).get("pending_step") == "category"
+    assert (r2["workflow_state"].get("expense_request") or {}).get("pending_step") == "clarify"
 
 
 @pytest.mark.django_db
@@ -492,7 +533,7 @@ def test_workflow_cost_hoyeche_period_luch_typo():
     items = pack["items"]
     assert any(r.get("category") == "Lunch" and r.get("amount") == 20 for r in items)
     block = pack["workflow_state"].get("expense_request") or {}
-    assert block.get("pending_step") == "category"
+    assert block.get("pending_step") == "clarify"
     assert float((block.get("pending_line") or {}).get("amount") or 0) == 100.0
 
 
@@ -514,7 +555,7 @@ def test_workflow_cost_hoyeche_ellipsis_and_lunch_prompts_category():
     items = pack["items"]
     assert any(r.get("category") == "Lunch" and r.get("amount") == 20 for r in items)
     block = pack["workflow_state"].get("expense_request") or {}
-    assert block.get("pending_step") == "category"
+    assert block.get("pending_step") == "clarify"
     assert float((block.get("pending_line") or {}).get("amount") or 0) == 100.0
 
 

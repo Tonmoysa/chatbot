@@ -393,75 +393,46 @@ def is_off_topic_for_hr_assistant(
 
 _OUT_OF_SCOPE_BN: tuple[str, ...] = (
     (
-        "এ ধরনের বিষয়ে আমি সাহায্য করতে পারি না — এটা আমার কাজের বাইরে "
-        "(যেমন আকাশে ওড়া, সাধারণ তারিখ, আবহাওয়া, বিনোদন)।\n\n"
-        "আমি শুধু **কোম্পানির HR** নিয়ে কাজ করি: ছুটি আবেদন ও ব্যালান্স, খরচ, "
-        "attendance, আর **আপলোড করা পলিসি/নিয়ম**।\n\n"
-        "ছুটি বা পলিসি জানতে চাইলে বিষয়টা স্পষ্ট লিখুন — যেমন \"Leave Policy\" "
-        "বা \"ঈদ ছুটি কত দিন\"।"
+        "এ ধরনের সাধারণ প্রশ্ন (তারিখ, আবহাওয়া, trivia) **কোম্পানি HR**-এর বাইরে — "
+        "আমি ছুটি, খরচ, attendance ও **আপলোড করা পলিসি** নিয়ে কাজ করি।\n"
+        "পলিসি চাইলে বিষয় লিখুন (যেমন: Leave Policy)।"
     ),
     (
-        "বুঝতে পারছি, কিন্তু এই প্রশ্নটা আমার এলাকার না — ট্রাভেল, তাড়াতাড়ি তারিখ, "
-        "আবহাওয়া বা এ ধরনের সাধারণ বিষয়ে আমি উত্তর দিই না।\n\n"
-        "আমার কাজ **অফিসের HR**: leave, expense, attendance, আর কোম্পানির "
-        "**নিয়ম-পলিসি** (আপনার আপলোড করা ডকুমেন্ট থেকে)।\n\n"
-        "HR-সংক্রান্ত কিছু লাগলে পলিসির নাম বা টপিক লিখে জিজ্ঞাসা করুন।"
+        "বুঝতে পারছি — তবে এটা আমার স্কোপের বাইরে; আমি **অফিস HR সহকারী** "
+        "(leave, expense, attendance, company policy)।\n"
+        "HR বিষয় হলে পলিসির নাম বা টপিক স্পষ্ট করে জিজ্ঞাসা করুন।"
     ),
     (
-        "এটা দুঃখিত, এইটা আমি হ্যান্ডেল করি না — এটা HR বটের স্কোপের বাইরে।\n\n"
-        "আমি যেখানে সাহায্য করি: **ছুটি**, **খরচ**, **attendance**, এবং "
-        "**কোম্পানির পলিসি** (যেমন ছুটির নীতি, আবেদনের নিয়ম)।\n\n"
-        "পলিসি সম্পর্কে জানতে চাইলে নাম বা বিষয় উল্লেখ করে আবার লিখুন।"
+        "দুঃখিত, এই প্রশ্নের উত্তর দিতে পারব না — general knowledge আমি cover করি না।\n"
+        "আমি **কোম্পানির HR**-এ ফোকাস করি; পলিসি জানতে চাইলে নাম/বিষয় লিখুন।"
     ),
     (
-        "আপনার প্রশ্নটা মজার, তবে এটা আমার দায়িত্বের বাইরে — আমি সাধারণ জ্ঞান "
-        "বা ব্যক্তিগত পরামর্শ দিই না।\n\n"
-        "আমি **কোম্পানির কর্মী HR সহকারী**: ছুটি, খরচ, উপস্থিতি, uploaded policy — "
-        "এইগুলোতেই ফোকাস।\n\n"
-        "ঈদ ছুটি কত দিন বা Leave Policy এর মতো বিষয় হলে স্পষ্ট করে জিজ্ঞাসা করুন।"
+        "এটি HR বটের কাজ নয় — আমি শুধু **leave, expense, attendance** "
+        "আর **uploaded policy** নিয়ে সাহায্য করি।\n"
+        "ঈদ **কত দিন ছুটি** বা Leave Policy এর মতো বিষয় হলে স্পষ্ট করে লিখুন।"
     ),
 )
 
 _OUT_OF_SCOPE_EN: tuple[str, ...] = (
     (
-        "I can't really help with that one — it's outside what I'm set up for "
-        "(travel tips, general trivia, weather, entertainment, and the like).\n\n"
-        "I'm here for **company HR**: leave requests and balance, expenses, "
-        "attendance, and **your uploaded policies**.\n\n"
-        "If it's about leave rules or a policy, ask with the **policy name or topic** "
-        '(e.g. "Leave Policy" or "how many Eid leave days").'
+        "That's general knowledge — outside **company HR** (leave, expenses, "
+        "attendance, uploaded policies).\n"
+        "For HR rules, ask with a **policy name or topic** (e.g. Leave Policy)."
     ),
     (
-        "Good question, but not one I can answer here — I'm not a general assistant.\n\n"
-        "My lane is **HR at your company**: leave, expenses, attendance, and "
-        "official **policy documents** you've uploaded.\n\n"
-        "For policy topics, mention the policy name or subject so I can look it up."
+        "I can't help with that one — I'm your **workplace HR assistant**, not a general chatbot.\n"
+        "Try leave, expenses, attendance, or a named **company policy**."
     ),
     (
-        "That's a bit outside my scope — I don't handle personal travel or general "
-        "knowledge questions.\n\n"
-        "What I do cover: **leave**, **expenses**, **attendance**, and **company "
-        "HR policies** from your knowledge base.\n\n"
-        "Try asking with a clear policy title or HR topic if you need company rules."
+        "Good question, but not in my scope — no travel trivia, weather, or calendar dates.\n"
+        "I cover **HR at your company**; mention the policy title if you need rules."
     ),
     (
-        "I'm not able to help with that — it isn't something our HR assistant covers.\n\n"
-        "I focus on **workplace HR**: applying for leave, checking balance, expenses, "
-        "attendance, and summarizing **uploaded policies**.\n\n"
-        'Examples that work: "Leave Policy" or "Eid leave — how many days?"'
+        "I'm not set up for that — only **leave, expenses, attendance**, and "
+        "**uploaded HR policies**.\n"
+        'Examples: "Leave Policy" or "how many Eid leave days".'
     ),
 )
-
-_OUT_OF_SCOPE_PARAPHRASE_SYSTEM = """You rephrase an HR assistant's polite decline message.
-
-RULES
-- Keep the EXACT same boundaries: cannot answer the user's off-topic question; only company HR (leave, expense, attendance, uploaded policies).
-- Same language as REPLY_LANGUAGE (Bangla script for bn, English for en).
-- 2–3 short paragraphs, warm human colleague tone — not robotic, not preachy.
-- Do NOT add new facts, examples beyond leave/policy, or bullet lists.
-- Do NOT mention being an AI or bot.
-- Output ONLY the rephrased message text."""
-
 
 def _last_assistant_text(context_lines: list[str] | None) -> str:
     for line in reversed(context_lines or []):
@@ -483,43 +454,6 @@ def _pick_out_of_scope_variant(
     return random.choice(pool)
 
 
-def _maybe_paraphrase_out_of_scope(
-    base: str,
-    *,
-    user_message: str,
-    user_lang: str,
-    trace_id: str | None,
-) -> str:
-    if not trace_id:
-        return base
-    try:
-        from chat.services.llm_client import LLMClient
-
-        client = LLMClient()
-        if not client.is_configured():
-            return base
-        lang_line = (
-            "REPLY_LANGUAGE: Bangla (Bengali script)."
-            if user_lang == "bn"
-            else "REPLY_LANGUAGE: English."
-        )
-        out = client.chat_text(
-            system_prompt=_OUT_OF_SCOPE_PARAPHRASE_SYSTEM,
-            user_prompt=(
-                f"{lang_line}\n\n"
-                f"User asked (off-topic):\n{user_message}\n\n"
-                f"REFERENCE decline (same meaning, rephrase naturally):\n{base}"
-            ),
-            trace_id=trace_id,
-        )
-        cleaned = (out or "").strip()
-        if len(cleaned) >= 80:
-            return cleaned
-    except Exception:
-        pass
-    return base
-
-
 def build_out_of_scope_message(
     message: str,
     *,
@@ -528,16 +462,19 @@ def build_out_of_scope_message(
     trace_id: str | None = None,
 ) -> str:
     """Professional decline for general-knowledge / out-of-handbook questions."""
+    from chat.services.message_polish_llm import polish_template_message
     from chat.services.translator import detect_user_language
 
     user_lang = lang or detect_user_language(message)
     pool = _OUT_OF_SCOPE_BN if user_lang == "bn" else _OUT_OF_SCOPE_EN
     base = _pick_out_of_scope_variant(pool, context_lines)
-    return _maybe_paraphrase_out_of_scope(
+    return polish_template_message(
         base,
         user_message=message,
-        user_lang=user_lang,
+        message_type="out_of_scope",
         trace_id=trace_id,
+        user_lang=user_lang,
+        min_length=50,
     )
 
 

@@ -31,6 +31,13 @@ BN_FAMILY_LEAVE = (
 )
 
 
+PET_BETHA_MSG = "mar pet betha tai kalke amar leave lagbe full day paid"
+MATHA_BETHA_MSG = (
+    "amar kalke leave lagbe ..onek matha betha..tai full day paid leave nite chai"
+)
+DOCTOR_BOLE_MSG = "doctor dekhate jabo bole kalke chuti lagbe paid full day"
+
+
 @pytest.mark.parametrize(
     "message,expected_reason",
     [
@@ -40,6 +47,9 @@ BN_FAMILY_LEAVE = (
         ("need leave tomorrow because of relative death unpaid", "relative death"),
         ("family program", "family program"),
         ("fever and headache", "fever and headache"),
+        (PET_BETHA_MSG, "pet betha"),
+        (MATHA_BETHA_MSG, "matha betha"),
+        (DOCTOR_BOLE_MSG, "doctor"),
     ],
 )
 def test_extract_reason_from_message(message: str, expected_reason: str):
@@ -68,6 +78,27 @@ def test_banglish_family_jonno_prefills_reason_and_skips_reason_slot():
     assert "family" in str(draft.get("reason") or "").lower()
     missing = get_missing_slots(draft)
     assert "reason" not in missing
+
+
+def test_matha_betha_compound_skips_reason_question():
+    draft = _draft_from(MATHA_BETHA_MSG)
+    assert draft.get("start_date")
+    assert draft.get("leave_payment_category") == "paid"
+    assert draft.get("day_scope") == "full"
+    assert "matha betha" in str(draft.get("reason") or "").lower()
+    assert draft.get("leave_type") == "sick"
+    missing = get_missing_slots(draft)
+    assert missing == []
+
+
+def test_pet_betha_compound_skips_reason_question():
+    draft = _draft_from(PET_BETHA_MSG)
+    assert draft.get("start_date")
+    assert draft.get("leave_payment_category") == "paid"
+    assert draft.get("day_scope") == "full"
+    assert "pet betha" in str(draft.get("reason") or "").lower()
+    missing = get_missing_slots(draft)
+    assert missing == []
 
 
 def test_compound_user_message_prefills_date_payment_reason():

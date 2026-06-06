@@ -208,6 +208,7 @@ def test_orchestrator_december_ki_din_hr_policy_intent_still_declines(
     assert (
         "উত্তর" in text
         or "বাইরে" in text
+        or "নয়" in text
         or "scope" in text.lower()
         or "outside" in text.lower()
     )

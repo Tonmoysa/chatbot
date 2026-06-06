@@ -131,6 +131,32 @@ _REASON_BN_JONNO_RE = re.compile(
     r"((?:famil+y|পরিবার|wedding|বিয়ে|sick|অসুস্থ)(?:\s+\w+){0,3})\s+er\s+jonno",
     re.I | re.UNICODE,
 )
+_REASON_BN_TAI_RE = re.compile(
+    r"^(.+?)\s+tai\s+"
+    r"(?:amar|ami|my|kal|kalke|kalker|agamikal|agami\s*kal|tomorrow|ajke|aj\s*ke|"
+    r"leave|chuti|chhuti|chhutti|ছুটি)",
+    re.I | re.UNICODE,
+)
+# Inline causal: "...matha betha..tai full day paid leave" (not only at message start).
+_REASON_BN_TAI_INLINE_RE = re.compile(
+    r"((?:onek\s+|khub\s+|bishal\s+)?(?:matha|pet|mathar?)\s*betha)\s*\.{0,3}\s*tai\b",
+    re.I | re.UNICODE,
+)
+_REASON_BN_BOLE_RE = re.compile(
+    r"^(.+?)\s+bole\s+"
+    r"(?:amar|ami|my|kal|kalke|kalker|agamikal|agami\s*kal|tomorrow|ajke|aj\s*ke|"
+    r"leave|chuti|chhuti|chhutti|ছুটি)",
+    re.I | re.UNICODE,
+)
+_HEALTH_REASON_RE = re.compile(
+    r"\b("
+    r"matha\s*betha|mathar?\s*betha|pet\s*betha|stomach\s*(?:pain|ache|hurt)|"
+    r"headache|head\s*(?:pain|ache)|fever|"
+    r"পেট\s*ব্যথা|মাথা\s*ব্যথা|জ্বর|ব্যথা|অসুস্থ|"
+    r"doctor|ডাক্তার|medical\s+appointment"
+    r")\b",
+    re.I | re.UNICODE,
+)
 _REASON_KEYWORD_RE = re.compile(
     r"\b("
     r"family\s+(?:program|function|event|matter|emergency|issue|work|gathering|wedding)|"
@@ -195,6 +221,29 @@ def extract_reason_from_message(message: str) -> str | None:
         reason = _normalize_reason_token(_trim_reason_fragment(m.group(1)))
         if len(reason) >= 3:
             return reason[:2000]
+
+    m = _REASON_BN_TAI_INLINE_RE.search(raw)
+    if m:
+        reason = _trim_reason_fragment(m.group(1))
+        if len(reason) >= 3:
+            return reason[:2000]
+
+    m = _REASON_BN_TAI_RE.search(raw)
+    if m:
+        reason = _trim_reason_fragment(m.group(1))
+        if len(reason) >= 3:
+            return reason[:2000]
+
+    m = _REASON_BN_BOLE_RE.search(raw)
+    if m:
+        reason = _trim_reason_fragment(m.group(1))
+        if len(reason) >= 3:
+            return reason[:2000]
+
+    if _LEAVE_INTENT_RE.search(raw):
+        hm = _HEALTH_REASON_RE.search(raw)
+        if hm:
+            return hm.group(0).strip()[:2000]
 
     m = _REASON_KEYWORD_RE.search(raw)
     if m:
@@ -394,49 +443,3 @@ def extract_leave_slots(
         _set(out.reason, reason, confidence="high", source="rules_reason")
 
     return out
-
-
-def merge_llm_entities_into_extraction(
-    extraction: LeaveSlotExtraction, entities: dict[str, Any]
-) -> None:
-    """Overlay LLM/rule extractor fields when slot extractor did not set high-confidence values."""
-
-    def _merge_slot(name: str, key: str | None = None) -> None:
-        key = key or name
-        v = entities.get(key)
-        if v is None or v == "":
-            return
-        sv: SlotValue = getattr(extraction, name)
-        if sv.confidence == "high":
-            return
-        _set(sv, v, confidence="high", source="llm_entities")
-
-    _merge_slot("leave_type")
-    _merge_slot("start_date")
-    _merge_slot("end_date")
-    if entities.get("date") and extraction.start_date.confidence != "high":
-        _set(
-            extraction.start_date,
-            str(entities["date"]).split("T")[0],
-            confidence="high",
-            source="llm_date",
-        )
-    _merge_slot("days")
-    _merge_slot("reason")
-    pay = entities.get("leave_payment_category")
-    if pay:
-        p = str(pay).lower()
-        if p in {"paid", "pto", "annual", "casual"}:
-            _merge_slot("leave_payment_category")
-            extraction.leave_payment_category.value = "paid"
-        elif p in {"lwop", "unpaid"}:
-            extraction.leave_payment_category.value = "lwop"
-    scope = entities.get("day_scope")
-    if scope:
-        s = str(scope).lower()
-        if s in {"half", "half_day", "half-day"}:
-            extraction.day_scope.value = "half"
-            extraction.day_scope.confidence = "high"
-        elif s in {"full", "full_day", "full-day"}:
-            extraction.day_scope.value = "full"
-            extraction.day_scope.confidence = "high"

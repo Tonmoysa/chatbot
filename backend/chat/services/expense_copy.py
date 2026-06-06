@@ -2,15 +2,93 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 ReplyLang = str  # "en" | "bn" | "banglish"
+
+_ACK_OPENINGS: dict[ReplyLang, tuple[str, ...]] = {
+    "en": ("Noted for", "Got it for", "Recorded for"),
+    "bn": ("নোট করেছি —", "যোগ করেছি —", "লিপিবদ্ধ —"),
+    "banglish": ("Note korechi —", "Likhe rekhechi —", "Save korechi —"),
+}
+
+_MORE_LINES_EN: tuple[str, ...] = (
+    "Any more lines? (e.g. `bus 50 office to home`) — or **done** / **yes** for the summary.",
+    "Anything else to add? One line is fine — or type **done** when you're ready to review.",
+    "More expenses today? Add a line, or say **done** to see the summary.",
+)
+
+_MORE_LINES_BN: tuple[str, ...] = (
+    "আর কিছু যোগ করবেন? (যেমন: `bus 50 office to home`) — না হলে **শেষ** বা **হ্যাঁ** লিখুন।",
+    "আর কোনো খরচ আছে? এক লাইন লিখুন, অথবা **শেষ** লিখে summary দেখুন।",
+    "বাকি কিছু থাকলে লিখুন — শেষ করতে **শেষ** বা **হ্যাঁ** বলুন।",
+)
+
+_MORE_LINES_BANGLISH: tuple[str, ...] = (
+    "Ar kono line? (e.g. `bus 50 office to home`) — na hole **shesh** / **yes** diye summary dekhen.",
+    "Aro kharcha ache? Ek line likhun, ba **shesh** likhe review nen.",
+    "Baki kichu thakle likhun — **shesh** dile summary asbe.",
+)
 
 
 def normalize_reply_lang(lang: str | None) -> ReplyLang:
     if lang in ("en", "bn", "banglish"):
         return lang
     return "bn"
+
+
+def pick_rotating_phrase(phrases: tuple[str, ...], *, seed: str = "") -> str:
+    """Pick a stable-but-varied phrase from a pool (same seed → same pick in one turn)."""
+    if not phrases:
+        return ""
+    key = (seed or "default").encode("utf-8")
+    idx = int(hashlib.md5(key).hexdigest(), 16) % len(phrases)
+    return phrases[idx]
+
+
+def format_expense_line_bullet(row: dict[str, Any], lang: ReplyLang) -> str:
+    """Compact line for grouped acknowledgment (amounts/categories must stay exact)."""
+    cat = str(row.get("category") or "Other")
+    amt = float(row.get("amount") or 0)
+    frm = str(row.get("from_location") or "").strip()
+    to = str(row.get("to_location") or "").strip()
+    if frm and to:
+        route = f"{frm} → {to}"
+        return f"**{cat}** ({route}) — **{amt:g} Tk**"
+    return f"**{cat}** — **{amt:g} Tk**"
+
+
+def grouped_expense_ack_header(incurred_date_iso: str, lang: ReplyLang, *, seed: str = "") -> str:
+    opening = pick_rotating_phrase(_ACK_OPENINGS.get(lang, _ACK_OPENINGS["bn"]), seed=seed)
+    if not incurred_date_iso:
+        if lang == "en":
+            return "So far:"
+        if lang == "banglish":
+            return "E porjonto:"
+        return "এ পর্যন্ত:"
+    if lang == "en":
+        return f"{opening} **{incurred_date_iso}**:"
+    if lang == "banglish":
+        return f"{opening} **{incurred_date_iso}**:"
+    return f"{opening} **{incurred_date_iso}** তারিখ:"
+
+
+def expense_draft_resume_hint(lang: ReplyLang) -> str:
+    if lang == "en":
+        return (
+            "Your expense draft is still saved — say **show my expense** or add a line "
+            "(e.g. lunch 100) when you want to continue."
+        )
+    if lang == "banglish":
+        return (
+            "Apnar expense draft save ache — chalate chaile **expense ta dekh** ba "
+            "line likhun (e.g. lunch 100)."
+        )
+    return (
+        "আপনার খরচের draft **সংরক্ষিত আছে** — চালাতে চাইলে **expense ta dekh** লিখুন, "
+        "অথবা line যোগ করুন (যেমন: lunch 100)।"
+    )
 
 
 def lang_from_block(block: dict[str, Any] | None) -> ReplyLang:
@@ -23,65 +101,78 @@ def category_options_line() -> str:
     return ", ".join(EXPENSE_CATEGORIES)
 
 
-def ask_category_prompt(amount: float, lang: ReplyLang) -> str:
+def ask_category_prompt(
+    amount: float, lang: ReplyLang, *, include_lead: bool = True
+) -> str:
     opts = category_options_line()
     if lang == "en":
-        return (
+        lead = (
             f"Got **{amount:g} Tk** — but the **category** is not clear.\n\n"
+            if include_lead
+            else ""
+        )
+        return (
+            f"{lead}"
             "What was this expense for? Pick a CRM category:\n"
             f"- {opts}\n\n"
             "Example: `snack`, `other`, `bus` — one word is enough."
         )
     if lang == "banglish":
-        return (
+        lead = (
             f"**{amount:g} Tk** expense peyechi — kintu **category** clear na.\n\n"
+            if include_lead
+            else ""
+        )
+        return (
+            f"{lead}"
             "Ei kharcha kiser jonno? CRM form onujayi category bachen:\n"
             f"- {opts}\n\n"
             "Example: `snack`, `other`, `bus` — ek word e likhlei hobe."
         )
-    return (
+    lead = (
         f"**{amount:g} টাকা** খরচের তথ্য পেয়েছি — কিন্তু ধরন স্পষ্ট নয়।\n\n"
+        if include_lead
+        else ""
+    )
+    return (
+        f"{lead}"
         "এই খরচটি **কিসের জন্য** হয়েছে? CRM ফর্ম অনুযায়ী category বেছে নিন:\n"
         f"- {opts}\n\n"
         "উদাহরণ: `snack`, `other`, `bus` — এক শব্দেই লিখলেই হবে।"
     )
 
 
-def ask_from_to_prompt(category: str, amount: float, lang: ReplyLang) -> str:
+def ask_from_to_prompt(
+    category: str, amount: float, lang: ReplyLang, *, include_lead: bool = True
+) -> str:
     if lang == "en":
+        lead = f"**{category}** — **{amount:g} Tk**.\n\n" if include_lead else ""
         return (
-            f"**{category}** — **{amount:g} Tk**.\n\n"
+            f"{lead}"
             "This category needs **From** and **To** (like the CRM form).\n"
             "Write: `office theke badda` or `from office to motijheel`"
         )
     if lang == "banglish":
+        lead = f"**{category}** — **{amount:g} Tk**.\n\n" if include_lead else ""
         return (
-            f"**{category}** — **{amount:g} Tk**.\n\n"
+            f"{lead}"
             "Ei dhoroner kharchay **From** ar **To** lagbe (CRM form er moto).\n"
             "Likhun: `office theke badda` ba `from office to motijheel`"
         )
+    lead = f"**{category}** — **{amount:g} Tk**।\n\n" if include_lead else ""
     return (
-        f"**{category}** — **{amount:g} Tk**।\n\n"
+        f"{lead}"
         "এই ধরনের খরচে **From** ও **To** লাগে (যেমন স্ক্রিনশটের ফর্মে)।\n"
         "লিখুন: `office theke badda` বা `from office to motijheel`"
     )
 
 
-def ask_more_lines_prompt(lang: ReplyLang) -> str:
+def ask_more_lines_prompt(lang: ReplyLang, *, seed: str = "") -> str:
     if lang == "en":
-        return (
-            "Any more expenses? You can write one line (e.g. bus 50 office to home).\n"
-            "If not, type **done** or **yes** to see the summary."
-        )
+        return pick_rotating_phrase(_MORE_LINES_EN, seed=seed or "more")
     if lang == "banglish":
-        return (
-            "Ar kono kharcha ache? Ek line e likhte parben (e.g. bus 50 office to home).\n"
-            "Na thakle **shesh** ba **yes** likhe summary dekhen."
-        )
-    return (
-        "আর কোনো খরচ আছে? এক লাইনে লিখতে পারেন (যেমন: bus 50 office to home)।\n"
-        "না থাকলে **শেষ** বা **হ্যাঁ** লিখে summary দেখুন।"
-    )
+        return pick_rotating_phrase(_MORE_LINES_BANGLISH, seed=seed or "more")
+    return pick_rotating_phrase(_MORE_LINES_BN, seed=seed or "more")
 
 
 def review_confirm_footer(lang: ReplyLang) -> str:

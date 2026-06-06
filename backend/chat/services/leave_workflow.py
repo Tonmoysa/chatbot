@@ -24,7 +24,6 @@ from chat.services.leave_slot_extraction import (
     explicit_leave_type_from_message,
     extract_leave_slots,
     is_payment_only_message,
-    merge_llm_entities_into_extraction,
 )
 from chat.services.leave_confirm import (
     build_confirmation_prompt,
@@ -44,6 +43,7 @@ from chat.services.leave_fsm import (
 )
 from chat.services.leave_slots import (
     SLOT_DATES,
+    SLOT_SCOPE,
     apply_wizard_answer,
     generate_question,
     get_missing_slots,
@@ -144,7 +144,9 @@ def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
     missing = get_missing_slots(draft)
     if not missing:
         return None
-    return generate_question(missing[0], draft, remaining=len(missing))
+    return generate_question(
+        missing[0], draft, remaining=len(missing), missing=missing
+    )
 
 
 def pending_step(workflow_state: dict[str, Any] | None) -> str | None:
@@ -185,7 +187,11 @@ def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
 
 
 def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
+    from chat.services.leave.normalization import message_explicitly_states_day_scope
+
     if draft.get("day_scope"):
+        return
+    if not message_explicitly_states_day_scope(message):
         return
     low = message.lower()
     if re.search(r"\bhalf\b|হাফ|অর্ধ", low):
@@ -205,8 +211,11 @@ def merge_extractor_entities(
     entities: dict[str, Any],
     *,
     overwrite: bool = False,
+    message: str = "",
 ) -> None:
     """Patch draft from entities — by default never clobber filled slots."""
+    from chat.services.leave.normalization import message_explicitly_states_day_scope
+
     dt = entities.get("document_text")
     if dt and str(dt).strip():
         draft["document_text"] = str(dt).strip()
@@ -232,6 +241,8 @@ def merge_extractor_entities(
             )
             continue
         if key == "day_scope":
+            if not message_explicitly_states_day_scope(message):
+                continue
             s = str(v).strip().lower()
             draft["day_scope"] = DAY_SCOPE_HALF if s.startswith("half") else DAY_SCOPE_FULL
             continue
@@ -287,54 +298,11 @@ def _apply_slots_from_message(
     overwrite: bool = False,
 ) -> None:
     """Parse one or more slot values from a user message into the draft."""
-    if is_payment_only_message(message):
-        _infer_payment_category(message, draft, force=True)
-        _infer_day_scope(message, draft)
-        return
+    from chat.services.leave.entity_pipeline import LeaveEntityPipeline
 
-    parts = [p.strip() for p in re.split(r"[,;]+", message) if p.strip()]
-    if not parts:
-        parts = [message]
-    seen: set[str] = set()
-    for part in parts:
-        if part in seen:
-            continue
-        seen.add(part)
-        ex = extract_leave_slots(part, skip_leave_phrase_gate=True)
-        prefill_draft_from_extraction(
-            draft, ex, external_entities=None, overwrite=overwrite
-        )
-        _infer_leave_type(part, draft)
-        _infer_payment_category(part, draft)
-        _infer_day_scope(part, draft)
-    ext = dict(entities)
-    ex_whole = extract_leave_slots(message, skip_leave_phrase_gate=True)
-    if ex_whole.leave_payment_category.confidence != "high":
-        ext.pop("leave_payment_category", None)
-    if ex_whole.day_scope.confidence != "high":
-        ext.pop("day_scope", None)
-    if ex_whole.reason.confidence != "high":
-        ext.pop("reason", None)
-        ext.pop("description", None)
-    merge_llm_entities_into_extraction(ex_whole, ext)
-    slot_overwrite = overwrite or _is_compound_slot_message(message)
-    prefill_draft_from_extraction(
-        draft, ex_whole, external_entities=ext, overwrite=slot_overwrite
+    LeaveEntityPipeline().apply_to_draft(
+        draft, message, entities, overwrite=overwrite
     )
-    explicit_lt = explicit_leave_type_from_message(message)
-    if explicit_lt:
-        draft["leave_type"] = explicit_lt
-    _infer_leave_type(message, draft)
-    _infer_payment_category(message, draft)
-    _infer_day_scope(message, draft)
-    from chat.services.leave_slot_extraction import extract_reason_from_message
-
-    reason = extract_reason_from_message(message)
-    if reason and (overwrite or not draft.get("reason")):
-        draft["reason"] = reason
-        draft.pop("_reason_implied", None)
-    if overwrite:
-        _force_scope_from_message(message, draft)
 
 
 def _force_scope_from_message(message: str, draft: dict[str, Any]) -> bool:
@@ -402,6 +370,7 @@ def process_leave_turn(
 
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message
+    had_scope = bool(draft.get("day_scope"))
 
     from chat.services.leave_confirm import (
         SLOT_EDIT_MENU,
@@ -474,14 +443,37 @@ def process_leave_turn(
             return _finish_edit_return_review(pack["workflow_state"], d2)
         return pack
 
-    if pending_slot and try_apply_inline_edit_value(draft, pending_slot, message):
+    from chat.services.leave.normalization import message_explicitly_states_day_scope
+
+    if (
+        pending_slot
+        and not _is_compound_slot_message(message)
+        and try_apply_inline_edit_value(draft, pending_slot, message)
+    ):
         pass
-    elif pending_slot and _is_direct_slot_answer(message, pending_slot):
+    elif (
+        pending_slot == SLOT_SCOPE
+        and not message_explicitly_states_day_scope(message)
+        and not _is_direct_slot_answer(message, pending_slot)
+    ):
+        # User repeated the compound request or sent unrelated text — keep asking.
+        pass
+    elif (
+        pending_slot
+        and not _is_compound_slot_message(message)
+        and _is_direct_slot_answer(message, pending_slot)
+    ):
         apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
     else:
         before = dict(draft)
         _apply_slots_from_message(draft, message, entities, overwrite=False)
         draft = deep_merge_draft(before, draft)
+        if (
+            not message_explicitly_states_day_scope(message)
+            and not (pending_slot == SLOT_SCOPE and _is_direct_slot_answer(message, SLOT_SCOPE))
+            and not had_scope
+        ):
+            draft.pop("day_scope", None)
 
     normalize_end_equals_start_if_missing(draft)
     date_err: str | None = None
@@ -521,6 +513,7 @@ def process_leave_turn(
         remaining=len(missing),
         date_error=date_err if slot == SLOT_DATES else None,
         extraction=extraction,
+        missing=missing,
     )
     return {
         "workflow_state": wf,

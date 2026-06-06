@@ -31,18 +31,34 @@ def tenant_leave_balance(orch: ChatOrchestrator, employee_id: str, session_id: s
 
 
 @pytest.mark.django_db
-def test_expense_auto_threshold():
+def test_expense_workflow_submit():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_EXPENSE_CLAIM,
+        entities={
+            "expense_workflow_submit": True,
+            "expense_items": [{"category": "Lunch", "amount": 100}],
+        },
+        crm_context={},
+    )
+    assert d["outcome"] == "SUBMITTED"
+    assert "EXPENSE_WORKFLOW_SUBMITTED" in d.get("rules_applied", [])
+
+
+@pytest.mark.django_db
+def test_expense_without_wizard_uses_wizard_path():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_EXPENSE_CLAIM,
         entities={"amount": 100},
         crm_context={},
     )
-    assert d["outcome"] == "AUTO_APPROVED"
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_USE_WIZARD" in d.get("rules_applied", [])
 
 
 @pytest.mark.django_db
-def test_expense_pending_over_threshold():
+def test_expense_amount_only_routes_to_wizard():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_EXPENSE_CLAIM,
@@ -50,30 +66,31 @@ def test_expense_pending_over_threshold():
         crm_context={},
     )
     assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_USE_WIZARD" in d.get("rules_applied", [])
 
 
 @pytest.mark.django_db
-def test_expense_over_threshold_with_receipt_routes_to_hr():
+def test_expense_receipt_without_wizard_still_uses_wizard():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_EXPENSE_CLAIM,
         entities={"amount": 400, "document_text": "Uber Trip Total 400 BDT"},
         crm_context={},
     )
-    assert d["outcome"] == "PENDING_APPROVAL"
-    assert d.get("route_to") == "HR"
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_USE_WIZARD" in d.get("rules_applied", [])
 
 
 @pytest.mark.django_db
-def test_expense_receipt_amount_mismatch_pending_hr():
+def test_expense_receipt_mismatch_without_wizard_uses_wizard():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_EXPENSE_CLAIM,
         entities={"amount": 500, "document_text": "Uber receipt total 300"},
         crm_context={},
     )
-    assert d["outcome"] == "PENDING_APPROVAL"
-    assert d.get("route_to") == "HR"
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "EXPENSE_USE_WIZARD" in d.get("rules_applied", [])
 
 
 @pytest.mark.django_db
@@ -131,6 +148,39 @@ def test_leave_lwop_routes_to_manager():
 
 
 @pytest.mark.django_db
+def test_leave_wizard_confirmed_skips_field_clarification():
+    """Wizard-owned fields should not be re-checked after user confirms the draft."""
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_LEAVE_REQUEST,
+        entities={
+            "leave_workflow_confirmed": True,
+            "leave_payment_category": "paid",
+            "day_scope": "full",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-10",
+            "reason": "Family event",
+        },
+        crm_context={"leave_balance_days": 5},
+    )
+    assert d["outcome"] == "SUBMITTED"
+    assert "LEAVE_PAYMENT_UNKNOWN" not in (d.get("rules_applied") or [])
+    assert "LEAVE_REASON_REQUIRED" not in (d.get("rules_applied") or [])
+
+
+@pytest.mark.django_db
+def test_leave_without_wizard_still_requires_fields():
+    eng = DecisionEngine()
+    d = eng.evaluate(
+        intent=INTENT_LEAVE_REQUEST,
+        entities={"leave_payment_category": "paid"},
+        crm_context={},
+    )
+    assert d["outcome"] == "NEEDS_CLARIFICATION"
+    assert "LEAVE_DAY_SCOPE_UNKNOWN" in (d.get("rules_applied") or [])
+
+
+@pytest.mark.django_db
 def test_attendance_pending_review():
     eng = DecisionEngine()
     d = eng.evaluate(
@@ -143,23 +193,30 @@ def test_attendance_pending_review():
 
 @pytest.mark.django_db
 def test_expense_claim_duplicate_is_deduped_by_orchestrator():
-    """LEGACY dedupe helper — enterprise workflow uses confirm + reference ids."""
+    """Enterprise workflow: collect → review → submit confirm → CRM."""
     orch = ChatOrchestrator()
     first = run_tenant_chat(
         orch,
-        message="other expense 100 taka",
+        message="lunch 100",
         session_id=None,
         employee_id="dedupe-expense-unique",
         trace_id="t1",
     )
     sid = first.get("_session_id") or first.get("session_id")
     assert sid
-    second = run_tenant_chat(
+    run_tenant_chat(
         orch,
         message="হ্যাঁ",
         session_id=sid,
         employee_id="dedupe-expense-unique",
         trace_id="t1b",
+    )
+    second = run_tenant_chat(
+        orch,
+        message="হ্যাঁ",
+        session_id=sid,
+        employee_id="dedupe-expense-unique",
+        trace_id="t1c",
     )
     rid1 = second["response"]["request_id"]
     assert rid1
@@ -167,17 +224,24 @@ def test_expense_claim_duplicate_is_deduped_by_orchestrator():
 
     third = run_tenant_chat(
         orch,
-        message="other expense 100 taka",
+        message="lunch 100",
         session_id=sid,
         employee_id="dedupe-expense-unique",
-        trace_id="t1c",
+        trace_id="t1d",
+    )
+    run_tenant_chat(
+        orch,
+        message="হ্যাঁ",
+        session_id=sid,
+        employee_id="dedupe-expense-unique",
+        trace_id="t1e",
     )
     fourth = run_tenant_chat(
         orch,
         message="হ্যাঁ",
         session_id=sid,
         employee_id="dedupe-expense-unique",
-        trace_id="t1d",
+        trace_id="t1f",
     )
     assert fourth["decision"]["outcome"] == "SUBMITTED"
     assert fourth["response"]["request_id"]
@@ -437,7 +501,7 @@ def test_expense_daily_cumulative_cap_blocks_second_small_claim(monkeypatch):
         crm_context={"expense_day_approved_total": 300.0},
     )
     assert d["outcome"] == "NEEDS_CLARIFICATION"
-    assert "EXPENSE_DAILY_CAP_EXCEEDED" in " ".join(d.get("rules_applied", []))
+    assert "EXPENSE_USE_WIZARD" in d.get("rules_applied", [])
 
 
 @pytest.mark.django_db
@@ -457,7 +521,7 @@ def test_expense_same_day_300_then_200_second_needs_receipt(monkeypatch):
     orch = ChatOrchestrator()
     first = run_tenant_chat(
         orch,
-        message="amar ajke 300 taka cost hoyeche",
+        message="lunch 300",
         session_id=None,
         employee_id=emp,
         trace_id="d1",
@@ -470,10 +534,17 @@ def test_expense_same_day_300_then_200_second_needs_receipt(monkeypatch):
         employee_id=emp,
         trace_id="d1b",
     )
+    run_tenant_chat(
+        orch,
+        message="হ্যাঁ",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="d1c",
+    )
 
     second = run_tenant_chat(
         orch,
-        message="amar ajke 200 taka cost hoyeche",
+        message="lunch 200",
         session_id=sid,
         employee_id=emp,
         trace_id="d2",
@@ -501,9 +572,9 @@ def test_expense_three_small_claims_same_day_sum_to_cap_then_fourth_blocked(monk
     orch = ChatOrchestrator()
     sid = None
     msgs = (
-        "amar ajke 100 taka rickshaw vara hoyeche",
-        "amar ajke 100 taka lunch cost hoyeche",
-        "amar ajke 100 taka tea stall hoyeche",
+        "rickshaw 100",
+        "lunch 100",
+        "snack 100",
     )
     for i, msg in enumerate(msgs):
         r = run_tenant_chat(
@@ -521,9 +592,16 @@ def test_expense_three_small_claims_same_day_sum_to_cap_then_fourth_blocked(monk
             employee_id=emp,
             trace_id=f"3x{i}-ok",
         )
+        run_tenant_chat(
+            orch,
+            message="হ্যাঁ",
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"3x{i}-submit",
+        )
     fourth = run_tenant_chat(
         orch,
-        message="amar ajke 50 taka cost hoyeche",
+        message="lunch 50",
         session_id=sid,
         employee_id=emp,
         trace_id="3x4",
@@ -536,7 +614,11 @@ def test_expense_future_date_blocked_by_policy():
     eng = DecisionEngine()
     d = eng.evaluate(
         intent=INTENT_EXPENSE_CLAIM,
-        entities={"amount": 300, "expense_incurred_date": "2030-01-02"},
+        entities={
+            "expense_workflow_submit": True,
+            "expense_items": [{"category": "Lunch", "amount": 300}],
+            "expense_incurred_date": "2030-01-02",
+        },
         crm_context={},
     )
     assert d["outcome"] == "NEEDS_CLARIFICATION"
@@ -560,18 +642,25 @@ def test_expense_today_then_tomorrow_same_amount_not_duplicate(monkeypatch):
     orch = ChatOrchestrator()
     first = run_tenant_chat(
         orch,
-        message="amar ajke 300 taka cost hoyeche",
+        message="lunch 300",
         session_id=None,
         employee_id=emp,
         trace_id="e1",
     )
     sid = first["_session_id"]
-    second_confirm = run_tenant_chat(
+    run_tenant_chat(
         orch,
         message="হ্যাঁ",
         session_id=sid,
         employee_id=emp,
         trace_id="e1b",
+    )
+    second_confirm = run_tenant_chat(
+        orch,
+        message="হ্যাঁ",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="e1c",
     )
     assert second_confirm["decision"]["outcome"] == "SUBMITTED"
     rid1 = second_confirm["response"]["request_id"]

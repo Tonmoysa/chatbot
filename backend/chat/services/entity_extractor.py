@@ -119,6 +119,64 @@ For LEAVE_REQUEST, leave_payment_category is paid/time-off balance versus unpaid
 """
 
 
+def _expense_entity_system_prompt() -> str:
+    today = date.today().isoformat()
+    return f"""You extract EXPENSE CLAIM fields from Bangla, Banglish, and English messages.
+Reply with STRICT JSON only (no markdown):
+{{
+  "expense_incurred_date": "YYYY-MM-DD" or null,
+  "amount": null or number,
+  "description": string or null,
+  "expense_lines": [
+    {{
+      "category": "Lunch"|"Snack"|"Bus"|"Rickshaw"|"Train"|"Bike"|"CNG"|"Metro Rail"|"Other",
+      "amount": number,
+      "from_location": string or null,
+      "to_location": string or null,
+      "notes": string or null
+    }}
+  ] or null
+}}
+Rules:
+- expense_lines: one object per cost when amounts can be inferred from the message.
+- category: map food→Lunch, transport/rickshaw/bus→matching travel category, unknown→Other.
+- Travel categories (Bus, Rickshaw, Train, Bike, CNG, Metro Rail) need from_location/to_location when a route is stated.
+- Free-form examples: "office theke bashay 150" → travel line with route + amount; "ajke khawa 200" → Lunch 200.
+- expense_incurred_date: ajke/aj=today ({today}), kal/kalke=yesterday, agamikal=tomorrow.
+- amount: top-level only when a single total is stated without line breakdown.
+- Use null when unknown. Never invent locations or amounts not grounded in the message.
+"""
+
+
+def _leave_entity_system_prompt() -> str:
+    today = date.today().isoformat()
+    return f"""You extract LEAVE REQUEST fields from Bangla, Banglish, and English messages.
+Reply with STRICT JSON only (no markdown):
+{{
+  "start_date": "YYYY-MM-DD" or null,
+  "end_date": "YYYY-MM-DD" or null,
+  "date": "YYYY-MM-DD" or null,
+  "days": null or number,
+  "leave_type": "sick"|"casual"|"annual"|"emergency"|null,
+  "leave_payment_category": "paid"|"lwop"|null,
+  "day_scope": "full"|"half"|null,
+  "reason": string or null,
+  "description": string or null
+}}
+Rules:
+- reason: ALWAYS extract the user's stated cause when present — any natural wording.
+  Health: matha betha, pet betha, jhor, fever, doctor, weakness, vomiting, etc.
+  Personal: family program, wedding, travel, emergency at home, relative sick, etc.
+  Causal Bangla/Banglish: text before tai/bole/er jonno is often the reason.
+  Keep the user's own words (Bangla or English); do not paraphrase into generic text.
+- leave_type: infer sick when illness/pain/fever/medical visit is implied; otherwise null unless explicit.
+- Dates: kal/kalke/agamikal=tomorrow, ajke/aj=today (today is {today}).
+- paid/lwop from paid/বেতনসহ vs unpaid/বেতন ছাড়া.
+- full/half from full day/পুরো দিন vs half/হাফ.
+- Use null when unknown. Never invent reasons or dates not in the message.
+"""
+
+
 class EntityExtractor:
     def __init__(self, llm: LLMClient | None = None) -> None:
         self._llm = llm or LLMClient()
@@ -133,8 +191,14 @@ class EntityExtractor:
         ctx = "\n".join(context_lines[-8:])
         user_block = f"Intent: {intent}\nRecent context:\n{ctx}\n\nUser message:\n{message}"
         if self._llm.is_configured():
+            if intent == INTENT_LEAVE_REQUEST:
+                system_prompt = _leave_entity_system_prompt()
+            elif intent == INTENT_EXPENSE_CLAIM:
+                system_prompt = _expense_entity_system_prompt()
+            else:
+                system_prompt = ENTITY_SYSTEM
             out = self._llm.chat_json(
-                system_prompt=ENTITY_SYSTEM,
+                system_prompt=system_prompt,
                 user_prompt=user_block,
                 trace_id=trace_id,
             )
@@ -162,6 +226,7 @@ class EntityExtractor:
             "policy_topic",
             "reason",
             "expense_incurred_date",
+            "expense_lines",
             "document_read",
         )}
         low = message.lower()
@@ -298,8 +363,20 @@ class EntityExtractor:
         if explicit_lt:
             e["leave_type"] = explicit_lt
         elif intent == INTENT_LEAVE_REQUEST and not message_mentions_leave_type(message):
-            # Do not trust LLM-invented leave types (e.g. annual after reading policy context).
-            e["leave_type"] = None
+            # Keep LLM leave_type when a semantic reason or health signal is present.
+            from chat.services.leave.normalization import (
+                infer_leave_type_from_text,
+                text_has_sick_signal,
+            )
+
+            llm_reason = str(e.get("reason") or e.get("description") or "").strip()
+            has_semantic = bool(llm_reason) or text_has_sick_signal(message)
+            if not has_semantic:
+                e["leave_type"] = None
+            elif not e.get("leave_type"):
+                inferred = infer_leave_type_from_text(message, llm_reason)
+                if inferred:
+                    e["leave_type"] = inferred
         elif re.search(r"\bsick(?:ness)?\b|\bill(?:ness)?\b|অসুস্থ|জ্বর", low):
             e["leave_type"] = e.get("leave_type") or "sick"
         elif re.search(r"\bannual|vacation|\bpto\b|বার্ষিক", low):
