@@ -19,6 +19,11 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
         parse_amount_only,
         parse_category_token,
     )
+    from chat.services.expense.wizard_commands import (
+        is_expense_wizard_command,
+        wants_expense_done_command,
+        wants_expense_submit_command,
+    )
     from chat.services.expense_workflow import (
         wants_expense_summary,
         wants_resume_or_show_expense,
@@ -28,6 +33,10 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
+    if wants_expense_submit_command(text) or wants_expense_done_command(text):
+        return True
+    if is_expense_wizard_command(text):
+        return True
     if wants_resume_or_show_expense(text):
         return True
     if wants_expense_summary(text):

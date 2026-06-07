@@ -72,6 +72,56 @@ def test_rickshaw_comma_separated_route_in_one_message():
     assert ext.malformed == []
 
 
+def test_rail_shorthand_extracted_as_metro_rail():
+    msg = "lunch 100, bus 200, rail 400"
+    ext = extract_expense_items(msg)
+    by_cat = {row.category: row.amount for row in ext.items}
+    assert by_cat == {"Lunch": 100.0, "Bus": 200.0, "Metro Rail": 400.0}
+    assert parse_category_token("rail") == "Metro Rail"
+
+
+def test_compound_reentry_after_partial_route_no_duplicate_lunch():
+    """Re-sending lunch 100, bus 200, rail 400 must not duplicate Lunch or re-add Bus."""
+    msg = "lunch 100, bus 200, rail 400"
+    wf: dict = {}
+    r1 = process_expense_turn(workflow_state=wf, message=msg)
+    r2 = process_expense_turn(
+        workflow_state=r1["workflow_state"],
+        message="office theke badda",
+    )
+    items_before = list(r2["items"])
+    assert sum(1 for r in items_before if r.get("category") == "Lunch") == 1
+
+    r3 = process_expense_turn(workflow_state=r2["workflow_state"], message=msg)
+    items_after = list(r3["items"])
+    assert sum(1 for r in items_after if r.get("category") == "Lunch") == 1
+    q = r3.get("question") or ""
+    assert "unchanged" in q.lower() or "duplicate" in q.lower() or "abar" in q.lower()
+
+
+def test_joma_daw_keeps_rail_line_in_pending_queue():
+    wf: dict = {}
+    r1 = process_expense_turn(
+        workflow_state=wf,
+        message="lunch 100, bus 200, rail 400",
+    )
+    block = r1["workflow_state"]["expense_request"]
+    queue = list(block.get("pending_queue") or [])
+    assert any(
+        row.get("category") == "Metro Rail" and float(row.get("amount") or 0) == 400.0
+        for row in queue
+    )
+    q1 = r1.get("question") or ""
+    assert "Metro Rail" in q1 or "400" in q1
+    r2 = process_expense_turn(
+        workflow_state=r1["workflow_state"],
+        message="joma daw",
+    )
+    q2 = r2.get("question") or ""
+    assert "Metro Rail" in q2 or "400" in q2
+    assert "submit" in q2.lower() or "জমা" in q2 or "joma" in q2.lower()
+
+
 def test_rickshaw_hyphen_route_not_dropped_from_pending():
     """Digits in sector-style routes must not reset the pending From/To line."""
     wf = {"expense_request": {

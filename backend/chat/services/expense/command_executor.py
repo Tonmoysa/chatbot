@@ -1,0 +1,189 @@
+"""Execute typed expense command plans (Phase 2)."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from chat.services.expense.command_schema import CommandExecuteResult, CorrectionCommandPlan
+from chat.services.expense.expense_confirm import (
+    ExpenseLineItem,
+    _adjust_category_amount,
+    _prune_zero_lines,
+    _remove_travel_lines,
+    _replace_category,
+    _set_category_amount,
+    dedupe_expense_items,
+)
+
+
+def execute_correction_plan(
+    items: list[dict[str, Any]],
+    plan: CorrectionCommandPlan,
+) -> CommandExecuteResult:
+    """Apply a correction plan — mirrors legacy apply_corrections ordering."""
+    changed = False
+    out = [dict(x) for x in items]
+
+    for from_cat, to_cat in plan.replacements:
+        if _replace_category(out, from_cat, to_cat):
+            changed = True
+
+    if plan.remove_travel_group:
+        out, removed = _remove_travel_lines(out)
+        if removed > 0:
+            changed = True
+
+    for from_cat, to_cat, amt in plan.transfers:
+        if from_cat.lower() == to_cat.lower():
+            continue
+        if _adjust_category_amount(out, from_cat, -amt):
+            if not _adjust_category_amount(out, to_cat, amt):
+                out.append(ExpenseLineItem(category=to_cat, amount=amt).to_dict())
+            changed = True
+
+    if not changed and not plan.has_transfer_pattern:
+        for cat, amt in plan.partial_deducts:
+            if _adjust_category_amount(out, cat, -amt):
+                changed = True
+
+    for cat in plan.remove_one:
+        for i, row in enumerate(out):
+            if str(row.get("category") or "").lower() == cat.lower():
+                del out[i]
+                changed = True
+                break
+
+    for cat in plan.remove_loose:
+        for i, row in enumerate(out):
+            if str(row.get("category") or "").lower() == cat.lower():
+                del out[i]
+                changed = True
+                break
+
+    for cat in plan.remove_verb_first:
+        before = len(out)
+        out = [r for r in out if str(r.get("category") or "").lower() != cat.lower()]
+        if len(out) < before:
+            changed = True
+
+    for cat in plan.remove_category_suffix:
+        before = len(out)
+        out = [r for r in out if str(r.get("category") or "").lower() != cat.lower()]
+        if len(out) < before:
+            changed = True
+
+    for cat, new_amt in plan.update_amounts:
+        if _set_category_amount(out, cat, new_amt):
+            changed = True
+
+    for cat, new_amt in plan.set_amounts:
+        if _set_category_amount(out, cat, new_amt):
+            changed = True
+
+    for cat, new_amt in plan.cat_er_amounts:
+        if _set_category_amount(out, cat, new_amt):
+            changed = True
+
+    for cat, new_amt in plan.add_amounts:
+        found = False
+        for row in out:
+            if str(row.get("category") or "").lower() == cat.lower():
+                row["amount"] = float(row.get("amount") or 0) + new_amt
+                found = True
+                changed = True
+                break
+        if not found:
+            out.append(ExpenseLineItem(category=cat, amount=new_amt).to_dict())
+            changed = True
+
+    if changed:
+        out = _prune_zero_lines(dedupe_expense_items(out))
+    return CommandExecuteResult(items=out, changed=changed)
+
+
+def apply_message_corrections(
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    extract_lines: Callable[[str], Any] | None = None,
+    trace_id: str = "",
+    use_llm: bool = True,
+    review_stage: bool = False,
+) -> CommandExecuteResult:
+    """Parse + execute corrections; rules first, LLM gap-fill at review, then extract."""
+    from chat.services.expense.command_llm_gate import correction_llm_should_use
+    from chat.services.expense.command_llm_parser import parse_correction_plan_llm
+    from chat.services.expense.command_parser import (
+        parse_correction_plan,
+        resolve_correction_plan,
+    )
+
+    review = review_stage or extract_lines is None
+    parse_result = resolve_correction_plan(
+        message,
+        items,
+        trace_id=trace_id,
+        use_llm=use_llm,
+        review_stage=review,
+    )
+    result = execute_correction_plan(items, parse_result.plan)
+    if result.changed:
+        return CommandExecuteResult(
+            items=result.items,
+            changed=True,
+            parse_source=parse_result.source,
+        )
+
+    rules_plan = parse_correction_plan(message)
+    if (
+        use_llm
+        and review
+        and rules_plan.has_any_correction()
+        and correction_llm_should_use(message, items, review_stage=True)
+    ):
+        llm_plan = parse_correction_plan_llm(message, items, trace_id)
+        if llm_plan and llm_plan.has_any_correction():
+            llm_result = execute_correction_plan(items, llm_plan)
+            if llm_result.changed:
+                return CommandExecuteResult(
+                    items=llm_result.items,
+                    changed=True,
+                    parse_source="llm",
+                )
+
+    if extract_lines is None:
+        return CommandExecuteResult(
+            items=result.items,
+            changed=False,
+            parse_source=parse_result.source,
+        )
+
+    ext = extract_lines(message)
+    out = [dict(x) for x in result.items]
+    changed = False
+    for ni in ext.items:
+        cat = ni.category
+        if _set_category_amount(out, cat, float(ni.amount)):
+            row = next(
+                r for r in out if str(r.get("category") or "").lower() == cat.lower()
+            )
+            if ni.from_location:
+                row["from_location"] = ni.from_location
+            if ni.to_location:
+                row["to_location"] = ni.to_location
+            changed = True
+        else:
+            out.append(ni.to_dict())
+            changed = True
+    if changed:
+        out = _prune_zero_lines(dedupe_expense_items(out))
+        return CommandExecuteResult(
+            items=out,
+            changed=True,
+            parse_source=parse_result.source,
+        )
+    return CommandExecuteResult(
+        items=result.items,
+        changed=False,
+        parse_source=parse_result.source,
+    )

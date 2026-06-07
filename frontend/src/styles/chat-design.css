@@ -368,6 +368,45 @@
   cursor: not-allowed;
 }
 
+.hr-chat-card .workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(226, 232, 240, 0.7);
+}
+
+.hr-chat-card .workflow-action-btn {
+  border: 1px solid var(--hr-border);
+  background: var(--hr-white);
+  color: var(--hr-text-dark);
+  padding: 5px 10px;
+  border-radius: 16px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+  font-weight: 500;
+  font-family: inherit;
+}
+
+.hr-chat-card .workflow-action-primary {
+  background: var(--hr-primary);
+  color: var(--hr-white);
+  border-color: var(--hr-primary);
+}
+
+.hr-chat-card .workflow-action-danger {
+  background: #fef2f2;
+  color: var(--hr-danger);
+  border-color: #fecaca;
+}
+
+.hr-chat-card .workflow-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .hr-chat-card .input-group {
   display: flex;
   align-items: flex-end;

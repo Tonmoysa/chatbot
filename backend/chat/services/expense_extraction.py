@@ -42,6 +42,8 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "snacks": "Snack",
     "স্ন্যাক": "Snack",
     "bus": "Bus",
+    "bos": "Bus",
+    "bas": "Bus",
     "বাস": "Bus",
     "rickshaw": "Rickshaw",
     "riksha": "Rickshaw",
@@ -59,6 +61,7 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "metrorail": "Metro Rail",
     "metroral": "Metro Rail",
     "metorail": "Metro Rail",
+    "rail": "Metro Rail",
     "মেট্রো": "Metro Rail",
     "uber": "Other",
     "cab": "Other",
@@ -78,7 +81,7 @@ _AMOUNT_RE = re.compile(
 
 _CATEGORY_TOKEN = (
     r"(?:lunch|lanch|luch|lunc|snacks?|bus|rickshaw|riksha|train|bike|bicycle|"
-    r"cng|auto|metro(?:\s*rail)?|uber|cab|taxi|food|meal|transport|travel|"
+    r"cng|auto|metro(?:\s*rail)?|rail|uber|cab|taxi|food|meal|transport|travel|"
     r"other|misc|"
     r"খাওয়া|খাবার|বাস|রিকশা|ট্রেন|সাইকেল|সিএনজি|মেট্রো)"
 )
@@ -228,6 +231,7 @@ def parse_category_token(message: str) -> str | None:
 # Near-miss tokens that look like a category but fail strict regex (typos / Banglish).
 _CATEGORY_TYPO_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bmetroral\b", re.I), "Metro Rail"),
+    (re.compile(r"\brail\b", re.I), "Metro Rail"),
     (re.compile(r"\bmetorail\b", re.I), "Metro Rail"),
     (re.compile(r"\bmetrorail\b", re.I), "Metro Rail"),
     (re.compile(r"\bmetrorel\b", re.I), "Metro Rail"),
@@ -728,6 +732,9 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
 
     route_amt = _ROUTE_AMOUNT_ONLY_RE.search(clause)
     if route_amt and not re.search(rf"\b{_CATEGORY_TOKEN}\b", clause, re.I):
+        alias_item = _extract_alias_category_line(clause, covered)
+        if alias_item:
+            return [alias_item]
         amt_match = _AMOUNT_RE.search(route_amt.group("amt") or "")
         val = _parse_amount_match(amt_match) if amt_match else None
         pair = _valid_location_pair(
@@ -869,6 +876,8 @@ def extract_expense_items(message: str) -> ExtractionResult:
                 malformed.remove(clause)
                 break
 
+    items = _collapse_metro_train_duplicates(items, message)
+
     # Deduplicate identical category+amount in same message (accidental double-parse)
     seen: set[tuple[str, float]] = set()
     unique: list[ExpenseLineItem] = []
@@ -879,6 +888,38 @@ def extract_expense_items(message: str) -> ExtractionResult:
         seen.add(key)
         unique.append(it)
     return ExtractionResult(items=unique, malformed=malformed)
+
+
+def _collapse_metro_train_duplicates(
+    items: list[ExpenseLineItem], message: str
+) -> list[ExpenseLineItem]:
+    """
+    Drop spurious Train lines when Metro Rail was parsed from the same message.
+    Common when users say metroral/metro rail (STT) without mentioning train.
+    """
+    if not items:
+        return items
+    raw = message or ""
+    low = raw.lower()
+    has_metro_item = any(it.category == "Metro Rail" for it in items)
+    if not has_metro_item:
+        return items
+    has_metro_mention = bool(
+        re.search(
+            r"metro(?:\s*rail|rail|ral|rel)?|metroral|metrorail|\brail\b|মেট্রো",
+            low,
+            re.I,
+        )
+    )
+    if not has_metro_mention:
+        return items
+    explicit_train = bool(
+        re.search(r"(?<![a-z])train(?![a-z])|ট্রেন", low, re.I)
+        and not re.search(r"metrorail|metroral|metro\s*rail", low, re.I)
+    )
+    if explicit_train:
+        return items
+    return [it for it in items if it.category != "Train"]
 
 
 def merge_items(

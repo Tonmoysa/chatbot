@@ -41,6 +41,7 @@ from chat.services.leave_confirm import (
     wants_defer_leave_for_expense_submit,
     wants_defer_expense_for_leave_submit,
 )
+from chat.services.ui_actions import build_ui_actions
 from chat.services.turn_classifier import (
     TURN_CHITCHAT,
     TURN_CONFIRM,
@@ -66,6 +67,7 @@ from chat.services.leave_workflow import (
     process_leave_turn,
     resume_leave_session,
 )
+from chat.services.expense.expense_fsm import is_expense_review, read_expense_block
 from chat.services.expense.routing import looks_like_expense_wizard_continuation
 from chat.services.expense_workflow import (
     _is_confirmation_no,
@@ -82,12 +84,15 @@ from chat.services.expense_workflow import (
     wants_expense_summary,
 )
 from chat.services.workflow_suspend import (
+    clear_restore_leave_after_expense_submit,
     clear_suspended_expense,
     clear_suspended_leave,
     has_suspended_expense,
     has_suspended_leave,
+    mark_restore_leave_after_expense_submit,
     restore_suspended_expense,
     restore_suspended_leave,
+    should_restore_leave_after_expense_submit,
     suspend_expense_for_workflow_switch,
     switch_active_expense_to_suspended_leave,
     wants_resume_suspended_leave,
@@ -113,8 +118,10 @@ from chat.services.response_formatter import build_user_message
 # )  # disabled — policy text comes only from knowledge-base RAG
 from chat.services.policy_intent_helpers import (
     build_out_of_scope_message,
+    format_today_date_reply,
     is_expense_entitlement_query,
     is_general_knowledge_out_of_scope,
+    is_hr_today_date_query,
     is_irrelevant_answer_complaint,
     is_leave_wizard_misroute_complaint,
     is_off_topic_for_hr_assistant,
@@ -202,16 +209,36 @@ def _should_short_circuit_submitted_leave(message: str) -> bool:
 
 
 def _leave_balance_probe(message: str) -> bool:
-    low_msg = (message or "").lower()
-    return bool(
-        re.search(
-            r"\b(balance|remaining|left|pto|how\s+many\s+days|vacation\s+left|baki|baaki)\b",
-            low_msg,
-        )
-        or re.search(r"(ছুটি\s*কত|কত\s*দিন|কয়\s*দিন|কতদিন|কয়দিন)", message or "")
-        or re.search(r"\b(koto|koy|kon)\s*din\b", low_msg)
-        or re.search(r"\b(kotodin|koydin|kondin)\b", low_msg)
+    from chat.services.leave_balance_intent import is_leave_balance_query
+
+    return is_leave_balance_query(message)
+
+
+def _any_wizard_active(workflow_state: dict[str, Any] | None) -> bool:
+    return is_leave_in_progress(workflow_state) or is_expense_in_progress(
+        workflow_state
     )
+
+
+def _wizard_deterministic_fallback(
+    message: str,
+    workflow_state: dict[str, Any] | None,
+    *,
+    general_out_of_scope: bool,
+) -> str | None:
+    """Phase 1: never use conversational LLM while a wizard is active."""
+    if not _any_wizard_active(workflow_state):
+        return None
+    lang = detect_user_language(message)
+    if general_out_of_scope:
+        return build_out_of_scope_message(message, lang=lang)
+    if is_expense_in_progress(workflow_state):
+        from chat.services.expense.wizard_commands import expense_wizard_help_hint
+
+        return expense_wizard_help_hint(lang)
+    from chat.services.workflow_priority import leave_wizard_help_hint
+
+    return leave_wizard_help_hint(lang)
 
 
 def _detect_intent_during_leave_workflow(
@@ -231,6 +258,18 @@ def _detect_intent_during_leave_workflow(
                 "intent": INTENT_EXPENSE_CLAIM,
                 "confidence": 0.99,
                 "source": "leave_workflow_gate+defer_expense_submit",
+            }
+        if wants_defer_expense_for_leave_submit(message):
+            return {
+                "intent": INTENT_LEAVE_REQUEST,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_defer_leave_submit",
+            }
+        if wants_resume_suspended_leave(message):
+            return {
+                "intent": INTENT_LEAVE_REQUEST,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_resume_nav",
             }
         if (
             is_confirmation_cancel(message)
@@ -272,33 +311,37 @@ def _detect_intent_during_leave_workflow(
                 "confidence": 0.99,
                 "source": "leave_workflow_gate+confirm_expense_switch",
             }
-        # If the user sends free-form text while we're awaiting final confirmation,
-        # treat it as a leave workflow update (typically a reason tweak) rather than
-        # misclassifying it as chitchat and dropping the workflow.
-        t_msg = (message or "").strip()
-        looks_like_question = bool(
-            re.search(r"^(can\s+i|what|why|how|when|where|which)\b", t_msg, re.I)
-            or t_msg.endswith("?")
+        from chat.services.wizard_turn_gate import (
+            is_casual_wizard_side_statement,
+            is_leave_navigation_phrase,
+            looks_like_leave_review_update,
         )
-        if t_msg and len(t_msg) >= 12 and not looks_like_question:
+
+        if is_leave_navigation_phrase(message):
+            return {
+                "intent": INTENT_UNKNOWN,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_interrupt",
+            }
+        if is_casual_wizard_side_statement(message) or is_off_topic_for_hr_assistant(
+            message, wizard_active=True
+        ):
+            return {
+                "intent": INTENT_UNKNOWN,
+                "confidence": 0.99,
+                "source": "leave_workflow_gate+confirm_interrupt",
+            }
+        if looks_like_leave_review_update(message):
             return {
                 "intent": INTENT_LEAVE_REQUEST,
                 "confidence": 0.99,
-                "source": "leave_workflow_gate+confirm_freeform",
+                "source": "leave_workflow_gate+confirm_patch",
             }
         if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
             return {
                 "intent": INTENT_UNKNOWN,
                 "confidence": 0.99,
                 "source": "leave_workflow_gate+confirm_interrupt",
-            }
-        from chat.services.leave_confirm import _looks_like_slot_correction
-
-        if _looks_like_slot_correction(message):
-            return {
-                "intent": INTENT_LEAVE_REQUEST,
-                "confidence": 0.99,
-                "source": "leave_workflow_gate+confirm_patch",
             }
         return {
             "intent": INTENT_UNKNOWN,
@@ -381,6 +424,30 @@ def _detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+resume_leave_nav",
         }
+    if balance_probe:
+        return {
+            "intent": INTENT_LEAVE_BALANCE,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+balance",
+        }
+    from chat.services.expense.expense_total_dispute import is_expense_total_check_query
+
+    if is_expense_total_check_query(message):
+        return {
+            "intent": INTENT_EXPENSE_STATUS,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+total_check",
+        }
+    from chat.services.expense.expense_draft_snapshots import (
+        wants_restore_expense_version,
+    )
+
+    if wants_restore_expense_version(message):
+        return {
+            "intent": INTENT_EXPENSE_CLAIM,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+restore",
+        }
     from chat.services.expense_workflow import wants_resume_or_show_expense
 
     if wants_resume_or_show_expense(message):
@@ -395,7 +462,7 @@ def _detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+leave_submit_status",
         }
-    if _asks_recent_expense_submission(message):
+    if _asks_recent_expense_submission(message) or _asks_expense_ref_or_status(message):
         return {
             "intent": INTENT_EXPENSE_STATUS,
             "confidence": 0.99,
@@ -406,6 +473,17 @@ def _detect_intent_during_expense_workflow(
             "intent": INTENT_EXPENSE_CLAIM,
             "confidence": 0.99,
             "source": "expense_workflow_gate+confirm",
+        }
+    from chat.services.expense.wizard_commands import (
+        is_expense_wizard_command,
+        wants_expense_submit_command,
+    )
+
+    if wants_expense_submit_command(message) or is_expense_wizard_command(message):
+        return {
+            "intent": INTENT_EXPENSE_CLAIM,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+command",
         }
     if wants_expense_summary(message):
         return {
@@ -419,6 +497,14 @@ def _detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+day_summary",
         }
+    from chat.services.expense.session_action_memory import wants_expense_meta_question
+
+    if wants_expense_meta_question(message):
+        return {
+            "intent": INTENT_EXPENSE_STATUS,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+meta",
+        }
     if _is_policy_interrupt_message(message):
         return {
             "intent": INTENT_HR_POLICY,
@@ -430,12 +516,6 @@ def _detect_intent_during_expense_workflow(
             "intent": INTENT_HR_POLICY,
             "confidence": 0.99,
             "source": "expense_workflow_gate+entitlement",
-        }
-    if balance_probe:
-        return {
-            "intent": INTENT_LEAVE_BALANCE,
-            "confidence": 0.99,
-            "source": "expense_workflow_gate+balance",
         }
     if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
         return {
@@ -488,6 +568,31 @@ def _append_expense_workflow_resume(message: str, workflow_state: dict[str, Any]
     return message.rstrip() + "\n\n" + resume
 
 
+def _soft_expense_pause_footer(
+    workflow_state: dict[str, Any], *, user_message: str = ""
+) -> str:
+    """One-line reminder after a side answer — not the full wizard prompt."""
+    from chat.services.expense.expense_fsm import is_expense_paused, read_expense_block
+
+    if not is_expense_paused(workflow_state):
+        return ""
+    block = read_expense_block(workflow_state)
+    if not list(block.get("items") or []):
+        return ""
+    lang = detect_user_language(user_message)
+    if lang == "en":
+        return (
+            "\n\n_(Your expense draft is paused — you can continue it when ready.)_"
+        )
+    if lang == "banglish":
+        return (
+            "\n\n_(Expense draft pause ache — ready hole continue korte parben.)_"
+        )
+    return (
+        "\n\n_(খরচের draft সাময়িক pause আছে — পরে চালিয়ে যেতে পারবেন।)_"
+    )
+
+
 def _expense_paused_workflow_hint(user_lang: str) -> str:
     if user_lang == "bn":
         return (
@@ -538,6 +643,14 @@ def _persist_workflow_state(
     session.workflow_state = workflow_state
     session.save(update_fields=["workflow_state", "updated_at"])
     return session.workflow_state or {}
+
+
+def _attach_ui_actions(
+    envelope: dict[str, Any], workflow_state: dict[str, Any] | None
+) -> dict[str, Any]:
+    resp = envelope.setdefault("response", {})
+    resp["actions"] = build_ui_actions(workflow_state)
+    return envelope
 
 
 def _answers_suspended_leave_step(
@@ -597,6 +710,34 @@ class ChatOrchestrator:
         )
         context_lines = self.memory.recent_context_lines(session)
 
+        if is_hr_today_date_query(message):
+            lang = detect_user_language(message)
+            today_iso = expense_incurred_date_mod.date.today().isoformat()
+            msg = format_today_date_reply(today_iso=today_iso, lang=lang)
+            self.memory.append(session, "user", message)
+            self.memory.append(session, "assistant", msg)
+            wf_state = getattr(session, "workflow_state", None) or {}
+            return _attach_ui_actions(
+                {
+                    "trace_id": trace_id,
+                    "intent": INTENT_HR_POLICY,
+                    "entities": {"calendar_date": today_iso},
+                    "decision": {
+                        "outcome": "INFORMATIONAL",
+                        "reason": "Today's calendar date.",
+                        "rules_applied": ["HR_TODAY_DATE_QUERY"],
+                    },
+                    "response": {
+                        "message": msg,
+                        "status": "success",
+                        "request_id": "",
+                    },
+                    "status": "success",
+                    "_session_id": session.session_id,
+                },
+                wf_state,
+            )
+
         # Translation follow-up — if the user is asking to translate the previous
         # assistant turn, do that directly so the message never falls into the
         # generic "I didn't understand" greeting. Workflow state is preserved
@@ -647,23 +788,26 @@ class ChatOrchestrator:
                     wf_state["expense_request"] = exp_block
                     session.workflow_state = wf_state
                     session.save(update_fields=["workflow_state", "updated_at"])
-                return {
-                    "trace_id": trace_id,
-                    "intent": "HR_POLICY",
-                    "entities": {"translation_target_lang": translate_to},
-                    "decision": {
-                        "outcome": "INFORMATIONAL",
-                        "reason": "Translated the previous assistant turn.",
-                        "rules_applied": ["TRANSLATION_FOLLOWUP"],
+                return _attach_ui_actions(
+                    {
+                        "trace_id": trace_id,
+                        "intent": "HR_POLICY",
+                        "entities": {"translation_target_lang": translate_to},
+                        "decision": {
+                            "outcome": "INFORMATIONAL",
+                            "reason": "Translated the previous assistant turn.",
+                            "rules_applied": ["TRANSLATION_FOLLOWUP"],
+                        },
+                        "response": {
+                            "message": msg,
+                            "status": status_str,
+                            "request_id": "",
+                        },
+                        "status": "success",
+                        "_session_id": session.session_id,
                     },
-                    "response": {
-                        "message": msg,
-                        "status": status_str,
-                        "request_id": "",
-                    },
-                    "status": "success",
-                    "_session_id": session.session_id,
-                }
+                    wf_state,
+                )
 
         wf_state = getattr(session, "workflow_state", None) or {}
         if (
@@ -682,23 +826,26 @@ class ChatOrchestrator:
                 msg_locked = "This leave request was already submitted."
             self.memory.append(session, "user", message)
             self.memory.append(session, "assistant", msg_locked)
-            return {
-                "trace_id": trace_id,
-                "intent": INTENT_LEAVE_REQUEST,
-                "entities": {},
-                "decision": {
-                    "outcome": "SUBMITTED",
-                    "reason": msg_locked,
-                    "rules_applied": ["LEAVE_SUBMISSION_LOCKED"],
-                },
-                "response": {
-                    "message": msg_locked,
+            return _attach_ui_actions(
+                {
+                    "trace_id": trace_id,
+                    "intent": INTENT_LEAVE_REQUEST,
+                    "entities": {},
+                    "decision": {
+                        "outcome": "SUBMITTED",
+                        "reason": msg_locked,
+                        "rules_applied": ["LEAVE_SUBMISSION_LOCKED"],
+                    },
+                    "response": {
+                        "message": msg_locked,
+                        "status": "success",
+                        "request_id": dedup_rid,
+                    },
                     "status": "success",
-                    "request_id": dedup_rid,
+                    "_session_id": session.session_id,
                 },
-                "status": "success",
-                "_session_id": session.session_id,
-            }
+                wf_state,
+            )
 
         balance_probe = _leave_balance_probe(message)
         is_greeting_now = _is_fresh_start_greeting(message)
@@ -782,6 +929,25 @@ class ChatOrchestrator:
             )
             log_step(trace_id, "suspended_expense_restored", {})
 
+        from chat.services.workflow_priority import (
+            expense_query_should_suspend_leave,
+            should_clear_misrouted_leave,
+        )
+
+        if is_leave_in_progress(wf_state):
+            if expense_query_should_suspend_leave(message):
+                wf_state = _persist_workflow_state(
+                    session,
+                    clear_suspended_leave(deactivate_leave_session(wf_state)),
+                )
+                log_step(trace_id, "leave_cleared_for_expense_query", {})
+            elif should_clear_misrouted_leave(message, wf_state):
+                wf_state = _persist_workflow_state(
+                    session,
+                    clear_suspended_leave(deactivate_leave_session(wf_state)),
+                )
+                log_step(trace_id, "misrouted_leave_cleared", {})
+
         log_step(
             trace_id,
             "intent_detection_start",
@@ -801,6 +967,28 @@ class ChatOrchestrator:
         else:
             intent_result = self.intents.detect(message, trace_id)
         intent = intent_result["intent"]
+        if expense_query_should_suspend_leave(message) and not is_expense_in_progress(
+            wf_state
+        ):
+            from chat.services.expense.expense_total_dispute import (
+                is_expense_total_check_query,
+            )
+            from chat.services.expense.session_action_memory import (
+                wants_expense_meta_question as _wants_expense_meta,
+            )
+
+            forced = (
+                INTENT_EXPENSE_STATUS
+                if is_expense_total_check_query(message) or _wants_expense_meta(message)
+                else INTENT_EXPENSE_DAY_SUMMARY
+            )
+            intent = forced
+            intent_result = {
+                **intent_result,
+                "intent": forced,
+                "source": (intent_result.get("source") or "intent")
+                + "+expense_query_priority",
+            }
         if is_expense_entitlement_query(message):
             intent = INTENT_HR_POLICY
             intent_result = {
@@ -808,6 +996,15 @@ class ChatOrchestrator:
                 "intent": INTENT_HR_POLICY,
                 "source": (intent_result.get("source") or "intent")
                 + "+entitlement_policy",
+            }
+        from chat.services.expense.session_action_memory import wants_expense_meta_question
+
+        if wants_expense_meta_question(message):
+            intent = INTENT_EXPENSE_STATUS
+            intent_result = {
+                **intent_result,
+                "intent": INTENT_EXPENSE_STATUS,
+                "source": (intent_result.get("source") or "intent") + "+expense_meta",
             }
         wizard_misroute_complaint = is_leave_wizard_misroute_complaint(message)
         policy_complaint = (
@@ -845,12 +1042,17 @@ class ChatOrchestrator:
 
         workflow_turn: str | None = None
         if is_leave_in_progress(wf_state) or is_expense_in_progress(wf_state):
+            exp_block = read_expense_block(wf_state) if is_expense_in_progress(wf_state) else {}
             workflow_turn = classify_workflow_turn(
                 message,
                 leave_active=is_leave_in_progress(wf_state),
                 expense_active=is_expense_in_progress(wf_state),
                 pending_leave_step=(
                     pending_step(wf_state) if is_leave_in_progress(wf_state) else None
+                ),
+                leave_review_pending=is_awaiting_leave_confirmation(wf_state),
+                expense_review_pending=bool(
+                    exp_block.get("active") and is_expense_review(exp_block)
                 ),
                 balance_probe=balance_probe,
             )
@@ -1012,6 +1214,9 @@ class ChatOrchestrator:
         if (
             wizard_dismissed_reason is None
             and is_leave_collecting(wf_gate)
+            and intent
+            not in (INTENT_EXPENSE_DAY_SUMMARY, INTENT_EXPENSE_STATUS, INTENT_EXPENSE_CLAIM)
+            and not expense_query_should_suspend_leave(message)
             and (
                 intent == INTENT_UNKNOWN
                 or (
@@ -1037,6 +1242,14 @@ class ChatOrchestrator:
         if (
             wizard_dismissed_reason is None
             and is_expense_in_progress(wf_gate)
+            and intent
+            not in (
+                INTENT_EXPENSE_DAY_SUMMARY,
+                INTENT_EXPENSE_STATUS,
+                INTENT_REQUEST_STATUS,
+                INTENT_LEAVE_BALANCE,
+                INTENT_HR_POLICY,
+            )
             and (
                 intent == INTENT_UNKNOWN
                 or (
@@ -1047,9 +1260,6 @@ class ChatOrchestrator:
                     (_is_confirmation_yes(message) or _is_confirmation_no(message) or wants_expense_summary(message))
                     and intent != INTENT_HR_POLICY
                     and intent != INTENT_LEAVE_BALANCE
-                    and intent != INTENT_EXPENSE_DAY_SUMMARY
-                    and intent != INTENT_EXPENSE_STATUS
-                    and intent != INTENT_REQUEST_STATUS
                 )
             )
             and not expense_side_interrupt
@@ -1097,13 +1307,44 @@ class ChatOrchestrator:
                 "intent": INTENT_REQUEST_STATUS,
                 "source": (intent_result.get("source") or "intent") + "+leave_submit_status_heuristic",
             }
-        elif wizard_dismissed_reason is None and _asks_recent_expense_submission(message):
+        elif wizard_dismissed_reason is None and (
+            _asks_recent_expense_submission(message)
+            or _asks_expense_ref_or_status(message)
+        ):
             intent = INTENT_EXPENSE_STATUS
             intent_result = {
                 **intent_result,
                 "intent": INTENT_EXPENSE_STATUS,
                 "source": (intent_result.get("source") or "intent") + "+expense_submit_status_heuristic",
             }
+        elif wizard_dismissed_reason is None:
+            from chat.services.expense.session_action_memory import (
+                wants_expense_meta_question,
+            )
+
+            if wants_expense_meta_question(message):
+                intent = INTENT_EXPENSE_STATUS
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_EXPENSE_STATUS,
+                    "source": (intent_result.get("source") or "intent")
+                    + "+expense_meta_heuristic",
+                }
+            else:
+                from chat.services.expense.expense_total_dispute import (
+                    is_expense_total_check_query,
+                )
+
+                if is_expense_in_progress(wf_gate) and is_expense_total_check_query(
+                    message
+                ):
+                    intent = INTENT_EXPENSE_STATUS
+                    intent_result = {
+                        **intent_result,
+                        "intent": INTENT_EXPENSE_STATUS,
+                        "source": (intent_result.get("source") or "intent")
+                        + "+expense_total_check_heuristic",
+                    }
 
         context_clarification_msg: str | None = None
         if wizard_dismissed_reason is None and not general_out_of_scope:
@@ -1133,6 +1374,16 @@ class ChatOrchestrator:
                 log_step(trace_id, "context_clarification_asked", {})
 
         log_step(trace_id, "intent_detection_done", {"intent": intent})
+
+        if wizard_dismissed_reason is None and "defer_expense_submit" in str(
+            intent_result.get("source") or ""
+        ):
+            wf_flag = mark_restore_leave_after_expense_submit(
+                getattr(session, "workflow_state", None) or {}
+            )
+            session.workflow_state = wf_flag
+            session.save(update_fields=["workflow_state", "updated_at"])
+            wf_state = session.workflow_state or {}
 
         log_step(trace_id, "entity_extraction_start", {})
         wf_ent = getattr(session, "workflow_state", None) or {}
@@ -1360,6 +1611,8 @@ class ChatOrchestrator:
 
             expense_turn_message = message
             if wants_defer_leave_for_expense_submit(message):
+                if has_suspended_leave(wf_exp):
+                    wf_exp = mark_restore_leave_after_expense_submit(wf_exp)
                 exp_block = wf_exp.get("expense_request") or {}
                 stage_def = str(exp_block.get("stage") or "")
                 if stage_def in ("review", "submit_confirm"):
@@ -1378,6 +1631,7 @@ class ChatOrchestrator:
                 company_id=company_id,
                 employee_id=employee_id,
                 session_id=session.session_id,
+                trace_id=trace_id,
                 day_logged_total=day_logged,
                 daily_cap=float(EXPENSE_DAY_CAP_BDT),
                 pipeline_result=expense_pipe_result,
@@ -1470,15 +1724,22 @@ class ChatOrchestrator:
                         }
                     else:
                         crm_payload["leave_not_submitted"] = True
-                elif _asks_recent_expense_submission(message):
-                    last = (
-                        (getattr(session, "workflow_state", None) or {}).get(
-                            "expense_last_submission"
-                        )
-                        or {}
+                elif _asks_recent_expense_submission(message) or _asks_expense_ref_or_status(
+                    message
+                ):
+                    last = _latest_expense_submission_from_session(
+                        getattr(session, "workflow_state", None) or {}
                     )
                     if last.get("reference_id"):
                         crm_payload["expense_last_submission"] = last
+                        st = self.crm.get_request_status(
+                            str(last["reference_id"]),
+                            company_id=company_id,
+                            employee_id=employee_id,
+                            session_id=session.session_id,
+                        )
+                        if st.get("status") and st.get("status") != "NOT_FOUND":
+                            crm_payload.update(st)
                     else:
                         wf_st = getattr(session, "workflow_state", None) or {}
                         exp_blk = wf_st.get("expense_request") or {}
@@ -1494,7 +1755,54 @@ class ChatOrchestrator:
                         else:
                             crm_payload["expense_not_submitted"] = True
                 else:
-                    crm_payload["detail"] = "Missing request_id for status lookup."
+                    from chat.services.expense.expense_total_dispute import (
+                        format_expense_total_check_message,
+                        is_expense_total_check_query,
+                    )
+                    from chat.services.expense.session_action_memory import (
+                        format_meta_question_answer,
+                        record_expense_total_check,
+                        wants_expense_meta_question,
+                    )
+
+                    if is_expense_total_check_query(message):
+                        inc_chk = (entities.get("expense_incurred_date") or "").strip()
+                        if not inc_chk:
+                            inc_chk = infer_expense_incurred_date_iso(
+                                message=message,
+                                hints=entities,
+                                today=expense_incurred_date_mod.date.today(),
+                            )
+                        total_msg = format_expense_total_check_message(
+                            getattr(session, "workflow_state", None) or {},
+                            crm_breakdown=crm_context,
+                            incurred_date_iso=inc_chk,
+                            lang=detect_user_language(message),
+                            user_message=message,
+                        )
+                        if total_msg:
+                            crm_payload["expense_total_check"] = total_msg
+                            wf_st = getattr(session, "workflow_state", None) or {}
+                            exp_blk = read_expense_block(wf_st)
+                            exp_items = list(exp_blk.get("items") or [])
+                            wf_chk = record_expense_total_check(
+                                wf_st,
+                                total=sum(float(x.get("amount") or 0) for x in exp_items),
+                                line_count=len(exp_items),
+                                stage=str(exp_blk.get("stage") or "review"),
+                            )
+                            session.workflow_state = wf_chk
+                            session.save(update_fields=["workflow_state", "updated_at"])
+                    elif wants_expense_meta_question(message):
+                        meta = format_meta_question_answer(
+                            getattr(session, "workflow_state", None) or {},
+                            message,
+                            lang=detect_user_language(message),
+                        )
+                        if meta:
+                            crm_payload["expense_meta_answer"] = meta
+                    else:
+                        crm_payload["detail"] = "Missing request_id for status lookup."
 
             # LEGACY / OBSOLETE: per-turn single-amount day cap for auto-approve path.
             # Enterprise workflow uses expense_validation warnings + SUBMITTED outcome.
@@ -1515,9 +1823,47 @@ class ChatOrchestrator:
 
             if (
                 intent == INTENT_HR_POLICY
+                and is_expense_entitlement_query(message)
+                and not general_out_of_scope
+                and not policy_complaint
+            ):
+                from chat.services.expense.expense_policy import (
+                    build_daily_cap_response,
+                    is_expense_daily_cap_query,
+                )
+
+                if is_expense_daily_cap_query(message):
+                    inc_cap = (entities.get("expense_incurred_date") or "").strip()
+                    if not inc_cap:
+                        inc_cap = infer_expense_incurred_date_iso(
+                            message=message,
+                            hints=entities,
+                            today=expense_incurred_date_mod.date.today(),
+                        )
+                    cap_breakdown: dict[str, Any] = {}
+                    try:
+                        cap_breakdown = self.crm.get_expense_day_breakdown(
+                            company_id=company_id,
+                            employee_id=employee_id,
+                            session_id=session.session_id,
+                            incurred_date_iso=inc_cap,
+                        )
+                    except Exception:
+                        cap_breakdown = {}
+                    crm_payload["rules_answer"] = build_daily_cap_response(
+                        getattr(session, "workflow_state", None) or {},
+                        crm_breakdown=cap_breakdown,
+                        incurred_date_iso=inc_cap,
+                    )
+                    crm_payload["rules_mode"] = "expense_daily_cap"
+                    log_step(trace_id, "expense_daily_cap_answer", {"date": inc_cap})
+
+            if (
+                intent == INTENT_HR_POLICY
                 and is_policy_kb_query(message)
                 and not general_out_of_scope
                 and not policy_complaint
+                and not crm_payload.get("rules_answer")
             ):
                 dept = entities.get("department")
                 rag = try_hr_policy_rag(
@@ -1559,27 +1905,31 @@ class ChatOrchestrator:
                     session_id=session.session_id,
                     incurred_date_iso=inc_iso,
                 )
-                day_items = list(breakdown.get("expense_day_items") or [])
-                if not day_items:
-                    last = (
-                        (getattr(session, "workflow_state", None) or {}).get(
-                            "expense_last_submission"
-                        )
-                        or {}
-                    )
-                    last_date = str(last.get("incurred_date_iso") or "").strip()
-                    last_items = list(last.get("items") or [])
-                    if last_items and (not last_date or last_date == inc_iso):
-                        breakdown["expense_day_items"] = last_items
-                        breakdown["expense_summary_reference_id"] = str(
-                            last.get("reference_id") or ""
-                        )
-                        if not breakdown.get("expense_day_logged_total"):
-                            breakdown["expense_day_logged_total"] = sum(
-                                float(x.get("amount") or 0) for x in last_items
-                            )
+                from chat.constants import EXPENSE_DAY_CAP_BDT
+                from chat.services.expense.session_ledger import (
+                    build_session_expense_ledger,
+                    enrich_crm_payload_with_ledger,
+                )
+
+                ledger = build_session_expense_ledger(
+                    getattr(session, "workflow_state", None) or {},
+                    crm_breakdown=breakdown,
+                    incurred_date_iso=inc_iso,
+                    daily_cap=float(EXPENSE_DAY_CAP_BDT),
+                )
+                breakdown = enrich_crm_payload_with_ledger(breakdown, ledger)
                 crm_payload.update(breakdown)
                 crm_context.update(breakdown)
+                from chat.services.expense.session_action_memory import (
+                    wants_expense_history_query,
+                )
+
+                if wants_expense_history_query(message):
+                    wf_hist = getattr(session, "workflow_state", None) or {}
+                    crm_payload["expense_history_view"] = True
+                    crm_payload["bot_action_log"] = list(
+                        wf_hist.get("bot_action_log") or []
+                    )
 
             if leave_collecting_blocked and not leave_workflow_interrupt:
                 q = lv_pack.get("question") or ""
@@ -1609,6 +1959,12 @@ class ChatOrchestrator:
                 expense_collecting_blocked
                 and not expense_workflow_interrupt
                 and not expense_side_interrupt
+                and intent
+                not in (
+                    INTENT_EXPENSE_DAY_SUMMARY,
+                    INTENT_EXPENSE_STATUS,
+                    INTENT_REQUEST_STATUS,
+                )
             ):
                 stage_exp = str(
                     ((getattr(session, "workflow_state", None) or {}).get("expense_request") or {}).get(
@@ -1741,7 +2097,31 @@ class ChatOrchestrator:
                     and decision.get("outcome") == "SUBMITTED"
                     and request_id
                 )
-                if not leave_already_submitted:
+                expense_already_submitted = bool(
+                    intent == INTENT_EXPENSE_CLAIM
+                    and decision.get("outcome") == "SUBMITTED"
+                    and crm_payload.get("expense_submission")
+                    and request_id
+                )
+                if expense_already_submitted and hasattr(
+                    self.crm, "record_expense_submission"
+                ):
+                    exp_rec = self.crm.record_expense_submission(
+                        company_id=company_id,
+                        employee_id=employee_id,
+                        session_id=session.session_id,
+                        reference_id=request_id,
+                        entities=crm_entities,
+                        decision=decision,
+                        idempotency_key=idempotency_key,
+                    )
+                    crm_payload["expense_crm_record"] = exp_rec
+                    log_step(
+                        trace_id,
+                        "expense_crm_recorded",
+                        {"reference_id": request_id},
+                    )
+                if not leave_already_submitted and not expense_already_submitted:
                     exec_result = self.crm.create_request(
                         employee_id=employee_id,
                         intent=intent,
@@ -1768,6 +2148,8 @@ class ChatOrchestrator:
                 decision=decision,
                 crm_payload=crm_payload,
             )
+            if crm_payload.get("expense_total_check"):
+                response_finalized = True
             wf_post_msg = getattr(session, "workflow_state", None) or {}
             if (
                 intent == INTENT_LEAVE_REQUEST
@@ -1817,16 +2199,29 @@ class ChatOrchestrator:
                     items=list(entities.get("expense_items") or []),
                     incurred_date_iso=str(entities.get("expense_incurred_date") or ""),
                 )
-                if has_suspended_leave(wf_submitted):
+                from chat.services.expense.session_action_memory import (
+                    record_expense_submitted,
+                )
+
+                wf_submitted = record_expense_submitted(
+                    wf_submitted,
+                    items=list(entities.get("expense_items") or []),
+                    reference_id=sub_ref,
+                    incurred_date_iso=str(entities.get("expense_incurred_date") or ""),
+                )
+                if should_restore_leave_after_expense_submit(
+                    wf_submitted
+                ) and has_suspended_leave(wf_submitted):
+                    wf_submitted = clear_restore_leave_after_expense_submit(wf_submitted)
                     wf_submitted = restore_suspended_leave(
                         wf_submitted, force_active=True
                     )
-                    log_step(trace_id, "suspended_leave_restored_after_expense_submit", {})
-                wf_submitted = _persist_workflow_state(session, wf_submitted)
-                if is_leave_in_progress(wf_submitted):
-                    msg = _append_suspended_leave_resume_after_switch(
-                        msg, wf_submitted, user_message=message
+                    log_step(
+                        trace_id,
+                        "suspended_leave_restored_after_deferred_expense_submit",
+                        {},
                     )
+                wf_submitted = _persist_workflow_state(session, wf_submitted)
             # Friendly, human-toned LLM fallback for cases where the rules /
             # intent pipeline could not produce a specific answer:
             #   1. The user message did not match any HR intent (UNKNOWN).
@@ -1909,35 +2304,7 @@ class ChatOrchestrator:
                 and not context_clarification_msg
                 and not general_out_of_scope
                 and not rag_unknown_hit
-                and not (
-                    is_expense_in_progress(wf_for_conv)
-                    and intent == INTENT_EXPENSE_CLAIM
-                )
-                and not (
-                    is_expense_in_progress(wf_for_conv)
-                    and not expense_side_interrupt
-                )
-                and not (
-                    leave_workflow_interrupt
-                    and intent in (INTENT_HR_POLICY, INTENT_LEAVE_BALANCE)
-                )
-                and not (
-                    expense_workflow_interrupt
-                    and intent == INTENT_HR_POLICY
-                )
-                and not (
-                    is_leave_collecting(wf_for_conv) and not leave_side_interrupt
-                )
-                and not (
-                    is_leave_in_progress(wf_for_conv)
-                    and not leave_side_interrupt
-                    and not leave_workflow_interrupt
-                )
-                and not (
-                    is_expense_in_progress(wf_for_conv)
-                    and not expense_side_interrupt
-                    and not expense_workflow_interrupt
-                )
+                and not _any_wizard_active(wf_for_conv)
                 and (
                     (
                         intent == INTENT_UNKNOWN
@@ -2037,7 +2404,11 @@ class ChatOrchestrator:
                 and expense_workflow_interrupt
                 and intent == INTENT_LEAVE_BALANCE
             ):
-                msg = _append_expense_workflow_resume(msg, wf_policy_resume)
+                footer = _soft_expense_pause_footer(
+                    wf_policy_resume, user_message=message
+                )
+                if footer and footer not in msg:
+                    msg = msg.rstrip() + footer
 
             wf_leave_resume = getattr(session, "workflow_state", None) or {}
             if (
@@ -2051,38 +2422,16 @@ class ChatOrchestrator:
             if (
                 expense_side_interrupt
                 and not response_finalized
-                and not general_out_of_scope
                 and is_expense_in_progress(getattr(session, "workflow_state", None) or {})
                 and not (_is_confirmation_yes(message) or _is_confirmation_no(message))
-                and (
-                    _looks_like_chitchat(message, strict=True)
-                    or _is_fresh_start_greeting(message)
-                )
             ):
-                wf_exp_side = getattr(session, "workflow_state", None) or {}
-                expense_hint = (
-                    _expense_paused_workflow_hint(detect_user_language(message))
-                    if is_expense_paused(wf_exp_side)
-                    else None
+                fallback = _wizard_deterministic_fallback(
+                    message,
+                    getattr(session, "workflow_state", None) or {},
+                    general_out_of_scope=general_out_of_scope,
                 )
-                reply = conversational_reply(
-                    message=message,
-                    context_lines=context_lines,
-                    trace_id=trace_id,
-                    workflow_hint=expense_hint,
-                )
-                if reply:
-                    wf_active = is_leave_in_progress(
-                        getattr(session, "workflow_state", None) or {}
-                    ) or is_expense_in_progress(
-                        getattr(session, "workflow_state", None) or {}
-                    )
-                    if is_greeting_now and not wf_active:
-                        user_lang = detect_user_language(message)
-                        prefix = "হ্যালো! " if user_lang == "bn" else "Hi! "
-                        msg = prefix + reply
-                    else:
-                        msg = reply
+                if fallback:
+                    msg = fallback
                     rstatus = "success"
                     response_finalized = True
 
@@ -2114,29 +2463,15 @@ class ChatOrchestrator:
                 and not response_finalized
                 and not leave_terminal_turn
                 and not policy_complaint
-                and not general_out_of_scope
-                and (
-                    _looks_like_chitchat(message, strict=True)
-                    or _is_fresh_start_greeting(message)
-                )
+                and is_leave_in_progress(getattr(session, "workflow_state", None) or {})
             ):
-                reply = conversational_reply(
-                    message=message,
-                    context_lines=context_lines,
-                    trace_id=trace_id,
+                fallback = _wizard_deterministic_fallback(
+                    message,
+                    getattr(session, "workflow_state", None) or {},
+                    general_out_of_scope=general_out_of_scope,
                 )
-                if reply:
-                    wf_active = is_leave_in_progress(
-                        getattr(session, "workflow_state", None) or {}
-                    ) or is_expense_in_progress(
-                        getattr(session, "workflow_state", None) or {}
-                    )
-                    if is_greeting_now and not wf_active:
-                        user_lang = detect_user_language(message)
-                        prefix = "হ্যালো! " if user_lang == "bn" else "Hi! "
-                        msg = prefix + reply
-                    else:
-                        msg = reply
+                if fallback:
+                    msg = fallback
                     rstatus = "success"
                     response_finalized = True
 
@@ -2193,20 +2528,23 @@ class ChatOrchestrator:
         self.memory.append(session, "user", message)
         self.memory.append(session, "assistant", msg)
 
-        return {
-            "trace_id": trace_id,
-            "intent": intent,
-            "entities": entities,
-            "decision": decision,
-            "response": {
-                "message": msg,
-                "status": rstatus if status == "success" else "error",
-                "request_id": request_id or str(crm_payload.get("request_id", "") or ""),
+        return _attach_ui_actions(
+            {
+                "trace_id": trace_id,
+                "intent": intent,
+                "entities": entities,
+                "decision": decision,
+                "response": {
+                    "message": msg,
+                    "status": rstatus if status == "success" else "error",
+                    "request_id": request_id or str(crm_payload.get("request_id", "") or ""),
+                },
+                "sources": sources_out,
+                "status": status,
+                "_session_id": session.session_id,
             },
-            "sources": sources_out,
-            "status": status,
-            "_session_id": session.session_id,
-        }
+            getattr(session, "workflow_state", None) or {},
+        )
 
     @staticmethod
     def _last_assistant_text(context_lines: list[str]) -> str | None:
@@ -2298,6 +2636,14 @@ class ChatOrchestrator:
                 # in the same session, or when the wizard is paused and the last turn
                 # still mentioned leave). Those must stay HR_POLICY for RAG.
                 if _strong_hr_policy(msg) or is_rules_query(msg):
+                    return None
+                from chat.services.workflow_priority import (
+                    expense_query_should_suspend_leave,
+                )
+
+                if expense_query_should_suspend_leave(msg) or _strong_expense_day_summary(
+                    msg
+                ):
                     return None
                 return INTENT_LEAVE_REQUEST
         return None
@@ -2482,6 +2828,35 @@ def _asks_recent_leave_submission(message: str) -> bool:
         or re.search(r"\bki\s+(submit|joma)\b", low)
         or re.search(r"(leave|chuti|chhuti|ছুটি|request).{0,35}(submit|joma)\s+hoyeche", low)
         or re.search(r"(submit|joma)\s+hoyeche", low)
+    )
+
+
+def _latest_expense_submission_from_session(
+    workflow_state: dict[str, Any],
+) -> dict[str, Any]:
+    wf = workflow_state or {}
+    last = dict(wf.get("expense_last_submission") or {})
+    if last.get("reference_id"):
+        return last
+    history = list(wf.get("expense_submissions_history") or [])
+    for row in reversed(history):
+        ref = str(row.get("reference_id") or row.get("request_id") or "").strip()
+        if ref:
+            return dict(row)
+    return {}
+
+
+def _asks_expense_ref_or_status(message: str) -> bool:
+    low = (message or "").lower()
+    raw = message or ""
+    if not re.search(r"\b(expense|খরচ|reimbursement|claim)\b", low) and "খরচ" not in raw:
+        return False
+    return bool(
+        re.search(
+            r"\b(ref|reference|status|track|rid|request\s*id)\b|রেফারেন্স|স্ট্যাটাস",
+            low,
+        )
+        or re.search(r"EXP-\d{4}-", message or "", re.I)
     )
 
 

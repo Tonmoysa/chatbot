@@ -50,6 +50,44 @@ _SCOPE_HALF_RE = re.compile(r"\b(half[- ]?day|half|হাফ|অর্ধ\s*দ�
 _SCOPE_FULL_RE = re.compile(r"\b(full[- ]?day|full|পুরো\s*দিন|সম্পূর্ণ\s*দিন)\b", re.I)
 
 
+_LEAVE_DATE_SIGNAL_RE = re.compile(
+    r"(?:"
+    r"\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|"
+    r"(?:tarikh|tarik|date|dates|তারিখ).{0,35}(?:badl|change|hobe|lagbe|na|kor)|"
+    r"(?:badl|change|hobe).{0,35}(?:tarikh|tarik|date|তারিখ)|"
+    r"(?:kalke|kalker|agamikal|tomorrow|porer\s+din).{0,45}"
+    r"(?:chuti|chhuti|chhuti|leave|lagbe|tarikh|date|তারিখ)|"
+    r"(?:chuti|chhuti|chhuti|leave|ছুটি).{0,45}(?:kalke|kalker|agamikal|tomorrow)|"
+    r"\b(?:parshu|yesterday|goto\s*kal|gata\s*kal|gato\s*kal)\b"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def message_explicitly_states_leave_date(message: str) -> bool:
+    """True when the user is clearly changing or stating a leave date — not casual ajke talk."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    try:
+        from chat.services.wizard_turn_gate import is_casual_wizard_side_statement
+
+        if is_casual_wizard_side_statement(text):
+            return False
+    except Exception:
+        pass
+    if _LEAVE_DATE_SIGNAL_RE.search(text):
+        return True
+    if re.search(r"\bajke\b", text, re.I) and re.search(
+        r"\b(leave|chuti|chhuti|chhuti|ছুটি|tarikh|tarik|date|তারিখ|lagbe|hobe|change|badl)\b",
+        text,
+        re.I,
+    ):
+        return True
+    return False
+
+
 def message_explicitly_states_day_scope(message: str) -> bool:
     """True only when the user clearly said full/half day in this message."""
     text = (message or "").strip()

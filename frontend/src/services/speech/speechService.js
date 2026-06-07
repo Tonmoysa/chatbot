@@ -86,6 +86,15 @@ export async function abortRecognition() {
   activeInstance = null;
 }
 
+/**
+ * Switch Web Speech language/mode while dictating (no-op if provider lacks support).
+ * @param {{ language: string, mode?: string, languageChain?: string[] }} options
+ */
+export async function updateRecognitionLanguage(options) {
+  if (!activeInstance || typeof activeInstance.updateLanguage !== "function") return;
+  await activeInstance.updateLanguage(options);
+}
+
 export function isListening() {
   return Boolean(
     activeInstance &&

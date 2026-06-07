@@ -29,6 +29,27 @@ def build_user_message(
     reason = (decision or {}).get("reason", "")
 
     if intent == INTENT_EXPENSE_DAY_SUMMARY:
+        if crm_payload.get("expense_history_view"):
+            ledger = crm_payload.get("session_expense_ledger")
+            if isinstance(ledger, dict):
+                from chat.services.expense.session_action_memory import (
+                    format_expense_history_message,
+                )
+
+                wf_stub = {
+                    "bot_action_log": list(crm_payload.get("bot_action_log") or [])
+                }
+                return (
+                    format_expense_history_message(ledger, wf_stub),
+                    "success",
+                )
+        ledger = crm_payload.get("session_expense_ledger")
+        if isinstance(ledger, dict):
+            from chat.services.expense.session_ledger import (
+                format_session_expense_ledger_message,
+            )
+
+            return (format_session_expense_ledger_message(ledger), "success")
         items = list(crm_payload.get("expense_day_items") or [])
         target = str(crm_payload.get("expense_incurred_date") or "").strip()
         ref = str(crm_payload.get("expense_summary_reference_id") or "").strip()
@@ -77,6 +98,12 @@ def build_user_message(
         )
 
     if intent in (INTENT_EXPENSE_STATUS, INTENT_REQUEST_STATUS):
+        total_chk = str(crm_payload.get("expense_total_check") or "").strip()
+        if total_chk:
+            return (total_chk, "success")
+        meta = str(crm_payload.get("expense_meta_answer") or "").strip()
+        if meta:
+            return (meta, "success")
         leave_last = crm_payload.get("leave_last_submission") or {}
         leave_ref = str(leave_last.get("submission_id") or "").strip()
         if leave_ref:
@@ -137,7 +164,18 @@ def build_user_message(
             )
         st = crm_payload.get("status")
         if st and st != "NOT_FOUND":
-            return (f"Current request status: {st}.", "success")
+            rid = (
+                str(crm_payload.get("request_id") or "")
+                or str(entities.get("request_id") or "")
+            ).strip()
+            intent_hint = str(crm_payload.get("intent") or "").strip()
+            extra = ""
+            if rid:
+                extra = f"**`{rid}`**"
+                if intent_hint:
+                    extra += f" ({intent_hint})"
+                return (f"Request {extra} status: **{st}**.", "success")
+            return (f"Current request status: **{st}**.", "success")
         if st == "NOT_FOUND":
             rid = (
                 (crm_payload.get("request_id") or "")

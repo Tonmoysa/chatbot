@@ -99,18 +99,19 @@ class ExpenseEntityPipeline:
                 field_sources.update(sem_sources)
 
         entities = extraction_to_entities(merged_ex, llm_entities)
-        inc = (
-            llm_entities.get("expense_incurred_date")
-            or infer_expense_incurred_date_iso(
-                message=message, hints=llm_entities, today=date.today()
-            )
+        inc = infer_expense_incurred_date_iso(
+            message=message, hints=llm_entities, today=date.today()
         )
         if inc:
             entities["expense_incurred_date"] = inc
             if "expense_incurred_date" not in field_sources:
-                field_sources["expense_incurred_date"] = (
-                    "llm_entities" if llm_invoked else "rules_date"
-                )
+                llm_inc = llm_entities.get("expense_incurred_date")
+                if llm_inc and str(llm_inc).split("T")[0] == inc:
+                    field_sources["expense_incurred_date"] = (
+                        "llm_entities" if llm_invoked else "rules_date"
+                    )
+                else:
+                    field_sources["expense_incurred_date"] = "rules_date"
 
         return ExpenseExtractionResult(
             entities=entities,

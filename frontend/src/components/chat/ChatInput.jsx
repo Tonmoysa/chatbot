@@ -31,7 +31,7 @@ export default function ChatInput({ onSend, disabled, busy, onClearError, error 
     cancelDictation,
     confirmDictation,
     clearSpeechError,
-  } = useSpeechRecognition({ disabled: isBlocked });
+  } = useSpeechRecognition({ disabled: isBlocked, draftText: value });
 
   const waveformLevels = useVoiceWaveform(isDictating);
 
@@ -173,7 +173,9 @@ export default function ChatInput({ onSend, disabled, busy, onClearError, error 
                 {sessionText}
               </p>
             ) : (
-              <p style={{ fontSize: "0.75rem", margin: 0, color: "var(--hr-text-light)" }}>Speak in Bangla, Banglish, or English</p>
+              <p style={{ fontSize: "0.75rem", margin: 0, color: "var(--hr-text-light)" }}>
+                Speak naturally — Bangla, Banglish, or English (auto-detected)
+              </p>
             )}
           </div>
           <button type="button" className="action-btn" onClick={handleCancel} aria-label="Cancel dictation">
@@ -292,8 +294,12 @@ export default function ChatInput({ onSend, disabled, busy, onClearError, error 
               className={`action-btn mic-btn ${isDictating ? "recording" : ""}`}
               onClick={handleStartDictation}
               disabled={voiceUnavailable}
-              title={voiceUnavailable ? "Voice input is not supported in this browser" : "Dictate message"}
-              aria-label="Dictate message"
+              title={
+                voiceUnavailable
+                  ? "Voice input is not supported in this browser"
+                  : "Speak in Bangla, Banglish, or English — Chrome/Edge recommended"
+              }
+              aria-label="Dictate message — Bangla, Banglish, or English"
             >
               <MicIcon className="size-5" />
             </button>

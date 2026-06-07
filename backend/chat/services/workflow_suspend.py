@@ -25,6 +25,7 @@ from chat.services.leave_fsm import (
 
 KEY_SUSPENDED_LEAVE = "suspended_leave"
 KEY_SUSPENDED_EXPENSE = "suspended_expense"
+KEY_RESTORE_LEAVE_AFTER_EXPENSE = "restore_leave_after_expense_submit"
 
 # Banglish / Bengali / English — user phrasing varies; keep patterns broad.
 _NAV_VERB = (
@@ -172,4 +173,21 @@ def restore_suspended_expense(workflow_state: dict[str, Any]) -> dict[str, Any]:
 def clear_suspended_expense(workflow_state: dict[str, Any]) -> dict[str, Any]:
     wf = dict(workflow_state or {})
     wf.pop(KEY_SUSPENDED_EXPENSE, None)
+    return wf
+
+
+def mark_restore_leave_after_expense_submit(workflow_state: dict[str, Any]) -> dict[str, Any]:
+    """User explicitly asked to finish expense before continuing leave."""
+    wf = dict(workflow_state or {})
+    wf[KEY_RESTORE_LEAVE_AFTER_EXPENSE] = True
+    return wf
+
+
+def should_restore_leave_after_expense_submit(workflow_state: dict[str, Any] | None) -> bool:
+    return bool((workflow_state or {}).get(KEY_RESTORE_LEAVE_AFTER_EXPENSE))
+
+
+def clear_restore_leave_after_expense_submit(workflow_state: dict[str, Any]) -> dict[str, Any]:
+    wf = dict(workflow_state or {})
+    wf.pop(KEY_RESTORE_LEAVE_AFTER_EXPENSE, None)
     return wf

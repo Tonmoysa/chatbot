@@ -17,6 +17,7 @@ from chat.services.expense.workflow_schema import get_expense_workflow_schema
 WORKFLOW_TYPE_EXPENSE = "expense_request"
 KEY_EXPENSE_BLOCK = "expense_request"
 KEY_EXPENSE_LAST_SUBMISSION = "expense_last_submission"
+KEY_EXPENSE_SUBMISSIONS_HISTORY = "expense_submissions_history"
 
 
 def clone_workflow_state(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -83,12 +84,20 @@ def save_expense_last_submission(
     incurred_date_iso: str = "",
 ) -> dict[str, Any]:
     wf = clone_workflow_state(workflow_state)
-    wf[KEY_EXPENSE_LAST_SUBMISSION] = {
+    batch = {
         "reference_id": str(reference_id or "").strip(),
         "items": [dict(x) for x in items],
         "incurred_date_iso": str(incurred_date_iso or "").strip(),
         "submitted_at": date.today().isoformat(),
     }
+    wf[KEY_EXPENSE_LAST_SUBMISSION] = batch
+    history = list(wf.get(KEY_EXPENSE_SUBMISSIONS_HISTORY) or [])
+    ref = batch["reference_id"]
+    if ref and not any(str(h.get("reference_id") or "") == ref for h in history if isinstance(h, dict)):
+        history.append(dict(batch))
+    elif not ref:
+        history.append(dict(batch))
+    wf[KEY_EXPENSE_SUBMISSIONS_HISTORY] = history
     return wf
 
 

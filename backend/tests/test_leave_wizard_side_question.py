@@ -202,3 +202,116 @@ def test_python_ki_during_leave_review_declines_without_full_resume(monkeypatch)
     assert is_leave_paused(session.workflow_state)
     draft = read_leave_state(session.workflow_state).get("draft") or {}
     assert "familly" in str(draft.get("reason") or "").lower()
+
+
+@pytest.mark.django_db
+def test_weather_statement_at_leave_review_does_not_mutate_draft(monkeypatch):
+    """Casual weather talk without '?' must not overwrite leave review draft."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    orch = ChatOrchestrator()
+    emp = "leave-weather-interrupt"
+    sid = None
+    trace = "lwx-"
+    for i, msg in enumerate(
+        (
+            "tomorrow I need paid leave",
+            "paid",
+            "full day",
+            "amar paye betha onek tai",
+        ),
+        start=1,
+    ):
+        pack = orch.run_chat(
+            company_id="company-a",
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"{trace}{i}",
+        )
+        sid = pack["_session_id"]
+
+    session = orch.memory.get_or_create_session(
+        company_id="company-a", employee_id=emp, session_id=sid
+    )
+    draft_before = dict(read_leave_state(session.workflow_state).get("draft") or {})
+    from chat.services.leave_fsm import is_awaiting_leave_confirmation
+
+    assert is_awaiting_leave_confirmation(session.workflow_state)
+    assert draft_before.get("start_date")
+    reason_before = str(draft_before.get("reason") or "").lower()
+    assert "betha" in reason_before or "paye" in reason_before
+
+    for weather_msg in ("ajke onek gorom porche", "ajke onek gorom"):
+        pack = orch.run_chat(
+            company_id="company-a",
+            message=weather_msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"{trace}{weather_msg[:8]}",
+        )
+        body = pack["response"]["message"] or ""
+        assert "জমা দেবেন" not in body
+        assert "পর্যালোচনা" not in body or "বাইরে" in body
+        assert (
+            "বাইরে" in body
+            or "HR" in body
+            or "scope" in body.lower()
+            or "general knowledge" in body.lower()
+        )
+        session.refresh_from_db()
+        draft_after = dict(read_leave_state(session.workflow_state).get("draft") or {})
+        assert draft_after.get("start_date") == draft_before.get("start_date")
+        assert "gorom" not in str(draft_after.get("reason") or "").lower()
+
+
+@pytest.mark.django_db
+def test_leave_back_phrase_at_review_does_not_overwrite_reason(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    orch = ChatOrchestrator()
+    emp = "leave-back-nav-pytest"
+    sid = None
+    for i, msg in enumerate(
+        (
+            "tomorrow I need paid leave",
+            "paid",
+            "full day",
+            "amar paye betha onek tai",
+        ),
+        start=1,
+    ):
+        pack = orch.run_chat(
+            company_id="company-a",
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"lbn-{i}",
+        )
+        sid = pack["_session_id"]
+
+    pack = orch.run_chat(
+        company_id="company-a",
+        message="leave e back koro",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="lbn-back",
+    )
+    session = orch.memory.get_or_create_session(
+        company_id="company-a", employee_id=emp, session_id=sid
+    )
+    draft = read_leave_state(session.workflow_state).get("draft") or {}
+    assert "back koro" not in str(draft.get("reason") or "").lower()
+    assert "betha" in str(draft.get("reason") or "").lower()

@@ -16,6 +16,7 @@ from chat.constants import (
     INTENT_WFH_REQUEST,
 )
 from chat.services.expense_workflow import wants_expense_summary
+from chat.services.expense.session_ledger import wants_session_expense_ledger_query
 from chat.services.llm_client import LLMClient
 from chat.services.policy_intent_helpers import is_expense_entitlement_query, is_rules_query
 
@@ -118,26 +119,35 @@ def wants_post_submit_expense_summary(message: str) -> bool:
 
 def _strong_expense_day_summary(message: str) -> bool:
     """Same-day spend recap (not submitting a new line item with an amount)."""
+    try:
+        from chat.services.expense.expense_policy import is_expense_daily_cap_query
+
+        if is_expense_daily_cap_query(message):
+            return False
+    except Exception:
+        pass
     if wants_post_submit_expense_summary(message):
+        return True
+    if wants_session_expense_ledger_query(message):
         return True
     if _strong_expense_claim(message):
         return False
     low = (message or "").lower()
     raw = message or ""
     time_ok = bool(
-        re.search(r"\b(today|ajke|ajker|aj\s+ke|eikhon|ei\s+din)\b", low)
-        or re.search(r"(আজ|আজকে|এইদিন|আজকের)", raw)
+        re.search(r"\b(today|ajke|ajker|aj\s+ke|eikhon|ei\s+din|sara\s+din)\b", low)
+        or re.search(r"(আজ|আজকে|এইদিন|আজকের|সারা\s*দিন)", raw)
     )
     # Banglish: "amar total cost koto hoyeche" — no explicit "today"; still a same-day spend recap.
     banglish_total_spend = bool(
         (
-            re.search(r"\b(amar|my)\b", low)
+            re.search(r"\b(amar|amai|amake|my|ami|am)\b", low)
             and (
                 re.search(r"\b(total|mot|koto)\b", low)
                 or re.search(r"(মোট|কত)", raw)
             )
             and re.search(
-                r"\b(cost|kharcha|khoroch|kharch|expense|taka|money)\b",
+                r"\b(cost|kharcha|khoroch|kharch|expense|taka|money|koroch)\b",
                 low,
             )
         )
@@ -158,6 +168,8 @@ def _strong_expense_day_summary(message: str) -> bool:
             raw.lower(),
         )
         or re.search(r"\bkoto\s+hoyeche\b", low)
+        or re.search(r"\bkoto\s+hoise\b", low)
+        or re.search(r"\bkoto\s+hoyese\b", low)
         or re.search(r"কত\s*হয়েছে", raw)
     )
     domain = bool(
@@ -383,9 +395,13 @@ _WIZARD_SIDE_QUESTION_RE = re.compile(
 
 def looks_like_wizard_side_question(message: str) -> bool:
     """True when the user is asking a question, not supplying a wizard slot value."""
+    from chat.services.leave_balance_intent import is_leave_balance_query
+
     text = (message or "").strip()
     if not text:
         return False
+    if is_leave_balance_query(text):
+        return True
     if not _WIZARD_SIDE_QUESTION_RE.search(text):
         return False
     low = text.lower()
@@ -418,6 +434,13 @@ def _message_answers_wizard_step(message: str, step: str | None) -> bool:
             return False
         if looks_like_wizard_side_question(message):
             return False
+        try:
+            from chat.services.wizard_turn_gate import is_casual_wizard_side_statement
+
+            if is_casual_wizard_side_statement(message):
+                return False
+        except Exception:
+            pass
         return True
     text = (message or "").strip()
     if not text:
@@ -485,17 +508,27 @@ class IntentDetector:
             and re.search(r"(চাই|lagbe|lage|dorkar|need|apply|request)", text)
         )
         strong_day_summary = _strong_expense_day_summary(message)
-        if strong_day_summary:
-            return {
-                "intent": INTENT_EXPENSE_DAY_SUMMARY,
-                "confidence": 0.99,
-                "source": "rules_override",
-            }
         if is_expense_entitlement_query(message):
             return {
                 "intent": INTENT_HR_POLICY,
                 "confidence": 0.99,
                 "source": "rules_override_entitlement",
+            }
+        from chat.services.expense.session_action_memory import (
+            wants_expense_meta_question,
+        )
+
+        if wants_expense_meta_question(message):
+            return {
+                "intent": INTENT_EXPENSE_STATUS,
+                "confidence": 0.99,
+                "source": "rules_override_expense_meta",
+            }
+        if strong_day_summary:
+            return {
+                "intent": INTENT_EXPENSE_DAY_SUMMARY,
+                "confidence": 0.99,
+                "source": "rules_override",
             }
         # Rules / regulations / handbook queries are deterministic — never let
         # the LLM steer them into another bucket (e.g. LEAVE_REQUEST just because
@@ -556,9 +589,19 @@ class IntentDetector:
         return {"intent": self._rule_intent(text, message), "confidence": 0.6, "source": "rules"}
 
     def _rule_intent(self, text: str, raw_message: str = "") -> str:
+        from chat.services.leave_balance_intent import is_leave_balance_query
+
         # Bengali / Banglish keywords (fallback path when LLM isn't used or fails)
         if is_expense_entitlement_query(raw_message or text):
             return INTENT_HR_POLICY
+        if is_leave_balance_query(raw_message or text):
+            return INTENT_LEAVE_BALANCE
+        from chat.services.expense.expense_total_dispute import (
+            is_expense_total_check_query,
+        )
+
+        if is_expense_total_check_query(raw_message or text):
+            return INTENT_EXPENSE_STATUS
         if _strong_expense_day_summary(raw_message or text):
             return INTENT_EXPENSE_DAY_SUMMARY
         if re.search(r"(ছুটি|chuti|chhuti|holiday)", text) and re.search(

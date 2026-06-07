@@ -11,6 +11,11 @@ function extractBotText(payload) {
   return typeof msg === "string" ? msg : "";
 }
 
+function extractBotActions(payload) {
+  const actions = payload?.response?.actions;
+  return Array.isArray(actions) ? actions : [];
+}
+
 function friendlyAxiosMessage(err) {
   const data = err?.response?.data;
   if (data && typeof data === "object") {
@@ -188,9 +193,15 @@ export function useChat() {
             ? "We could not complete that request."
             : "No response message was returned.");
 
+        const actions = extractBotActions(data);
         setMessages((prev) => [
           ...prev,
-          { role: "bot", text: display, at: new Date().toISOString() },
+          {
+            role: "bot",
+            text: display,
+            at: new Date().toISOString(),
+            ...(actions.length ? { actions } : {}),
+          },
         ]);
         await refreshSessions();
       } catch (err) {

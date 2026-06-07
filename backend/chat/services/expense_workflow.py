@@ -73,9 +73,40 @@ from chat.services.expense.entity_pipeline import (
 from chat.services.expense.expense_confirm import (
     apply_corrections,
     build_confirmation_question,
+    build_correction_failure_notice,
+    correction_unclear_notice,
     dedupe_expense_items,
+    duplicate_reentry_notice,
     is_confirmation_no,
     is_confirmation_yes,
+    looks_like_compound_expense_claim,
+    looks_like_duplicate_expense_reentry,
+    looks_like_expense_correction,
+    review_denial_hints,
+    wants_travel_group_remove,
+)
+from chat.services.expense.expense_ingest_guard import (
+    REASON_TRAVEL_REMOVED,
+    ingest_lock_notice,
+    set_ingest_lock,
+    should_block_compound_reingest,
+)
+from chat.services.expense.expense_draft_snapshots import (
+    KEY_RESTORE_PENDING,
+    apply_snapshot_to_block,
+    clear_restore_pending,
+    format_restore_menu,
+    is_awaiting_restore_selection,
+    parse_restore_selection,
+    push_expense_snapshot,
+    read_snapshots,
+    restore_applied_notice,
+    restore_cancel_notice,
+    restore_pick_notice,
+    restore_unavailable_notice,
+    snapshots_for_restore_menu,
+    wants_restore_expense_version,
+    items_fingerprint,
 )
 from chat.services.expense.expense_fsm import (
     clone_workflow_state,
@@ -147,6 +178,11 @@ _FINISH_COLLECT_RE = re.compile(
 
 
 def _wants_finish_collecting(message: str) -> bool:
+    from chat.services.expense.command_parser import parse_wizard_flow_plan
+
+    plan = parse_wizard_flow_plan(message)
+    if plan.finish_collecting:
+        return True
     t = (message or "").strip()
     if _FINISH_COLLECT_RE.match(t):
         return True
@@ -186,6 +222,8 @@ def wants_resume_or_show_expense(message: str) -> bool:
 
     t = (message or "").strip()
     if not t:
+        return False
+    if wants_restore_expense_version(t):
         return False
     if wants_defer_expense_for_leave_submit(t) or wants_defer_leave_for_expense_submit(t):
         return False
@@ -252,6 +290,190 @@ def format_expense_resume_message(
             "যেখানে থেমেছিলেন:\n\n"
         )
     return intro + resume
+
+
+def _restore_menu_choices(
+    wf: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    cur_fp = items_fingerprint(items)
+    return [
+        s
+        for s in snapshots_for_restore_menu(wf, items)
+        if str(s.get("fingerprint") or "") != cur_fp
+    ]
+
+
+def _try_handle_total_check_turn(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    lang: str | None,
+    inc_iso: str,
+) -> dict[str, Any] | None:
+    from chat.services.expense.expense_total_dispute import (
+        format_expense_total_check_message,
+        is_expense_total_check_query,
+    )
+    from chat.services.expense.session_action_memory import record_expense_total_check
+
+    if not is_expense_total_check_query(message):
+        return None
+    body = format_expense_total_check_message(
+        wf,
+        incurred_date_iso=inc_iso,
+        lang=lang,
+        user_message=message,
+    )
+    if not body:
+        return None
+    total = sum(float(x.get("amount") or 0) for x in items)
+    wf = record_expense_total_check(
+        wf,
+        total=total,
+        line_count=len(items),
+        stage=str(block.get("stage") or "review"),
+    )
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=body,
+        inc_iso=inc_iso,
+    )
+
+
+def _try_handle_restore_turn(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    lang: str | None,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+) -> dict[str, Any] | None:
+    """Snapshot restore menu + apply selected version."""
+    stage = normalize_expense_stage(str(block.get("stage") or STAGE_COLLECTING))
+
+    def _summary_pack(
+        body: str,
+        restored_items: list[dict[str, Any]],
+        *,
+        warnings: list | None = None,
+        line_flags: list | None = None,
+    ) -> dict[str, Any]:
+        set_expense_stage(block, STAGE_REVIEW)
+        tail = format_expense_summary(
+            restored_items,
+            incurred_date_iso=inc_iso,
+            warnings=warnings or [],
+            line_flags=line_flags or [],
+            lang=lang,
+        )
+        return _pack(
+            wf,
+            block,
+            items=restored_items,
+            question=f"{body}\n\n{tail}",
+            warnings=warnings or [],
+            inc_iso=inc_iso,
+        )
+
+    if is_awaiting_restore_selection(block):
+        choices = _restore_menu_choices(wf, items)
+        pick = parse_restore_selection(
+            message,
+            choices,
+            current_fingerprint=items_fingerprint(items),
+        )
+        if pick == -1:
+            clear_restore_pending(block)
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+            )
+            return _summary_pack(restore_cancel_notice(lang=lang), items, warnings=val.warnings, line_flags=val.line_flags)
+        if pick is not None and 1 <= pick <= len(choices):
+            snap = choices[pick - 1]
+            restored = apply_snapshot_to_block(block, snap)
+            clear_restore_pending(block)
+            wf = push_expense_snapshot(
+                wf,
+                items=restored,
+                stage=str(block.get("stage") or STAGE_REVIEW),
+                action_type="after_restore",
+                incurred_date_iso=inc_iso,
+                lang=lang,
+            )
+            from chat.services.expense.session_action_memory import record_expense_corrected
+
+            wf = record_expense_corrected(
+                wf,
+                items=restored,
+                incurred_date_iso=inc_iso,
+                stage="review",
+            )
+            val = validate_expense_items(
+                restored,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+            )
+            block["review_line_flags"] = val.line_flags
+            return _summary_pack(
+                restore_applied_notice(snap, lang=lang),
+                restored,
+                warnings=val.warnings,
+                line_flags=val.line_flags,
+            )
+        if wants_restore_expense_version(message):
+            choices = _restore_menu_choices(wf, items)
+            if choices:
+                block[KEY_RESTORE_PENDING] = True
+                menu = format_restore_menu(choices, lang=lang, current_items=items)
+                return _pack(wf, block, items=items, question=menu, inc_iso=inc_iso)
+        menu = format_restore_menu(choices, lang=lang, current_items=items) if choices else ""
+        hint = restore_pick_notice(lang=lang)
+        q = f"{hint}\n\n{menu}" if menu else hint
+        return _pack(wf, block, items=items, question=q, inc_iso=inc_iso)
+
+    if wants_restore_expense_version(message):
+        wf = push_expense_snapshot(
+            wf,
+            items=items,
+            stage=stage,
+            action_type="current_before_restore",
+            incurred_date_iso=inc_iso,
+            lang=lang,
+        )
+        choices = _restore_menu_choices(wf, items)
+        if not choices:
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+            )
+            body = restore_unavailable_notice(lang=lang)
+            if items:
+                body += "\n\n" + format_expense_summary(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    warnings=val.warnings,
+                    line_flags=val.line_flags,
+                    lang=lang,
+                )
+            return _pack(wf, block, items=items, question=body, warnings=val.warnings, inc_iso=inc_iso)
+        block[KEY_RESTORE_PENDING] = True
+        menu = format_restore_menu(choices, lang=lang, current_items=items)
+        return _pack(wf, block, items=items, question=menu, inc_iso=inc_iso)
+
+    return None
 
 
 def wants_expense_summary(message: str) -> bool:
@@ -575,7 +797,23 @@ def _ingest_extracted_lines(
             not str(d.get("from_location") or "").strip()
             or not str(d.get("to_location") or "").strip()
         ):
-            needs_route.append(ni)
+            amt_key = round(float(d.get("amount") or 0), 2)
+            already_routed = any(
+                str(r.get("category") or "").lower() == cat.lower()
+                and round(float(r.get("amount") or 0), 2) == amt_key
+                and str(r.get("from_location") or "").strip()
+                and str(r.get("to_location") or "").strip()
+                for r in out
+            )
+            if not already_routed:
+                needs_route.append(ni)
+            continue
+        key = (cat.lower(), round(float(d.get("amount") or 0), 2))
+        if any(
+            (str(r.get("category") or "").lower(), round(float(r.get("amount") or 0), 2))
+            == key
+            for r in out
+        ):
             continue
         out.append(d)
 
@@ -642,7 +880,7 @@ def _ingest_extracted_lines(
             block, out, float(pending_entries[0]["amount"]), lang=lang
         )[0]
 
-    return out, None
+    return dedupe_expense_items(out), None
 
 
 def _finalize_pending_line(
@@ -756,12 +994,40 @@ def format_expense_submitted_message(
 def _apply_corrections(
     items: list[dict[str, Any]],
     message: str,
+    *,
+    review_mode: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
-    return apply_corrections(
+    from chat.services.expense.command_executor import apply_message_corrections
+
+    extract = (
+        None
+        if review_mode
+        else lambda m: _extract_lines_from_message(m, use_llm=False)
+    )
+    result = apply_message_corrections(items, message, extract_lines=extract)
+    return result.items, result.changed
+
+
+def _apply_review_corrections(
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    trace_id: str = "",
+) -> tuple[list[dict[str, Any]], bool]:
+    """Review-stage corrections via typed command plan (Phase 2 / 2.5)."""
+    from chat.services.expense.command_executor import (
+        apply_message_corrections,
+    )
+
+    result = apply_message_corrections(
         items,
         message,
-        extract_lines=lambda m: _extract_lines_from_message(m, use_llm=False),
+        extract_lines=None,
+        trace_id=trace_id,
+        use_llm=True,
+        review_stage=True,
     )
+    return result.items, result.changed
 
 
 def _pack(
@@ -812,15 +1078,32 @@ def _has_pending_expense_line(block: dict[str, Any]) -> bool:
 
 def _pending_finish_block_message(block: dict[str, Any], *, lang: str) -> str:
     pending = block.get("pending_line") if isinstance(block.get("pending_line"), dict) else {}
-    amt = float(pending.get("amount") or 0)
+    lines: list[str] = []
+    if pending.get("amount"):
+        cat = str(pending.get("category") or "line").strip()
+        lines.append(f"**{cat}** — **{float(pending.get('amount') or 0):g} Tk**")
+    for qrow in list(block.get("pending_queue") or []):
+        cat = str(qrow.get("category") or "").strip()
+        try:
+            amt = float(qrow.get("amount") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+        if cat and amt > 0:
+            lines.append(f"**{cat}** — **{amt:g} Tk**")
+    joined = "; ".join(lines) if lines else f"**{float(pending.get('amount') or 0):g} Tk**"
     if lang == "en":
         return (
-            f"**{amt:g} Tk** still needs a category before review "
-            f"(e.g. bus, lunch, snack). Reply with the category, then say **done**."
+            f"Cannot submit yet — finish pending lines first: {joined}.\n"
+            "Add **from/to** for travel lines (e.g. `office to badda`), then **joma daw** again."
+        )
+    if lang == "banglish":
+        return (
+            f"Ekhono submit hobe na — age pending line gulo shesh korun: {joined}.\n"
+            "Travel line er **from/to** din (e.g. `office to badda`), tarpor abar **joma daw**."
         )
     return (
-        f"আগে **{amt:g} Tk** এর category বলুন (যেমন bus, lunch, snack), "
-        f"তারপর **শেষ** বা summary লিখুন।"
+        f"এখনো জমা দেওয়া যাবে না — আগে pending লাইন শেষ করুন: {joined}.\n"
+        "Travel খরচে **from/to** লিখুন (যেমন `office to badda`), তারপর আবার **জমা দিন**।"
     )
 
 
@@ -881,6 +1164,14 @@ def _try_advance_to_review(
     block.pop("pending_line", None)
     block.pop("pending_step", None)
     block.pop("clarification_issues", None)
+    wf = push_expense_snapshot(
+        wf,
+        items=items,
+        stage=STAGE_REVIEW,
+        action_type="initial_review",
+        incurred_date_iso=inc_iso,
+        lang=lang,
+    )
     return _pack(
         wf,
         block,
@@ -911,6 +1202,15 @@ def _handle_pending_line(
     step = str(block.get("pending_step") or "category")
     amt = float(pending.get("amount") or 0)
     lang = lang_from_block(block)
+
+    if _wants_finish_collecting(message) and _has_pending_expense_line(block):
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=_pending_finish_block_message(block, lang=lang),
+            inc_iso=inc_iso,
+        )
 
     if step == "clarify":
         issues = deserialize_clarification_issues(block.get("clarification_issues"))
@@ -1120,6 +1420,7 @@ def process_expense_turn(
     company_id: str = "",
     employee_id: str = "",
     session_id: str = "",
+    trace_id: str = "",
     day_logged_total: float = 0.0,
     daily_cap: float = 300.0,
     pipeline_result: ExpenseExtractionResult | None = None,
@@ -1152,6 +1453,47 @@ def process_expense_turn(
         )
     )
     block["incurred_date_iso"] = inc_iso
+
+    from chat.services.expense.session_action_memory import (
+        is_vague_expense_add,
+        record_expense_lines_added,
+        record_vague_add_prompt,
+        vague_add_clarification,
+    )
+
+    if stage == STAGE_COLLECTING and is_vague_expense_add(message):
+        wf = record_vague_add_prompt(wf)
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=vague_add_clarification(lang=lang),
+            inc_iso=inc_iso,
+        )
+
+    restore_pack = _try_handle_restore_turn(
+        wf,
+        block,
+        items,
+        message,
+        lang=lang,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+    )
+    if restore_pack:
+        return restore_pack
+
+    total_pack = _try_handle_total_check_turn(
+        wf,
+        block,
+        items,
+        message,
+        lang=lang,
+        inc_iso=inc_iso,
+    )
+    if total_pack:
+        return total_pack
 
     if wants_resume_or_show_expense(message):
         resume_msg = format_expense_resume_message(wf, user_message=message)
@@ -1247,6 +1589,17 @@ def process_expense_turn(
 
     # --- Data review (first yes → submit prompt) ---
     if stage == STAGE_REVIEW:
+        total_pack = _try_handle_total_check_turn(
+            wf,
+            block,
+            items,
+            message,
+            lang=lang,
+            inc_iso=inc_iso,
+        )
+        if total_pack:
+            return total_pack
+
         if is_confirmation_yes(message):
             val = validate_expense_items(
                 items,
@@ -1290,34 +1643,139 @@ def process_expense_turn(
                 inc_iso=inc_iso,
             )
 
-        items, corrected = _apply_corrections(items, message)
-        if not corrected:
-            ext_fix = _extract_lines_from_message(
-                message, pipeline_result=pipeline_result
+        review_snapshot = [dict(x) for x in items]
+
+        if is_confirmation_no(message):
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
             )
-            if ext_fix.items or ext_fix.malformed:
-                block_fix = dict(block)
-                items, blocked_q = _ingest_extracted_lines(
-                    block_fix, items, ext_fix, inc_iso=inc_iso
+            q = (
+                review_denial_hints(lang)
+                + "\n\n"
+                + format_expense_summary(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    warnings=val.warnings,
+                    line_flags=val.line_flags,
+                    lang=lang,
                 )
-                block.update(block_fix)
-                if blocked_q:
-                    wf["expense_request"] = block
-                    return _pack(
-                        wf,
-                        block,
-                        items=items,
-                        question=blocked_q,
-                        inc_iso=inc_iso,
-                    )
-                corrected = True
-        items = dedupe_expense_items(items)
-        if not items:
-            ext = _extract_lines_from_message(
-                message, pipeline_result=pipeline_result
             )
-            if ext.items:
-                items = merge_items([], ext.items)
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                warnings=val.warnings,
+                inc_iso=inc_iso,
+            )
+
+        corrected = False
+        from chat.services.expense.command_parser import parse_correction_plan
+
+        correction_plan = parse_correction_plan(message)
+        if correction_plan.has_any_correction() or looks_like_expense_correction(message):
+            wf = push_expense_snapshot(
+                wf,
+                items=items,
+                stage=STAGE_REVIEW,
+                action_type="before_correction",
+                incurred_date_iso=inc_iso,
+                lang=lang,
+            )
+            items, corrected = _apply_review_corrections(
+                items, message, trace_id=trace_id
+            )
+
+        if looks_like_duplicate_expense_reentry(message, items):
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=duplicate_reentry_notice(lang),
+                inc_iso=inc_iso,
+            )
+
+        if not corrected and looks_like_expense_correction(message):
+            fail_note = build_correction_failure_notice(message, items, lang=lang)
+            if fail_note:
+                val = validate_expense_items(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    message=message,
+                )
+                q = (
+                    fail_note
+                    + "\n\n"
+                    + format_expense_summary(
+                        items,
+                        incurred_date_iso=inc_iso,
+                        warnings=val.warnings,
+                        line_flags=val.line_flags,
+                        lang=lang,
+                    )
+                )
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                )
+
+        if (
+            not corrected
+            and not looks_like_expense_correction(message)
+            and (extract_expense_items(message).items or [])
+        ):
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=duplicate_reentry_notice(lang),
+                inc_iso=inc_iso,
+            )
+
+        if corrected and not items and review_snapshot:
+            items = review_snapshot
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            q = (
+                correction_unclear_notice(lang)
+                + "\n\n"
+                + review_denial_hints(lang)
+                + "\n\n"
+                + format_expense_summary(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    warnings=val.warnings,
+                    line_flags=val.line_flags,
+                    lang=lang,
+                )
+            )
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                warnings=val.warnings,
+                inc_iso=inc_iso,
+            )
+
+        items = dedupe_expense_items(items)
+        if not items and review_snapshot:
+            items = review_snapshot
 
         if _wants_finish_collecting(message) and items:
             adv = _try_advance_to_review(
@@ -1361,8 +1819,32 @@ def process_expense_turn(
             line_flags=val.line_flags,
             lang=lang,
         )
-        if corrected or is_confirmation_no(message):
+        if corrected:
             q = "আপডেট করা হয়েছে।\n\n" + q
+            action_type = "after_correction"
+            if wants_travel_group_remove(message):
+                action_type = "after_travel_remove"
+                set_ingest_lock(block, reason=REASON_TRAVEL_REMOVED)
+            else:
+                from chat.services.expense.expense_ingest_guard import clear_ingest_lock
+
+                clear_ingest_lock(block)
+            wf = push_expense_snapshot(
+                wf,
+                items=items,
+                stage=STAGE_REVIEW,
+                action_type=action_type,
+                incurred_date_iso=inc_iso,
+                lang=lang,
+            )
+            from chat.services.expense.session_action_memory import record_expense_corrected
+
+            wf = record_expense_corrected(
+                wf,
+                items=items,
+                incurred_date_iso=inc_iso,
+                stage="review",
+            )
         return _pack(
             wf,
             block,
@@ -1393,6 +1875,7 @@ def process_expense_turn(
         ):
             block.pop("pending_line", None)
             block.pop("pending_step", None)
+            block.pop("pending_queue", None)
             block.pop("clarification_issues", None)
         else:
             return _handle_pending_line(
@@ -1500,9 +1983,56 @@ def process_expense_turn(
             message_facts=facts,
         )
 
+    if items and should_block_compound_reingest(block, message, items):
+        val = validate_expense_items(
+            items,
+            incurred_date_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            message=message,
+        )
+        lock_note = ""
+        if block.get("ingest_lock"):
+            lock_note = "\n\n" + ingest_lock_notice(block, lang=lang)
+        q = (
+            duplicate_reentry_notice(lang)
+            + lock_note
+            + "\n\n"
+            + format_expense_summary(
+                items,
+                incurred_date_iso=inc_iso,
+                warnings=val.warnings,
+                line_flags=val.line_flags,
+                lang=lang,
+            )
+        )
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=q,
+            warnings=val.warnings,
+            inc_iso=inc_iso,
+        )
+
     ext = _extract_lines_from_message(message, pipeline_result=pipeline_result)
     if ext.items or ext.malformed:
+        before_count = len(items)
         items, blocked_q = _ingest_extracted_lines(block, items, ext, inc_iso=inc_iso)
+        if len(items) > before_count:
+            if block.get("ingest_lock") and not looks_like_compound_expense_claim(
+                message
+            ):
+                from chat.services.expense.expense_ingest_guard import clear_ingest_lock
+
+                clear_ingest_lock(block)
+            wf = record_expense_lines_added(
+                wf,
+                new_items=items[before_count:],
+                all_items=items,
+                incurred_date_iso=inc_iso,
+                stage=str(block.get("stage") or STAGE_COLLECTING),
+            )
         if blocked_q:
             wf["expense_request"] = block
             return _pack(

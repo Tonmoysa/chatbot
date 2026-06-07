@@ -115,6 +115,7 @@ class ExpenseConversationManager:
             incurred_date_iso=incurred_date_iso,
             pending=pending,
             primary_slot=primary_slot,
+            block=block,
         )
         body = self._build_ask_body(
             primary_slot,
@@ -149,6 +150,7 @@ class ExpenseConversationManager:
         incurred_date_iso: str,
         pending: dict[str, Any] | None,
         primary_slot: str,
+        block: dict[str, Any] | None = None,
     ) -> str:
         missing_set = set(missing)
         bullets: list[str] = []
@@ -172,6 +174,31 @@ class ExpenseConversationManager:
             pending_bullet = format_expense_line_bullet(pending_row, lang)
             if pending_bullet not in bullets:
                 bullets.append(pending_bullet)
+
+        queue_suffix = {
+            "en": " (route next)",
+            "banglish": " (route pore)",
+        }.get(lang, " (পরে route)")
+        for qrow in list((block or {}).get("pending_queue") or []):
+            cat = str(qrow.get("category") or "").strip()
+            try:
+                amt = float(qrow.get("amount") or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            if not cat or amt <= 0:
+                continue
+            queued_bullet = format_expense_line_bullet(
+                {
+                    "category": cat,
+                    "amount": amt,
+                    "from_location": qrow.get("from_location") or "",
+                    "to_location": qrow.get("to_location") or "",
+                },
+                lang,
+            )
+            marked = f"{queued_bullet}{queue_suffix}"
+            if marked not in bullets and queued_bullet not in bullets:
+                bullets.append(marked)
 
         show_date = bool(incurred_date_iso and SLOT_INCURRED_DATE not in missing_set)
         if not bullets and not show_date:

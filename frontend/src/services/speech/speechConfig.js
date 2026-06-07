@@ -13,15 +13,55 @@ export const ACTIVE_SPEECH_PROVIDER =
 
 /** BCP-47 tags tried in order when browser supports them. */
 export const SPEECH_LANGUAGE_PREFERENCE = (
-  import.meta.env.VITE_SPEECH_LANGUAGES?.trim() || "bn-BD,en-US,en-IN"
+  import.meta.env.VITE_SPEECH_LANGUAGES?.trim() || "bn-BD,bn-IN,bn,en-IN,en-US"
 )
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
+/**
+ * When true, pick STT language from spoken content (English / Bangla / Banglish).
+ * When false, always use the first tag in SPEECH_LANGUAGE_PREFERENCE (legacy Bangla-first).
+ */
+export const SPEECH_AUTO_DETECT_LANGUAGE =
+  import.meta.env.VITE_SPEECH_AUTO_DETECT !== "false";
+
+/**
+ * Always use the first language in SPEECH_LANGUAGE_PREFERENCE for STT.
+ * Ignored when SPEECH_AUTO_DETECT_LANGUAGE is true.
+ */
+export const SPEECH_FORCE_PRIMARY_LANGUAGE =
+  import.meta.env.VITE_SPEECH_FORCE_PRIMARY_LANGUAGE !== "false";
+
+/** Start mic on bn-BD unless draft/stored text says otherwise (Bangla-first HR app). */
+export const SPEECH_DEFAULT_START_MODE =
+  import.meta.env.VITE_SPEECH_DEFAULT_MODE?.trim() || "bn";
+
+/** Max STT language switches per dictation session (prevents restart thrashing). */
+export const SPEECH_LANG_SWITCH_MAX = Number(
+  import.meta.env.VITE_SPEECH_LANG_SWITCH_MAX || 1
+);
+
+/** Min accumulated chars before switching STT language mid-session. */
+export const SPEECH_LANG_SWITCH_MIN_CHARS = Number(
+  import.meta.env.VITE_SPEECH_LANG_SWITCH_MIN_CHARS || 15
+);
+
 export const SPEECH_CONTINUOUS = true;
 export const SPEECH_INTERIM_RESULTS = true;
-export const SPEECH_MAX_ALTERNATIVES = 1;
+export const SPEECH_MAX_ALTERNATIVES = Number(
+  import.meta.env.VITE_SPEECH_MAX_ALTERNATIVES || 3
+);
+
+/** Delay before auto-restarting continuous recognition (reduces clipped Bengali words). */
+export const SPEECH_RESTART_DELAY_MS = Number(
+  import.meta.env.VITE_SPEECH_RESTART_DELAY_MS || 300
+);
+
+/** Debounce interim UI updates — Bengali interim text flickers heavily otherwise. */
+export const SPEECH_INTERIM_DEBOUNCE_MS = Number(
+  import.meta.env.VITE_SPEECH_INTERIM_DEBOUNCE_MS || 150
+);
 
 /** Whisper recording limits (Phase 2). */
 export const WHISPER_MAX_RECORDING_MS = Number(

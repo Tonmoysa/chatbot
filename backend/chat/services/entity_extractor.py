@@ -354,6 +354,12 @@ class EntityExtractor:
         mmock = re.search(r"\bMOCK-[A-Za-z0-9]{6,}\b", message, re.I)
         if mmock and not e.get("request_id"):
             e["request_id"] = mmock.group(0).upper()
+        mexp = re.search(r"\b(EXP-\d{4}-[A-Z0-9]+)\b", message, re.I)
+        if mexp and not e.get("request_id"):
+            e["request_id"] = mexp.group(1).upper()
+        mleave = re.search(r"\b(PHP-LEAVE-[A-Z0-9]+)\b", message, re.I)
+        if mleave and not e.get("request_id"):
+            e["request_id"] = mleave.group(1).upper()
         from chat.services.leave_slot_extraction import (
             explicit_leave_type_from_message,
             message_mentions_leave_type,

@@ -299,6 +299,51 @@ class MockCRMAdapter(CRMAdapter):
             self._idempotency[(company, idem)] = rid
         return {"request_id": rid, "record": self._requests[rid]}
 
+    def record_expense_submission(
+        self,
+        *,
+        company_id: str,
+        employee_id: str,
+        session_id: str,
+        reference_id: str,
+        entities: dict[str, Any],
+        decision: dict[str, Any],
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """
+        Store expense under the canonical EXP-* reference (not a duplicate MOCK row).
+        """
+        company, emp = self._identity(company_id, employee_id, session_id)
+        rid = str(reference_id or "").strip()
+        if not rid:
+            rid = f"MOCK-{uuid.uuid4().hex[:10].upper()}"
+        idem = (idempotency_key or "").strip()
+        if idem and (company, idem) in self._idempotency:
+            existing = self._idempotency[(company, idem)]
+            return {"request_id": existing, "_idempotent_replay": True}
+        if rid in self._requests:
+            return {"request_id": rid, "_idempotent_replay": True}
+
+        leave_status = (decision or {}).get("leave_status")
+        crm_status = self._initial_status(decision)
+        self._requests[rid] = {
+            "request_id": rid,
+            "company_id": company,
+            "employee_id": emp,
+            "session_id": session_id,
+            "idempotency_key": idem,
+            "intent": "EXPENSE_CLAIM",
+            "entities": dict(entities or {}),
+            "decision": dict(decision or {}),
+            "status": crm_status,
+            "leave_status": leave_status or crm_status,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "expense_submission": True,
+        }
+        if idem:
+            self._idempotency[(company, idem)] = rid
+        return {"request_id": rid, "record": self._requests[rid]}
+
     def _initial_status(self, decision: dict[str, Any]) -> str:
         outcome = (decision or {}).get("outcome")
         mapping = {

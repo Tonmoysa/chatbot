@@ -137,10 +137,14 @@ class LeaveEntityPipeline:
         ent = dict(entities or {})
         from chat.services.leave.normalization import (
             message_explicitly_states_day_scope,
+            message_explicitly_states_leave_date,
             strip_ungrounded_day_scope,
         )
 
         ent = strip_ungrounded_day_scope(ent, message)
+        preserve_dates = overwrite and not message_explicitly_states_leave_date(message)
+        preserved_start = draft.get("start_date") if preserve_dates else None
+        preserved_end = draft.get("end_date") if preserve_dates else None
         had_scope = bool(draft.get("day_scope"))
         if not ent and self._extractor._llm.is_configured():
             local = self.extract(
@@ -218,6 +222,12 @@ class LeaveEntityPipeline:
 
         if not had_scope and not message_explicitly_states_day_scope(message):
             draft.pop("day_scope", None)
+
+        if preserve_dates:
+            if preserved_start:
+                draft["start_date"] = preserved_start
+            if preserved_end:
+                draft["end_date"] = preserved_end
 
         self._normalize_draft(draft)
 

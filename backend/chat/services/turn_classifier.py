@@ -42,6 +42,10 @@ from chat.services.policy_intent_helpers import (
     is_off_topic_for_hr_assistant,
     is_rules_query,
 )
+from chat.services.wizard_turn_gate import (
+    is_casual_wizard_side_statement,
+    looks_like_leave_review_update,
+)
 
 TURN_SLOT_ANSWER = "SLOT_ANSWER"
 TURN_CORRECTION = "CORRECTION"
@@ -109,6 +113,8 @@ def classify_workflow_turn(
     leave_active: bool,
     expense_active: bool,
     pending_leave_step: str | None = None,
+    leave_review_pending: bool = False,
+    expense_review_pending: bool = False,
     balance_probe: bool = False,
 ) -> str:
     """
@@ -152,10 +158,33 @@ def classify_workflow_turn(
         if pending_leave_step in ("reason", "supporting_document"):
             if looks_like_wizard_side_question(message):
                 return TURN_CHITCHAT
+            if is_casual_wizard_side_statement(message):
+                return TURN_CHITCHAT
         if _message_answers_wizard_step(message, pending_leave_step) or _canonical_leave_wizard_token(
             message
         ):
             return TURN_SLOT_ANSWER
+
+    if leave_review_pending or expense_review_pending:
+        if leave_review_pending and (
+            looks_like_leave_review_update(message) or parse_edit_slot(message)
+        ):
+            return TURN_CORRECTION
+        if expense_review_pending and looks_like_expense_correction(message):
+            return TURN_CORRECTION
+        if (
+            is_casual_wizard_side_statement(message)
+            or looks_like_wizard_side_question(message)
+            or is_general_knowledge_out_of_scope(message)
+            or is_off_topic_for_hr_assistant(message, wizard_active=True)
+        ):
+            return TURN_CHITCHAT
+        if leave_review_pending:
+            return TURN_CHITCHAT
+        if expense_review_pending and looks_like_expense_wizard_continuation(message):
+            return TURN_SLOT_ANSWER
+        if expense_review_pending:
+            return TURN_CHITCHAT
 
     if parse_edit_slot(message):
         return TURN_CORRECTION
@@ -169,9 +198,13 @@ def classify_workflow_turn(
     if leave_active:
         if looks_like_wizard_side_question(message):
             return TURN_CHITCHAT
+        if is_casual_wizard_side_statement(message):
+            return TURN_CHITCHAT
         if is_general_knowledge_out_of_scope(message):
             return TURN_CHITCHAT
         if is_off_topic_for_hr_assistant(message, wizard_active=True):
+            return TURN_CHITCHAT
+        if leave_review_pending:
             return TURN_CHITCHAT
         return TURN_SLOT_ANSWER
 

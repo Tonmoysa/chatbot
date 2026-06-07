@@ -1,5 +1,6 @@
 import { MarkdownContent } from "../utils/markdown.jsx";
 import { getDisplayTime } from "./chat/dateUtils.js";
+import WorkflowActionBar from "./chat/WorkflowActionBar.jsx";
 
 function FileBubble({ name, sizeLabel }) {
   return (
@@ -49,6 +50,9 @@ export default function MessageBubble(props) {
   const at = m.at ?? props.at;
   const attachment = m.attachment;
   const type = m.type || "text";
+  const actions = m.actions;
+  const onAction = props.onAction;
+  const actionsDisabled = Boolean(props.actionsDisabled);
 
   const isUser = role === "user";
   const isBot = role === "bot" || role === "assistant";
@@ -91,6 +95,13 @@ export default function MessageBubble(props) {
     <div className={`message-row ${isUser ? "user" : "bot"}`} role="article" aria-label={isUser ? "You" : "HR AI"}>
       <div className="message-bubble">
         {body}
+        {isBot && actions?.length ? (
+          <WorkflowActionBar
+            actions={actions}
+            onAction={onAction}
+            disabled={actionsDisabled}
+          />
+        ) : null}
         {time ? <span className="message-time">{time}</span> : null}
       </div>
     </div>

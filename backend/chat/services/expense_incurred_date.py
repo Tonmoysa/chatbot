@@ -41,6 +41,38 @@ def _parse_numeric_dates_in_message(message: str, *, today: date) -> date | None
     return None
 
 
+def message_has_relative_date_signal(message: str) -> bool:
+    """True when the user text itself states today / yesterday / tomorrow."""
+    raw = message or ""
+    low = raw.lower()
+    if _parse_numeric_dates_in_message(raw, today=date.today()):
+        return True
+    today_re = re.compile(
+        r"(আজ(কের)?|"
+        r"\b(ajke|ajker|aaj|aajke|today)\b)",
+        re.I,
+    )
+    yesterday_re = re.compile(
+        r"(গতকাল|"
+        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
+        re.I,
+    )
+    tomorrow_re = re.compile(
+        r"(আগামীকাল|"
+        r"\b(kalker|kal\s+er|porer\s+din|next\s+day|"
+        r"tomorrow|tomarrow|tommorow|tommorrow|tomorow|tmrw|tmw)\b)",
+        re.I,
+    )
+    return bool(
+        today_re.search(raw)
+        or today_re.search(low)
+        or yesterday_re.search(raw)
+        or yesterday_re.search(low)
+        or tomorrow_re.search(raw)
+        or tomorrow_re.search(low)
+    )
+
+
 def infer_expense_incurred_date_iso(
     *,
     message: str,
@@ -85,11 +117,12 @@ def infer_expense_incurred_date_iso(
     if tomorrow_re.search(message) or tomorrow_re.search(low):
         return (today_d + timedelta(days=1)).isoformat()
 
-    for key in ("expense_incurred_date", "date"):
-        v = hints.get(key)
-        d = _parse_iso_date(str(v) if v is not None else "")
-        if d:
-            return d.isoformat()
+    if not message_has_relative_date_signal(message):
+        for key in ("expense_incurred_date", "date"):
+            v = hints.get(key)
+            d = _parse_iso_date(str(v) if v is not None else "")
+            if d:
+                return d.isoformat()
 
     return today_d.isoformat()
 

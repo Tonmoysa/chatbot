@@ -638,6 +638,11 @@ def _looks_like_slot_correction(message: str) -> bool:
 
         return False
 
+    from chat.services.wizard_turn_gate import is_leave_navigation_phrase
+
+    if is_leave_navigation_phrase(message):
+        return False
+
     from chat.services.intent_detector import (
         _strong_expense_claim,
         _strong_expense_day_summary,
@@ -646,13 +651,9 @@ def _looks_like_slot_correction(message: str) -> bool:
     if _strong_expense_claim(message) or _strong_expense_day_summary(message):
         return False
 
-    # Free-form reason updates often arrive at the confirmation screen
-    # (users add context instead of typing "yes"). Treat long non-question text
-    # as a slot correction so we can patch the draft (typically `reason`).
-    t = (message or "").strip()
-    if t and len(t) >= 12 and not t.endswith("?") and not re.search(
-        r"^(can\s+i|what|why|how|when|where|which)\b", t, re.I
-    ):
+    from chat.services.wizard_turn_gate import looks_like_leave_review_update
+
+    if looks_like_leave_review_update(message):
         return True
 
     return bool(
@@ -765,7 +766,17 @@ def process_confirmation_turn(
 
         }
 
+    from chat.services.wizard_turn_gate import is_leave_navigation_phrase
 
+    if is_leave_navigation_phrase(message):
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(d),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_confirmation_prompt(d),
+            "cancelled": False,
+        }
 
     edit_slot = parse_edit_slot(message)
 

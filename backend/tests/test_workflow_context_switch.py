@@ -527,16 +527,33 @@ def test_leave_to_expense_to_leave_preserves_draft(monkeypatch):
         )
         assert out_submit["decision"]["outcome"] == "SUBMITTED"
         session.refresh_from_db()
-        assert is_leave_in_progress(session.workflow_state)
-        assert not has_suspended_leave(session.workflow_state)
+        assert not is_leave_in_progress(session.workflow_state)
+        assert has_suspended_leave(session.workflow_state)
         msg = out_submit["response"]["message"] or ""
-        assert "ছুটি" in msg or "leave" in msg.lower() or "বেতন" in msg
+        assert "ছুটি" not in msg or "still in progress" not in msg.lower()
+        assert "জমা দেবেন" not in msg
 
     session.refresh_from_db()
     st = read_leave_state(session.workflow_state)
     draft_after = dict(st.get("draft") or {})
-    assert draft_after.get("leave_type") == "sick"
-    assert draft_after.get("start_date") == draft_before.get("start_date")
+    assert not draft_after.get("leave_type"), (
+        "leave draft should stay in suspended_leave until user resumes"
+    )
+    sl = session.workflow_state.get("suspended_leave") or {}
+    assert sl.get("draft", {}).get("leave_type") == "sick"
+    assert sl.get("draft", {}).get("start_date") == draft_before.get("start_date")
+
+    r_resume = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="leave e back koro",
+        session_id=session.session_id,
+        employee_id=emp,
+        trace_id="wf-switch-leave-resume",
+    )
+    assert r_resume["intent"] == INTENT_LEAVE_REQUEST
+    session.refresh_from_db()
+    assert is_leave_in_progress(session.workflow_state)
+    assert not has_suspended_leave(session.workflow_state)
 
     r_continue = orch.run_chat(
         company_id=COMPANY_ID,

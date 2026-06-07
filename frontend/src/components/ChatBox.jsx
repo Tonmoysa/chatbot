@@ -62,10 +62,21 @@ export default function ChatBox({ messages, loading, error, onSend, onClearError
         elements.push(<DateSeparator key={`sep-${msg.at || i}-${msgDate}`} date={msgDate} />);
         lastDate = msgDate;
       }
+      const isLatestBot =
+        msg.role === "bot" && !messages.slice(i + 1).some((m) => m.role === "bot");
       elements.push(
         <MessageBubble
           key={`${i}-${msg.role}-${(msg.text || "").slice(0, 24)}`}
           message={msg}
+          onAction={
+            isLatestBot
+              ? (action) => {
+                  const text = (action?.message || action?.label || "").trim();
+                  if (text) handleSend(text);
+                }
+              : undefined
+          }
+          actionsDisabled={loading || !isLatestBot}
         />
       );
     });

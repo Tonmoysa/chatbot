@@ -114,6 +114,14 @@ def is_expense_entitlement_query(message: str) -> bool:
             return False
         return True
 
+    try:
+        from chat.services.expense.expense_policy import is_expense_daily_cap_query
+
+        if is_expense_daily_cap_query(message):
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -324,12 +332,49 @@ def is_policy_kb_query(message: str) -> bool:
     return False
 
 
+_TODAY_DATE_QUERY_RE = re.compile(
+    r"(?:"
+    r"ajker\s+date|ajke\s+tarikh|aaj\s+ki\s+din|today'?s?\s+date|what\s+date\s+is\s+it|"
+    r"আজকের\s+তারিখ|আজ\s+কী\s+তারিখ|আজ\s+কি\s+তারিখ|আজ\s+কত\s+তারিখ|"
+    r"ajke\s+kon\s+din|ajke\s+ki\s+din"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def is_hr_today_date_query(message: str) -> bool:
+    """In-scope: user asks today's calendar date for expense/leave context."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    return bool(_TODAY_DATE_QUERY_RE.search(raw))
+
+
+def format_today_date_reply(*, today_iso: str, lang: str = "en") -> str:
+    if lang == "bn":
+        return (
+            f"আজকের তারিখ: **{today_iso}**।\n"
+            "ছুটি বা খরচের তারিখ লিখতে চাইলে **ajke** / **kalke** / নির্দিষ্ট তারিখ ব্যবহার করুন।"
+        )
+    if lang == "banglish":
+        return (
+            f"Ajker date: **{today_iso}**.\n"
+            "Leave ba expense er jonno **ajke** / **kalke** ba specific date likhte paren."
+        )
+    return (
+        f"Today's date is **{today_iso}**.\n"
+        "For leave or expenses you can say **today**, **tomorrow**, or give a specific date."
+    )
+
+
 def is_general_knowledge_out_of_scope(message: str) -> bool:
     """
     Calendar / national-holiday trivia (e.g. \"eid kobe\", \"25th december eta ki din\").
     Not company HR policy — the assistant should decline professionally.
     """
     if not message or is_company_policy_about_occasion(message):
+        return False
+    if is_hr_today_date_query(message):
         return False
     raw = (message or "").strip()
     low = raw.lower()
@@ -376,6 +421,14 @@ def is_off_topic_for_hr_assistant(
     raw = (message or "").strip()
     if _PURE_CHITCHAT_RE.match(raw):
         return False
+    if wizard_active:
+        try:
+            from chat.services.wizard_turn_gate import is_casual_wizard_side_statement
+
+            if is_casual_wizard_side_statement(message):
+                return True
+        except Exception:
+            pass
     if wizard_active:
         try:
             from chat.services.intent_detector import looks_like_wizard_side_question
