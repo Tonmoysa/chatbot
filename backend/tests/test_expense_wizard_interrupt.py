@@ -108,10 +108,81 @@ def test_eid_kobe_during_active_expense_does_not_resume_wizard(monkeypatch):
         or "scope" in msg.lower()
         or "HR" in msg
     )
-    assert "draft" in msg.lower() or "expense" in msg.lower() or "খরচ" in msg
+    assert "draft" not in msg.lower()
+    assert "still saved" not in msg.lower()
     block = session.workflow_state.get("expense_request") or {}
     assert block.get("active") is True
     assert len(block.get("items") or []) == len(items_before)
+
+
+@pytest.mark.django_db
+def test_country_name_during_expense_declines_without_full_resume(monkeypatch):
+    """General-knowledge side questions must not resume the expense review screen."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.orchestrator.conversational_reply",
+        lambda **_k: "আপনার দেশের নাম বাংলাদেশ।",
+    )
+    orch = ChatOrchestrator()
+    emp = "exp-country-interrupt"
+    r1 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="metro 100 uttora to motijheel, lunch 50",
+        session_id=None,
+        employee_id=emp,
+        trace_id="exp-country-1",
+    )
+    sid = r1["_session_id"]
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID, employee_id=emp, session_id=sid
+    )
+    assert is_expense_in_progress(session.workflow_state)
+
+    r2 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="amader desher nam ki?",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="exp-country-2",
+    )
+    msg = r2["response"]["message"] or ""
+    assert r2["intent"] == INTENT_UNKNOWN
+    assert "বাংলাদেশ" not in msg
+    assert "পর্যালোচনা" not in msg
+    assert "Is the information above correct" not in msg
+    assert (
+        "বাইরে" in msg
+        or "HR" in msg
+        or "scope" in msg.lower()
+        or "general knowledge" in msg.lower()
+    )
+    assert "draft" not in msg.lower()
+    assert "still saved" not in msg.lower()
+    session.refresh_from_db()
+    assert is_expense_paused(session.workflow_state)
+
+
+@pytest.mark.django_db
+def test_compound_expense_metroral_typo_no_category_reask():
+    msg = (
+        "ami ajke motejhell theke mirpur aschi bus e 50 taka expense hoyeche "
+        "then lunch 100 taka then mirpur to uttora te aschi metroral e expense hoyeche 40 taka"
+    )
+    r = process_expense_turn(workflow_state={}, message=msg)
+    items = r.get("items") or []
+    cats = {row.get("category") for row in items}
+    assert "Metro Rail" in cats
+    assert "Bus" in cats
+    assert "Lunch" in cats
+    q = (r.get("question") or "").lower()
+    assert "category ki" not in q
 
 
 @pytest.mark.django_db
@@ -141,13 +212,9 @@ def test_greeting_during_expense_does_not_clear_draft():
     session.refresh_from_db()
     msg = r2["response"]["message"] or ""
     assert is_expense_in_progress(session.workflow_state)
-    assert (
-        "খরচ" in msg
-        or "আর কোনো" in msg
-        or "Daily expense" in msg
-        or "পর্যালোচনা" in msg
-        or "Mot:" in msg
-    )
+    assert msg.strip()
+    assert "draft" not in msg.lower()
+    assert "still saved" not in msg.lower()
 
 
 @pytest.mark.django_db

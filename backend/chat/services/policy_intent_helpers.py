@@ -365,8 +365,9 @@ def is_off_topic_for_hr_assistant(
 ) -> bool:
     """
     Dynamic out-of-scope: not every off-topic phrase is listed statically.
-    Decline when the message is clearly not HR-assistant work (unless a wizard
-    is collecting slots and the user asked a side question).
+    Decline when the message is clearly not HR-assistant work.
+    During an active wizard, only HR-relevant side questions stay in scope
+    (general trivia / GK is still declined).
     """
     if not message or is_hr_assistant_in_scope(message):
         return False
@@ -380,15 +381,18 @@ def is_off_topic_for_hr_assistant(
             from chat.services.intent_detector import looks_like_wizard_side_question
 
             if looks_like_wizard_side_question(message):
-                return False
+                if (
+                    is_rules_query(message)
+                    or is_expense_entitlement_query(message)
+                    or is_hr_assistant_in_scope(message)
+                ):
+                    return False
         except Exception:
             pass
     if not _QUESTION_SHAPE_RE.search(raw):
         return False
     words = re.findall(r"\S+", raw)
-    if len(words) < 3:
-        return False
-    return True
+    return len(words) >= 2
 
 
 _OUT_OF_SCOPE_BN: tuple[str, ...] = (

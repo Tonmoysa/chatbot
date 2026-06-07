@@ -7,6 +7,7 @@ from chat.services.orchestrator import ChatOrchestrator
 from chat.services.policy_intent_helpers import (
     build_out_of_scope_message,
     is_general_knowledge_out_of_scope,
+    is_hr_assistant_in_scope,
     is_off_topic_for_hr_assistant,
     is_policy_handbook_complaint,
     is_policy_kb_query,
@@ -41,6 +42,16 @@ def test_general_knowledge_out_of_scope_detected(message: str) -> None:
 def test_dynamic_off_topic_without_static_festival_list(message: str) -> None:
     assert is_off_topic_for_hr_assistant(message)
     assert not is_policy_kb_query(message)
+
+
+def test_country_name_off_topic_even_during_wizard() -> None:
+    assert is_off_topic_for_hr_assistant("amader desher nam ki?", wizard_active=True)
+    assert not is_hr_assistant_in_scope("amader desher nam ki?")
+
+
+def test_short_gk_question_off_topic_during_wizard() -> None:
+    assert is_off_topic_for_hr_assistant("python ki?", wizard_active=True)
+    assert is_off_topic_for_hr_assistant("python ki", wizard_active=True)
 
 
 def test_policy_kb_query_for_named_policy_ask() -> None:
@@ -101,7 +112,12 @@ def test_orchestrator_eid_kobe_out_of_scope_not_rag(monkeypatch: pytest.MonkeyPa
     assert out.get("intent") == INTENT_UNKNOWN
     assert "পালন" not in text
     assert "ছুটি" in text or "পলিসি" in text or "HR" in text
-    assert "বাইরে" in text or "সাহায্য" in text or "scope" in text.lower()
+    assert (
+        "বাইরে" in text
+        or "সাহায্য" in text
+        or "scope" in text.lower()
+        or "general knowledge" in text.lower()
+    )
 
 
 @pytest.mark.django_db

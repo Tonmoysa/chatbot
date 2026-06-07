@@ -500,14 +500,6 @@ def _expense_paused_workflow_hint(user_lang: str) -> str:
     )
 
 
-def _append_expense_draft_short_hint(message: str, *, user_message: str = "") -> str:
-    from chat.services.expense_copy import expense_draft_resume_hint, normalize_reply_lang
-    from chat.services.translator import detect_user_language
-
-    lang = normalize_reply_lang(detect_user_language(user_message or message))
-    return message.rstrip() + "\n\n" + expense_draft_resume_hint(lang)
-
-
 def _append_suspended_leave_resume_after_switch(
     message: str, workflow_state: dict[str, Any], *, user_message: str = ""
 ) -> str:
@@ -942,9 +934,14 @@ class ChatOrchestrator:
             elif intent == INTENT_LEAVE_BALANCE:
                 leave_workflow_interrupt = True
             elif intent == INTENT_UNKNOWN:
-                if not policy_complaint and workflow_turn == TURN_CHITCHAT:
+                if not policy_complaint and (
+                    workflow_turn == TURN_CHITCHAT or general_out_of_scope
+                ):
                     if (
-                        is_leave_collecting(wf_state)
+                        (
+                            is_leave_collecting(wf_state)
+                            or is_awaiting_leave_confirmation(wf_state)
+                        )
                         and not is_leave_paused(wf_state)
                         and not is_greeting_now
                     ):
@@ -955,9 +952,6 @@ class ChatOrchestrator:
                     leave_side_interrupt = True
                 elif workflow_turn == TURN_POLICY_QUERY:
                     leave_workflow_interrupt = True
-            elif is_awaiting_leave_confirmation(wf_state):
-                if workflow_turn == TURN_CHITCHAT:
-                    leave_side_interrupt = True
         elif is_expense_in_progress(wf_state):
             if intent in (
                 INTENT_LEAVE_REQUEST,
@@ -2060,6 +2054,10 @@ class ChatOrchestrator:
                 and not general_out_of_scope
                 and is_expense_in_progress(getattr(session, "workflow_state", None) or {})
                 and not (_is_confirmation_yes(message) or _is_confirmation_no(message))
+                and (
+                    _looks_like_chitchat(message, strict=True)
+                    or _is_fresh_start_greeting(message)
+                )
             ):
                 wf_exp_side = getattr(session, "workflow_state", None) or {}
                 expense_hint = (
@@ -2094,9 +2092,9 @@ class ChatOrchestrator:
                 and is_expense_in_progress(getattr(session, "workflow_state", None) or {})
                 and not (_is_confirmation_yes(message) or _is_confirmation_no(message))
             ):
-                if general_out_of_scope:
-                    msg = _append_expense_draft_short_hint(msg, user_message=message)
-                else:
+                from chat.services.expense_workflow import wants_resume_or_show_expense
+
+                if wants_resume_or_show_expense(message):
                     msg = _append_expense_workflow_resume(
                         msg, getattr(session, "workflow_state", None) or {}
                     )
@@ -2117,6 +2115,10 @@ class ChatOrchestrator:
                 and not leave_terminal_turn
                 and not policy_complaint
                 and not general_out_of_scope
+                and (
+                    _looks_like_chitchat(message, strict=True)
+                    or _is_fresh_start_greeting(message)
+                )
             ):
                 reply = conversational_reply(
                     message=message,
@@ -2150,9 +2152,10 @@ class ChatOrchestrator:
                     )
                 )
             ):
-                msg = _append_leave_workflow_resume(
-                    msg, getattr(session, "workflow_state", None) or {}
-                )
+                if wants_resume_suspended_leave(message):
+                    msg = _append_leave_workflow_resume(
+                        msg, getattr(session, "workflow_state", None) or {}
+                    )
                 response_finalized = True
 
         except CRMError:

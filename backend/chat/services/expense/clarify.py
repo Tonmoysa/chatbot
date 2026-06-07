@@ -10,6 +10,7 @@ from typing import Any
 
 from chat.services.expense_copy import normalize_reply_lang
 from chat.services.expense_extraction import (
+    detect_likely_category_typo,
     is_travel_category,
     parse_category_token,
     parse_from_to_locations,
@@ -27,7 +28,7 @@ _CONFIRM_TYPo_RE = re.compile(
 
 @dataclass
 class ClarificationIssue:
-    kind: str  # location_typo | missing_category
+    kind: str  # location_typo | missing_category | category_typo
     item_index: int = -1
     field: str = ""
     original: str = ""
@@ -99,6 +100,21 @@ def collect_clarification_issues(
             continue
         if str(pending.get("category") or "").strip():
             continue
+        src = str(pending.get("source_clause") or "").strip()
+        typo = detect_likely_category_typo(src) if src else None
+        if typo:
+            original, suggestion = typo
+            issues.append(
+                ClarificationIssue(
+                    kind="category_typo",
+                    pending_index=pidx,
+                    amount=amt,
+                    original=original,
+                    suggestion=suggestion,
+                    category=suggestion,
+                )
+            )
+            continue
         issues.append(
             ClarificationIssue(
                 kind="missing_category",
@@ -153,6 +169,17 @@ def format_clarification_prompt(
                 lines.append(
                     f"{i}. **{issue.category}** ({issue.amount:g} Tk) · {role}: "
                     f"**{issue.original}** — **{issue.suggestion}** বোঝাচ্ছেন?"
+                )
+        elif issue.kind == "category_typo":
+            if reply_lang == "en":
+                lines.append(
+                    f"{i}. **{issue.amount:g} Tk** — did you mean **{issue.suggestion}** "
+                    f"(not **{issue.original}**)?"
+                )
+            else:
+                lines.append(
+                    f"{i}. **{issue.amount:g} Tk** — আপনি কি **{issue.suggestion}** "
+                    f"বুঝিয়েছেন (**{issue.original}**)?"
                 )
         elif issue.kind == "missing_category":
             if reply_lang == "en":
@@ -224,6 +251,16 @@ def apply_clarification_reply(
             resolved = _resolve_typo_answer(segment, issue)
             if resolved and 0 <= issue.item_index < len(out_items):
                 out_items[issue.item_index][issue.field] = resolved
+                if seg_idx < len(segments):
+                    seg_idx += 1
+            else:
+                unresolved.append(issue)
+        elif issue.kind == "category_typo":
+            cat = issue.suggestion
+            if not _CONFIRM_TYPo_RE.search((segment or "").lower()):
+                cat = _resolve_category_answer(segment) or cat
+            if cat and 0 <= issue.pending_index < len(out_pending):
+                out_pending[issue.pending_index]["category"] = cat
                 if seg_idx < len(segments):
                     seg_idx += 1
             else:

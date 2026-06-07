@@ -39,6 +39,7 @@ from chat.services.leave_confirm import (
 from chat.services.policy_intent_helpers import (
     is_expense_entitlement_query,
     is_general_knowledge_out_of_scope,
+    is_off_topic_for_hr_assistant,
     is_rules_query,
 )
 
@@ -167,6 +168,10 @@ def classify_workflow_turn(
 
     if leave_active:
         if looks_like_wizard_side_question(message):
+            return TURN_CHITCHAT
+        if is_general_knowledge_out_of_scope(message):
+            return TURN_CHITCHAT
+        if is_off_topic_for_hr_assistant(message, wizard_active=True):
             return TURN_CHITCHAT
         return TURN_SLOT_ANSWER
 

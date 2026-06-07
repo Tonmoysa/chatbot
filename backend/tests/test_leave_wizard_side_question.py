@@ -88,7 +88,14 @@ def test_airplane_question_during_reason_not_saved_as_reason():
         )
 
     body = pack["response"]["message"] or ""
-    assert "ভ্রমণ" in body or "HR" in body or "পলিসি" in body.lower()
+    assert (
+        "ভ্রমণ" in body
+        or "HR" in body
+        or "পলিসি" in body.lower()
+        or "general knowledge" in body.lower()
+        or "বাইরে" in body
+        or "HR" in body
+    )
 
     session = orch.memory.get_or_create_session(
         company_id="company-a", employee_id=emp, session_id=sid
@@ -127,3 +134,71 @@ def test_misroute_complaint_gets_human_ack_not_robot_greeting():
     body = pack["response"]["message"] or ""
     assert "Hi! আমি আপনার HR assistant" not in body
     assert "কারণ" in body or "প্রশ্ন" in body or "leave form" in body.lower()
+
+
+@pytest.mark.django_db
+def test_python_ki_during_leave_review_declines_without_full_resume(monkeypatch):
+    """General-knowledge side questions must not reopen the leave review screen."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.orchestrator.conversational_reply",
+        lambda **_k: "পাইথন একটি প্রোগ্রামিং ভাষা।",
+    )
+    orch = ChatOrchestrator()
+    emp = "leave-python-interrupt"
+    sid = None
+    trace = "lpy-"
+    for i, msg in enumerate(
+        (
+            "tomorrow I need paid leave",
+            "paid",
+            "full day",
+            "familly program e jabo",
+        ),
+        start=1,
+    ):
+        pack = orch.run_chat(
+            company_id="company-a",
+            message=msg,
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"{trace}{i}",
+        )
+        sid = pack["_session_id"]
+
+    pack = orch.run_chat(
+        company_id="company-a",
+        message="python ki?",
+        session_id=sid,
+        employee_id=emp,
+        trace_id=f"{trace}gk",
+    )
+    body = pack["response"]["message"] or ""
+    assert "পাইথন" not in body
+    assert "প্রোগ্রামিং" not in body
+    assert "জমা দেবেন" not in body
+    assert "পর্যালোচনা" not in body
+    assert (
+        "general knowledge" in body.lower()
+        or "বাইরে" in body
+        or "HR" in body
+        or "scope" in body.lower()
+    )
+    assert "draft" not in body.lower()
+    assert "সংরক্ষিত" not in body
+
+    session = orch.memory.get_or_create_session(
+        company_id="company-a", employee_id=emp, session_id=sid
+    )
+    from chat.services.leave_workflow import is_leave_paused
+
+    assert is_leave_paused(session.workflow_state)
+    draft = read_leave_state(session.workflow_state).get("draft") or {}
+    assert "familly" in str(draft.get("reason") or "").lower()

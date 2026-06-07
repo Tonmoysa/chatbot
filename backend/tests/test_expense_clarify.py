@@ -5,11 +5,57 @@ from chat.services.expense.clarify import (
     collect_clarification_issues,
     format_clarification_prompt,
 )
+from chat.services.expense_extraction import detect_likely_category_typo, extract_expense_items
 from chat.services.expense_workflow import (
     format_expense_summary,
     process_expense_turn,
     _format_line_display,
 )
+
+
+def test_detect_likely_category_typo_metroral():
+    assert detect_likely_category_typo("metroral e expense hoyeche 40 taka") == (
+        "metroral",
+        "Metro Rail",
+    )
+
+
+def test_extract_metroral_typo_with_route():
+    msg = "mirpur to uttora te aschi metroral e expense hoyeche 40 taka"
+    ext = extract_expense_items(msg)
+    assert len(ext.items) == 1
+    assert ext.items[0].category == "Metro Rail"
+    assert ext.items[0].amount == 40.0
+
+
+def test_category_typo_clarify_prompt_bn():
+    pending = [
+        {
+            "amount": 40,
+            "category": "",
+            "source_clause": "metroral e expense hoyeche 40 taka",
+        }
+    ]
+    issues = collect_clarification_issues([], pending)
+    assert any(i.kind == "category_typo" for i in issues)
+    prompt = format_clarification_prompt(issues)
+    assert "Metro Rail" in prompt
+    assert "metroral" in prompt
+    assert "category ki" not in prompt.lower()
+
+
+def test_apply_category_typo_confirm_yes():
+    pending = [
+        {
+            "amount": 40,
+            "category": "",
+            "source_clause": "metroral e expense hoyeche 40 taka",
+        }
+    ]
+    issues = collect_clarification_issues([], pending)
+    _, pending, unresolved = apply_clarification_reply("yes", [], issues, pending)
+    assert pending[0]["category"] == "Metro Rail"
+    assert unresolved == []
 
 
 def test_collect_clarification_issues_typo_and_category():

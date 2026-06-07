@@ -74,23 +74,6 @@ def grouped_expense_ack_header(incurred_date_iso: str, lang: ReplyLang, *, seed:
     return f"{opening} **{incurred_date_iso}** তারিখ:"
 
 
-def expense_draft_resume_hint(lang: ReplyLang) -> str:
-    if lang == "en":
-        return (
-            "Your expense draft is still saved — say **show my expense** or add a line "
-            "(e.g. lunch 100) when you want to continue."
-        )
-    if lang == "banglish":
-        return (
-            "Apnar expense draft save ache — chalate chaile **expense ta dekh** ba "
-            "line likhun (e.g. lunch 100)."
-        )
-    return (
-        "আপনার খরচের draft **সংরক্ষিত আছে** — চালাতে চাইলে **expense ta dekh** লিখুন, "
-        "অথবা line যোগ করুন (যেমন: lunch 100)।"
-    )
-
-
 def lang_from_block(block: dict[str, Any] | None) -> ReplyLang:
     return normalize_reply_lang((block or {}).get("reply_language"))
 

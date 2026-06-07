@@ -57,6 +57,8 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "metro": "Metro Rail",
     "metro rail": "Metro Rail",
     "metrorail": "Metro Rail",
+    "metroral": "Metro Rail",
+    "metorail": "Metro Rail",
     "মেট্রো": "Metro Rail",
     "uber": "Other",
     "cab": "Other",
@@ -209,14 +211,55 @@ def parse_category_token(message: str) -> str | None:
     text = message or ""
     if re.search(r"\bother\b", text, re.I):
         return "Other"
-    # Banglish: "bus e", "lunch e"
+    # Banglish: "bus e", "lunch e", "metroral e"
     m = re.search(rf"\b({_CATEGORY_TOKEN})\s*e\b", text, re.I)
     if m:
         return normalize_category(m.group(1))
     m = re.search(rf"\b({_CATEGORY_TOKEN})\b", text, re.I)
     if not m:
+        for word in re.findall(r"\b[\w\u0980-\u09FF]+\b", text):
+            key = word.lower()
+            if key in _CATEGORY_ALIASES:
+                return _CATEGORY_ALIASES[key]
         return None
     return normalize_category(m.group(1))
+
+
+# Near-miss tokens that look like a category but fail strict regex (typos / Banglish).
+_CATEGORY_TYPO_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bmetroral\b", re.I), "Metro Rail"),
+    (re.compile(r"\bmetorail\b", re.I), "Metro Rail"),
+    (re.compile(r"\bmetrorail\b", re.I), "Metro Rail"),
+    (re.compile(r"\bmetrorel\b", re.I), "Metro Rail"),
+    (re.compile(r"\bluch\b", re.I), "Lunch"),
+    (re.compile(r"\blanch\b", re.I), "Lunch"),
+    (re.compile(r"\briksha\b", re.I), "Rickshaw"),
+    (re.compile(r"\brikshaw\b", re.I), "Rickshaw"),
+    (re.compile(r"\bsnaks\b", re.I), "Snack"),
+)
+
+
+def detect_likely_category_typo(text: str) -> tuple[str, str] | None:
+    """
+    Return (original_token, suggested_category) when text contains a likely
+    misspelled category (e.g. metroral → Metro Rail).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    for pattern, category in _CATEGORY_TYPO_HINTS:
+        m = pattern.search(raw)
+        if m:
+            return m.group(0), category
+    for word in re.findall(r"\b[\w\u0980-\u09FF]+\b", raw):
+        low = word.lower()
+        if low in _CATEGORY_ALIASES:
+            continue
+        if parse_category_token(word):
+            continue
+        if low.startswith("metro") and len(low) >= 5:
+            return word, "Metro Rail"
+    return None
 
 
 def parse_declared_day_total(message: str) -> float | None:
@@ -639,6 +682,31 @@ def _amount_nearest_category(clause: str, cat_pos: int) -> float | None:
     return best
 
 
+def _extract_alias_category_line(
+    clause: str, covered: list[tuple[int, int]]
+) -> ExpenseLineItem | None:
+    """Match alias typos (metroral, luch) that fail strict _CATEGORY_TOKEN regex."""
+    for m in re.finditer(r"\b[\w\u0980-\u09FF]+\b", clause):
+        key = m.group(0).lower()
+        if key not in _CATEGORY_ALIASES:
+            continue
+        if _span_overlaps(covered, m.start(), m.end()):
+            continue
+        cat = _CATEGORY_ALIASES[key]
+        val = _amount_nearest_category(clause, m.start())
+        if val is None or val <= 0:
+            continue
+        item = ExpenseLineItem(category=cat, amount=val)
+        if is_travel_category(cat):
+            pair = _route_from_clause_prefix(clause, cat) or _route_from_clause_suffix(
+                clause, cat, val
+            )
+            if pair:
+                item.from_location, item.to_location = pair
+        return item
+    return None
+
+
 def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
     found: list[ExpenseLineItem] = []
     covered: list[tuple[int, int]] = []
@@ -741,6 +809,12 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
         found.extend(_uncategorized_amounts_in_clause(clause, covered))
         return found
 
+    alias_item = _extract_alias_category_line(clause, covered)
+    if alias_item:
+        covered.append((0, len(clause)))
+        found.append(alias_item)
+        return found
+
     cat_m = re.search(rf"\b({_CATEGORY_TOKEN})\b", clause, re.I)
     if cat_m and not _span_overlaps(covered, cat_m.start(), cat_m.end()):
         val = _amount_nearest_category(clause, cat_m.start())
@@ -771,6 +845,9 @@ def extract_expense_items(message: str) -> ExtractionResult:
     for clause in clauses:
         chunk_items = _extract_from_clause(clause)
         if chunk_items:
+            for it in chunk_items:
+                if not it.category and not (it.notes or "").strip():
+                    it.notes = clause
             items.extend(chunk_items)
         elif _AMOUNT_RE.search(clause):
             malformed.append(clause[:120])

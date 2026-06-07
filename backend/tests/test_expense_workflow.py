@@ -243,8 +243,12 @@ def test_loose_expense_amount_queued_after_travel_from_to():
     assert any(r["category"] == "Snack" and r["amount"] == 30 for r in r3["items"])
 
 
-def test_compound_route_lunch_and_loose_amount():
-    """User transcript: route+60, lunch 100, loose 50 — train should keep route from turn 1."""
+def test_compound_route_lunch_and_loose_amount(monkeypatch):
+    """User transcript: route+60, lunch 100, loose 50 — clarify then assign categories."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
     msg = "ami uttora theke mirpur 60 taka ,lunch 100 taka,then 50 taka cost hoyeche"
     wf: dict = {}
     r1 = process_expense_turn(workflow_state=wf, message=msg)
@@ -256,16 +260,17 @@ def test_compound_route_lunch_and_loose_amount():
         for i in (er1.get("clarification_issues") or [])
         if i.get("kind") == "missing_category"
     }
+    assert 60.0 in issue_amounts
     assert 50.0 in issue_amounts
 
-    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="train, snack")
+    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="bus, snack")
     er2 = r2["workflow_state"].get("expense_request") or {}
-    trains = [r for r in r2["items"] if r["category"] == "Train"]
+    buses = [r for r in r2["items"] if r["category"] == "Bus"]
     snacks = [r for r in r2["items"] if r["category"] == "Snack"]
-    assert len(trains) == 1
-    assert trains[0]["amount"] == 60
-    assert trains[0]["from_location"] == "uttora"
-    assert trains[0]["to_location"] == "mirpur"
+    assert len(buses) == 1
+    assert buses[0]["amount"] == 60
+    assert buses[0]["from_location"] == "uttora"
+    assert buses[0]["to_location"] == "mirpur"
     assert len(snacks) == 1
     assert snacks[0]["amount"] == 50
     assert er2.get("stage") == "review"

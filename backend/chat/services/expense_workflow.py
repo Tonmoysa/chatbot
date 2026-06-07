@@ -587,7 +587,7 @@ def _ingest_extracted_lines(
                 "category": "",
                 "from_location": ni.from_location or "",
                 "to_location": ni.to_location or "",
-                "source_clause": "",
+                "source_clause": str(getattr(ni, "notes", "") or ""),
             }
         )
     for clause in ext.malformed:
@@ -837,6 +837,7 @@ def _try_advance_to_review(
     if _has_pending_expense_line(block):
         return None
 
+    items = dedupe_expense_items(items)
     lang = lang_from_block(block)
     pending_entries = _pending_entries_list(block)
     if str(block.get("pending_step") or "") != "clarify":
@@ -924,6 +925,8 @@ def _handle_pending_line(
                 row = _finalize_pending_line(entry)
                 if row:
                     finalized.append(row)
+                else:
+                    remaining_pending.append(entry)
             else:
                 remaining_pending.append(entry)
         for idx, row in enumerate(items):
