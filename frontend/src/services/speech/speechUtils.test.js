@@ -40,6 +40,33 @@ describe("normalizeTranscript", () => {
       normalizeTranscript("ami corti nite chai", { lang: "en-US", mode: "en" })
     ).toBe("ami corti nite chai");
   });
+
+  it("keeps English phrases intact when session started on bn-BD", () => {
+    expect(
+      normalizeTranscript("please tell me the expense summary", {
+        lang: "bn-BD",
+        mode: "bn",
+      })
+    ).toBe("please tell me the expense summary");
+  });
+
+  it("does not map English words through Hindi drift fixes", () => {
+    expect(
+      normalizeTranscript("what is the policy on this", {
+        lang: "bn-BD",
+        mode: "bn",
+      })
+    ).toBe("what is the policy on this");
+  });
+
+  it("repairs bn-BD phonetic English script to Latin English", () => {
+    expect(
+      normalizeTranscript("প্লিজ টেল মি দা এক্সপেন্স সামারি", {
+        lang: "bn-BD",
+        mode: "bn",
+      })
+    ).toBe("please tell me the expense summary");
+  });
 });
 
 describe("resolveSpeechLanguage", () => {
@@ -83,16 +110,26 @@ describe("resolveSpeechSession", () => {
     expect(s.lang).toBe("en-IN");
   });
 
-  it("defaults to bn-BD when auto-detect has no hints (Bangla-first)", () => {
+  it("defaults to en-IN banglish when auto-detect has no hints", () => {
     vi.stubGlobal("navigator", { languages: ["en-US"], language: "en-US" });
     const s = resolveSpeechSession(["bn-BD", "en-IN", "en-US"], {
       autoDetect: true,
       storedMode: null,
       draftText: "",
     });
-    expect(s.mode).toBe(SPEECH_LANG_MODES.BN);
-    expect(s.lang).toBe("bn-BD");
+    expect(s.mode).toBe(SPEECH_LANG_MODES.BANGLISH);
+    expect(s.lang).toBe("en-IN");
     vi.unstubAllGlobals();
+  });
+
+  it("restores stored speech mode when auto-detect is on", () => {
+    const s = resolveSpeechSession(["bn-BD", "en-US"], {
+      autoDetect: true,
+      storedMode: SPEECH_LANG_MODES.EN,
+      draftText: "",
+    });
+    expect(s.mode).toBe(SPEECH_LANG_MODES.EN);
+    expect(s.lang).toBe("en-US");
   });
 });
 
@@ -109,13 +146,22 @@ describe("refineSpeechSessionFromTranscript", () => {
 
   it("does not switch on short interim text", () => {
     const current = { mode: SPEECH_LANG_MODES.BN, lang: "bn-BD" };
-    expect(refineSpeechSessionFromTranscript("please check", current)).toEqual(current);
+    expect(refineSpeechSessionFromTranscript("ok", current)).toEqual(current);
   });
 
   it("switches to English after enough confident English text", () => {
     const r = refineSpeechSessionFromTranscript(
       "Please check my leave balance for this month and explain the policy",
       { mode: SPEECH_LANG_MODES.BN, lang: "bn-BD" }
+    );
+    expect(r.mode).toBe(SPEECH_LANG_MODES.EN);
+    expect(r.lang).toBe("en-US");
+  });
+
+  it("switches to English on shorter clear English phrase from bn start", () => {
+    const r = refineSpeechSessionFromTranscript(
+      "please tell me the expense summary",
+      { mode: SPEECH_LANG_MODES.BN, lang: "bn-BD", modeLocked: false }
     );
     expect(r.mode).toBe(SPEECH_LANG_MODES.EN);
     expect(r.lang).toBe("en-US");

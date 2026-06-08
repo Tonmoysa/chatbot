@@ -373,6 +373,55 @@ def test_extract_multi_item_bangla():
     assert sum(i.amount for i in ext.items) == 170
 
 
+def test_extract_bangla_voice_compound_expense():
+    """Voice dump: bus + bike routes with Bengali number words and locative categories."""
+    msg = (
+        "আমার আজকে খরচ হয়েছে বাসে মিরপুর টু মতিঝিল একশো টাকা তারপরে "
+        "খরচ হয়েছে মতিঝিল টু মিরপুর বাইকে ২০০ টাকা এবং লাঞ্ছ ১০০ টাকা"
+    )
+    ext = extract_expense_items(msg)
+    assert len(ext.items) == 3
+    by_cat = {i.category: i for i in ext.items}
+    assert by_cat["Bus"].amount == 100.0
+    assert by_cat["Bus"].from_location
+    assert by_cat["Bus"].to_location
+    assert by_cat["Bike"].amount == 200.0
+    assert by_cat["Bike"].from_location
+    assert by_cat["Bike"].to_location
+    assert by_cat["Lunch"].amount == 100.0
+    assert not ext.malformed
+
+
+def test_process_expense_turn_bangla_voice_compound():
+    msg = (
+        "আমার আজকে খরচ হয়েছে বাসে মিরপুর টু মতিঝিল একশো টাকা তারপরে "
+        "খরচ হয়েছে মতিঝিল টু মিরপুর বাইকে ২০০ টাকা এবং লাঞ্ছ ১০০ টাকা"
+    )
+    pack = process_expense_turn(workflow_state={}, message=msg)
+    items = pack.get("items") or []
+    assert len(items) == 3
+    er = pack["workflow_state"].get("expense_request") or {}
+    assert er.get("pending_step") != "clarify"
+    assert er.get("stage") == "review"
+
+
+def test_stt_bus_bashe_does_not_guess_other_category():
+    """If transcript says bus again, we keep bus (no reverse-route guessing)."""
+    msg = (
+        "আমার আজকে খরচ হয়েছে বাসে মিরপুর টু মতিঝিল একশো টাকা তারপরে "
+        "খরচ হয়েছে মতিঝিল টু মিরপুর বাসে ২০০ টাকা এবং লাঞ্ছ ১০০ টাকা"
+    )
+    ext = extract_expense_items(msg)
+    buses = [i for i in ext.items if i.category == "Bus"]
+    assert len(buses) == 2
+    assert {b.amount for b in buses} == {100.0, 200.0}
+    # Both legs should stay Bus based on transcript.
+    assert ({"mirpur", "motijheel"} == {b.from_location for b in buses} | {b.to_location for b in buses})
+    # Second travel leg is also a bus per transcript — do not relabel it.
+    lunch = next(i for i in ext.items if i.category == "Lunch")
+    assert lunch.amount == 100.0
+
+
 def test_stepped_amount_then_lunch_no_from_to():
     wf: dict = {}
     r1 = process_expense_turn(workflow_state=wf, message="ajke 40 taka cost hoyeche")

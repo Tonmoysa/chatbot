@@ -4,6 +4,7 @@ import pytest
 
 from chat.constants import (
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_HR_POLICY,
     INTENT_LEAVE_REQUEST,
     INTENT_REQUEST_STATUS,
@@ -24,6 +25,7 @@ from chat.services.orchestrator import (
     _detect_intent_during_expense_workflow,
     _detect_intent_during_leave_workflow,
 )
+from chat.services.turn_classifier import TURN_CHITCHAT, TURN_CONFIRM, classify_workflow_turn
 from chat.services.workflow_suspend import has_suspended_expense, suspend_expense_for_workflow_switch
 
 COMPANY_ID = "company-a"
@@ -58,6 +60,71 @@ def test_wants_expense_summary_banglish():
     assert wants_expense_summary("expense er summery ta bolo")
     assert wants_expense_summary("okay ekhon summery ta bolo")
     assert wants_expense_summary("শেষ")
+    assert wants_expense_summary(
+        "ajke ami ki ki khorose korechi tar ekta summery bolo"
+    )
+    assert wants_expense_summary("ajke ki ki khoroch korechi summery bolo")
+
+
+def test_bangla_expense_recap_not_out_of_scope():
+    from chat.services.policy_intent_helpers import is_off_topic_for_hr_assistant
+
+    msg = "ajke ami ki ki khorose korechi tar ekta summery bolo"
+    assert not is_off_topic_for_hr_assistant(msg, wizard_active=True)
+
+
+def test_bangla_expense_recap_intent_during_active_expense():
+    out = _detect_intent_during_expense_workflow(
+        "ajke ami ki ki khorose korechi tar ekta summery bolo",
+        {"expense_request": {"active": True, "stage": "collecting", "items": []}},
+        balance_probe=False,
+    )
+    assert out["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+    assert "summary" in out["source"]
+
+
+def test_expense_summary_during_active_expense_is_day_summary_intent():
+    out = _detect_intent_during_expense_workflow(
+        "okay expense summery ta bolo",
+        {"expense_request": {"active": True, "stage": "collecting", "items": []}},
+        balance_probe=False,
+    )
+    assert out["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+    assert out["source"] == "expense_workflow_gate+summary"
+
+
+def test_expense_summary_during_leave_review_is_day_summary_intent():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "review_pending": True,
+        "draft": {"start_date": "2026-06-09", "reason": "sick"},
+        "suspended_expense": {
+            "expense_request": {
+                "active": True,
+                "incurred_date_iso": "2026-06-08",
+                "items": [{"category": "Lunch", "amount": 100}],
+            }
+        },
+    }
+    out = _detect_intent_during_leave_workflow(
+        "okay expense summery ta bolo",
+        wf,
+        balance_probe=False,
+    )
+    assert out["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+    assert "expense_summary" in out.get("source", "")
+
+
+def test_expense_summary_not_wizard_confirm_turn():
+    turn = classify_workflow_turn(
+        "okay expense summery ta bolo",
+        leave_active=True,
+        expense_active=False,
+        leave_review_pending=True,
+    )
+    assert turn == TURN_CHITCHAT
+    assert turn != TURN_CONFIRM
 
 
 @pytest.mark.django_db
@@ -281,9 +348,9 @@ def test_policy_then_expense_summary_resumes_draft(settings):
         employee_id=emp,
         trace_id="exp-pol-2",
     )
-    assert summ["intent"] == INTENT_EXPENSE_CLAIM
+    assert summ["intent"] == INTENT_EXPENSE_DAY_SUMMARY
     msg = summ["response"]["message"]
-    assert "পর্যালোচনা" in msg or "মোট" in msg
+    assert "মোট" in msg or "Pending" in msg or "pending" in msg.lower()
     session.refresh_from_db()
     assert is_expense_in_progress(session.workflow_state)
     assert not is_expense_paused(session.workflow_state)

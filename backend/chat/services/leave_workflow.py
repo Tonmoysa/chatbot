@@ -43,6 +43,8 @@ from chat.services.leave_fsm import (
 )
 from chat.services.leave_slots import (
     SLOT_DATES,
+    SLOT_DOCUMENT,
+    SLOT_REASON,
     SLOT_SCOPE,
     apply_wizard_answer,
     generate_question,
@@ -139,7 +141,7 @@ def pending_question(workflow_state: dict[str, Any] | None) -> str | None:
         return None
     st = read_leave_state(workflow_state)
     draft = dict(st.get("draft") or {})
-    if is_awaiting_leave_confirmation(workflow_state):
+    if st.get("review_pending") or is_awaiting_leave_confirmation(workflow_state):
         return build_confirmation_prompt(draft)
     missing = get_missing_slots(draft)
     if not missing:
@@ -187,23 +189,19 @@ def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
 
 
 def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
-    from chat.services.leave.normalization import message_explicitly_states_day_scope
+    from chat.services.leave.normalization import parse_day_scope_answer
 
     if draft.get("day_scope"):
         return
-    if not message_explicitly_states_day_scope(message):
-        return
-    low = message.lower()
-    if re.search(r"\bhalf\b|হাফ|অর্ধ", low):
-        draft["day_scope"] = DAY_SCOPE_HALF
-    elif re.search(r"\bfull\b|পুরো", low):
-        draft["day_scope"] = DAY_SCOPE_FULL
+    scope = parse_day_scope_answer(message)
+    if scope:
+        draft["day_scope"] = scope
 
 
-def _reason_from_message(message: str) -> str | None:
+def _reason_from_message(message: str, *, edit_context: bool = False) -> str | None:
     from chat.services.leave_slot_extraction import extract_reason_from_message
 
-    return extract_reason_from_message(message)
+    return extract_reason_from_message(message, edit_context=edit_context)
 
 
 def merge_extractor_entities(
@@ -214,7 +212,12 @@ def merge_extractor_entities(
     message: str = "",
 ) -> None:
     """Patch draft from entities — by default never clobber filled slots."""
-    from chat.services.leave.normalization import message_explicitly_states_day_scope
+    from chat.services.leave.normalization import (
+        message_explicitly_states_day_scope,
+        message_explicitly_states_leave_date,
+        message_explicitly_states_payment_category,
+        should_suppress_inferred_leave_dates,
+    )
 
     dt = entities.get("document_text")
     if dt and str(dt).strip():
@@ -235,6 +238,8 @@ def merge_extractor_entities(
         if not overwrite and draft.get(key):
             continue
         if key == "leave_payment_category":
+            if not message_explicitly_states_payment_category(message):
+                continue
             s = str(v).strip().lower()
             draft["leave_payment_category"] = (
                 LEAVE_PAYMENT_LWOP if s in {"lwop", "unpaid"} else LEAVE_PAYMENT_PAID
@@ -246,6 +251,13 @@ def merge_extractor_entities(
             s = str(v).strip().lower()
             draft["day_scope"] = DAY_SCOPE_HALF if s.startswith("half") else DAY_SCOPE_FULL
             continue
+        if key in ("start_date", "end_date", "date"):
+            if should_suppress_inferred_leave_dates(message):
+                continue
+            if key in ("start_date", "date") and not message_explicitly_states_leave_date(
+                message
+            ):
+                continue
         if key == "date" and not draft.get("start_date"):
             draft["start_date"] = str(v).split("T")[0]
             continue
@@ -307,14 +319,11 @@ def _apply_slots_from_message(
 
 def _force_scope_from_message(message: str, draft: dict[str, Any]) -> bool:
     """Overwrite day_scope when user clearly states half/full (review corrections)."""
-    low = (message or "").lower()
-    if re.search(r"\bhalf\b|হাফ|অর্ধ|half\s*day", low):
-        draft["day_scope"] = DAY_SCOPE_HALF
-        return True
-    if re.search(r"\bfull\b|পুরো|full\s*day", low) and not re.search(
-        r"\bhalf\b|হাফ", low
-    ):
-        draft["day_scope"] = DAY_SCOPE_FULL
+    from chat.services.leave.normalization import parse_day_scope_answer
+
+    scope = parse_day_scope_answer(message)
+    if scope:
+        draft["day_scope"] = scope
         return True
     return False
 
@@ -328,9 +337,13 @@ def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
     if pending_slot == "leave_payment_category":
         return t in {"paid", "unpaid", "lwop"}
     if pending_slot == "day_scope":
-        return t in {"full", "half"} or "full" in t or "half" in t
+        from chat.services.leave.normalization import parse_day_scope_answer
+
+        return parse_day_scope_answer(message) is not None
     if pending_slot == "supporting_document":
-        return t == "skip" or len(t) > 8
+        from chat.services.leave.document_turn_parser import is_document_slot_resolvable
+
+        return is_document_slot_resolvable(message, use_llm=False)
     if pending_slot == "reason":
         return len(t) >= 4 and t not in {"paid", "unpaid", "full", "half"}
     return False
@@ -353,12 +366,25 @@ def build_merged_entities_for_engine(draft: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v is not None and v != ""}
 
 
+def _pending_slot_unfilled(draft: dict[str, Any], pending_slot: str) -> bool:
+    if pending_slot == SLOT_SCOPE:
+        return not draft.get("day_scope")
+    if pending_slot == SLOT_REASON:
+        return not (draft.get("reason") or "").strip()
+    if pending_slot in ("leave_type", "leave_payment_category"):
+        return not draft.get("leave_payment_category")
+    if pending_slot == SLOT_DATES:
+        return not draft.get("start_date")
+    return True
+
+
 def process_leave_turn(
     *,
     workflow_state: dict[str, Any],
     message: str,
     entities: dict[str, Any],
     company_id: str = "",
+    trace_id: str = "",
 ) -> dict[str, Any]:
     wf = normalize_workflow_state(workflow_state)
     st = read_leave_state(wf)
@@ -424,11 +450,27 @@ def process_leave_turn(
             message=message,
             draft=draft,
             entities=entities,
+            trace_id=trace_id,
         )
 
     pending_slot = st.get("step")
     policy = get_company_leave_policy(company_id or "default")
     extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
+
+    from chat.services.leave.normalization import normalize_leave_draft, parse_day_scope_answer
+    from chat.services.leave.reason_bucket_classifier import apply_leave_semantic_reconcile
+    from chat.services.leave.reason_correction_parser import try_apply_reason_correction
+
+    reason_corrected = try_apply_reason_correction(
+        draft,
+        message,
+        trace_id=trace_id,
+        use_llm=True,
+    )
+
+    scope_answer = parse_day_scope_answer(message)
+    if scope_answer:
+        draft["day_scope"] = scope_answer
 
     in_edit_flow = bool(wf.get(KEY_EDIT_SNAPSHOT)) or st.get("step") == SLOT_EDIT_MENU
     switch_slot = (
@@ -437,34 +479,83 @@ def process_leave_turn(
         else None
     )
     if switch_slot and switch_slot != pending_slot:
-        pack = _begin_edit_slot(wf, draft, switch_slot)
-        d2 = dict(read_leave_state(pack["workflow_state"]).get("draft") or draft)
-        if try_apply_inline_edit_value(d2, switch_slot, message):
-            return _finish_edit_return_review(pack["workflow_state"], d2)
-        return pack
+        from chat.services.leave_confirm import _begin_edit_slot_with_inline_apply
+
+        return _begin_edit_slot_with_inline_apply(
+            wf, draft, switch_slot, message, entities
+        )
 
     from chat.services.leave.normalization import message_explicitly_states_day_scope
 
+    document_handled = False
+    if pending_slot == SLOT_DOCUMENT and not _is_compound_slot_message(message):
+        from chat.services.leave.reason_correction_parser import looks_like_reason_correction
+        from chat.services.leave.document_turn_parser import apply_document_answer
+        from chat.services.leave_draft_utils import clear_supporting_document_if_unneeded
+
+        if reason_corrected or looks_like_reason_correction(message):
+            clear_supporting_document_if_unneeded(draft)
+        elif apply_document_answer(
+            draft, message, trace_id=trace_id, use_llm=True
+        ):
+            document_handled = True
+        else:
+            wf = apply_leave_state(
+                wf,
+                draft=draft,
+                step=SLOT_DOCUMENT,
+                status=STATUS_ACTIVE,
+                review_pending=False,
+            )
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(draft),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": generate_question(
+                    SLOT_DOCUMENT,
+                    draft,
+                    remaining=1,
+                    missing=[SLOT_DOCUMENT],
+                ),
+            }
+
     if (
-        pending_slot
+        not document_handled
+        and pending_slot
         and not _is_compound_slot_message(message)
         and try_apply_inline_edit_value(draft, pending_slot, message)
     ):
         pass
     elif (
-        pending_slot == SLOT_SCOPE
+        not document_handled
+        and pending_slot == SLOT_SCOPE
         and not message_explicitly_states_day_scope(message)
         and not _is_direct_slot_answer(message, pending_slot)
     ):
         # User repeated the compound request or sent unrelated text — keep asking.
         pass
     elif (
-        pending_slot
+        not document_handled
+        and pending_slot
         and not _is_compound_slot_message(message)
         and _is_direct_slot_answer(message, pending_slot)
     ):
         apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
     else:
+        if pending_slot and _pending_slot_unfilled(draft, pending_slot):
+            from chat.services.leave.collecting_turn_parser import try_resolve_collecting_slot
+            from chat.services.leave.turn_apply import apply_leave_field_update
+
+            slot_upd = try_resolve_collecting_slot(
+                message,
+                pending_slot=pending_slot,
+                draft=draft,
+                entities=entities,
+                trace_id=trace_id,
+            )
+            if slot_upd:
+                apply_leave_field_update(draft, slot_upd, message=message)
         before = dict(draft)
         _apply_slots_from_message(draft, message, entities, overwrite=False)
         draft = deep_merge_draft(before, draft)
@@ -475,7 +566,17 @@ def process_leave_turn(
         ):
             draft.pop("day_scope", None)
 
+    from chat.services.leave_draft_utils import apply_duration_end_date
+
+    normalize_leave_draft(draft)
+    apply_leave_semantic_reconcile(
+        draft,
+        message=message,
+        trace_id=trace_id,
+        use_llm=True,
+    )
     normalize_end_equals_start_if_missing(draft)
+    apply_duration_end_date(draft)
     date_err: str | None = None
     if draft.get("start_date"):
         ok, code = validate_dates(draft)
@@ -497,6 +598,23 @@ def process_leave_turn(
             "complete": False,
             "confirmed_submit": False,
             "question": build_confirmation_prompt(draft),
+        }
+
+    clarify = str(draft.get("_pending_reason_clarify") or "").strip()
+    if clarify:
+        wf = apply_leave_state(
+            wf,
+            draft=draft,
+            step=pending_slot or (missing[0] if missing else None),
+            status=STATUS_ACTIVE,
+            review_pending=False,
+        )
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": f"{clarify}\n\n_(ছুটি আবেদন — নিচে উত্তর দিন)_",
         }
 
     slot = missing[0]

@@ -198,6 +198,22 @@ _EXPENSE_RECAP_KIND_RE = re.compile(
     r"list|lists|লিস্ট|breakdown|overview|lines|line\s*items|details|detail)",
     re.I,
 )
+# Banglish spend words incl. common typos (khorose, koroch) — shared by recap detectors.
+_EXPENSE_SPEND_DOMAIN_RE = re.compile(
+    r"\b("
+    r"expense|reimbursement|claim|spent|cost|money|"
+    r"kharcha|khoroch|khorose|koroch|korci|kharch"
+    r")\b",
+    re.I,
+)
+_EXPENSE_SPEND_DOMAIN_BN_RE = re.compile(
+    r"(খরচ|খরচের|টাকা|taka|expense|এক্সপেন্স|কস্ট)",
+    re.I | re.UNICODE,
+)
+_EXPENSE_SPEND_ACTIVITY_RE = re.compile(
+    r"\b(korechi|korsi|korchi|korsilam|korci|kore|diyechi|diyeci|add|added|korchi)\b",
+    re.I,
+)
 
 
 _RESUME_EXPENSE_NAV_RE = re.compile(
@@ -476,18 +492,45 @@ def _try_handle_restore_turn(
     return None
 
 
+def message_mentions_expense_spend(message: str) -> bool:
+    """True when the user refers to spend/expense domain (incl. Banglish typos)."""
+    raw = message or ""
+    low = raw.lower()
+    return bool(
+        _EXPENSE_SPEND_DOMAIN_RE.search(low) or _EXPENSE_SPEND_DOMAIN_BN_RE.search(raw)
+    )
+
+
 def wants_expense_summary(message: str) -> bool:
     """User wants to see expense review / day recap (not a new claim line)."""
     if _wants_finish_collecting(message):
         return True
     raw = message or ""
     low = raw.lower().strip()
+    spend_domain = message_mentions_expense_spend(raw)
     if re.search(
         r"(expense|খরচ|খরচের).{0,40}(summery|summary|সারাংশ|পর্যালোচনা|মোট|total|recap|"
         r"list|lists|লিস্ট|breakdown|lines)",
         low,
     ):
         return True
+    # "ajke ami ki ki khorose korechi tar ekta summery bolo" — recap without "expense".
+    if re.search(r"\b(ajke|ajker|today|aaj|আজকে|আজকের|আজ)\b", low) and re.search(
+        r"\b(ki\s+ki|কি\s+কি)\b", low
+    ):
+        if spend_domain and (
+            _EXPENSE_RECAP_KIND_RE.search(raw) or _EXPENSE_SPEND_ACTIVITY_RE.search(low)
+        ):
+            return True
+    if spend_domain and _EXPENSE_SPEND_ACTIVITY_RE.search(low):
+        if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
+            return True
+    if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
+        if re.search(r"\b(ajke|ajker|today|aaj|আজ)\b", low) and (
+            _EXPENSE_SPEND_ACTIVITY_RE.search(low)
+            or re.search(r"\b(ki\s+ki|কি\s+কি|ami|am)\b", low)
+        ):
+            return True
     if re.search(
         r"(summery|summary|সারাংশ|পর্যালোচনা|list|lists|লিস্ট|breakdown).{0,30}"
         r"(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",
@@ -517,9 +560,7 @@ def wants_expense_summary(message: str) -> bool:
     ) and _EXPENSE_RECAP_GIVE_RE.search(low):
         return True
     if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
-        if re.search(r"\b(expense|খরচ|reimbursement|claim)\b", low) or re.search(
-            r"(খরচ|expense)", raw, re.I
-        ):
+        if spend_domain:
             return True
     return bool(
         re.search(
@@ -1006,6 +1047,41 @@ def _apply_corrections(
     )
     result = apply_message_corrections(items, message, extract_lines=extract)
     return result.items, result.changed
+
+
+def _try_turn_router(
+    *,
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    stage: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    pipeline_result: ExpenseExtractionResult | None,
+    trace_id: str,
+    lang: str | None,
+) -> dict[str, Any] | None:
+    """Unified draft-aware turn router (Phases A–D)."""
+    from chat.services.expense.turn_router import route_expense_wizard_turn
+
+    result = route_expense_wizard_turn(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        stage=stage,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        pipeline_result=pipeline_result,
+        trace_id=trace_id,
+        lang=lang,
+    )
+    if result.handled and result.pack:
+        return result.pack
+    return None
 
 
 def _apply_review_corrections(
@@ -1505,6 +1581,22 @@ def process_expense_turn(
                 question=resume_msg,
                 inc_iso=inc_iso,
             )
+
+    routed = _try_turn_router(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        stage=stage,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        pipeline_result=pipeline_result,
+        trace_id=trace_id,
+        lang=lang,
+    )
+    if routed is not None:
+        return routed
 
     # --- Submit confirm (second yes) ---
     if stage == STAGE_SUBMIT_CONFIRM:

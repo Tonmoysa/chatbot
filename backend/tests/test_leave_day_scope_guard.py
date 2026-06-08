@@ -55,8 +55,10 @@ def test_pipeline_apply_does_not_invent_scope():
     assert "day_scope" in get_missing_slots(draft)
 
 
-def test_process_leave_turn_repeat_while_pending_scope():
+def test_process_leave_turn_repeat_while_pending_scope(monkeypatch):
     fixed = dt.date(2026, 6, 6)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
     wf = {
         "active_flow": "leave",
         "status": "active",

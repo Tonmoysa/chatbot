@@ -93,11 +93,27 @@ class LeaveEntityPipeline:
         entities = extraction_to_entities(merged_ex)
 
         # Regex fallback for reason when LLM did not extract one.
-        if not entities.get("reason"):
+        from chat.services.workflow_navigation import is_leave_navigation_phrase
+
+        if is_leave_navigation_phrase(message):
+            entities.pop("reason", None)
+            entities.pop("description", None)
+        elif not entities.get("reason"):
             reason = extract_reason_from_message(message)
             if reason:
                 entities["reason"] = reason
                 field_sources["reason"] = "rules_fallback"
+        else:
+            from chat.services.leave.reason_value import (
+                extract_reason_value,
+                is_boilerplate_leave_reason,
+            )
+
+            if is_boilerplate_leave_reason(str(entities.get("reason") or "")):
+                better = extract_reason_value(message)
+                if better:
+                    entities["reason"] = better
+                    field_sources["reason"] = "rules_fallback"
 
         explicit_lt = explicit_leave_type_from_message(message)
         if explicit_lt:
@@ -108,9 +124,17 @@ class LeaveEntityPipeline:
             if lt and field_sources.get("leave_type") == "llm_primary":
                 entities["leave_type"] = lt
 
-        from chat.services.leave.normalization import strip_ungrounded_day_scope
+        from chat.services.leave.normalization import (
+            strip_ungrounded_day_scope,
+            strip_ungrounded_leave_dates,
+            strip_ungrounded_payment_category,
+        )
+        from chat.services.leave.reason_value import strip_ungrounded_reason
 
+        entities = strip_ungrounded_payment_category(entities, message)
         entities = strip_ungrounded_day_scope(entities, message)
+        entities = strip_ungrounded_leave_dates(entities, message)
+        entities = strip_ungrounded_reason(entities, message)
 
         return LeaveExtractionResult(
             entities=entities,
@@ -138,11 +162,20 @@ class LeaveEntityPipeline:
         from chat.services.leave.normalization import (
             message_explicitly_states_day_scope,
             message_explicitly_states_leave_date,
+            message_explicitly_states_payment_category,
+            message_mentions_leave_duration,
+            should_suppress_inferred_leave_dates,
             strip_ungrounded_day_scope,
+            strip_ungrounded_leave_dates,
+            strip_ungrounded_payment_category,
         )
 
+        ent = strip_ungrounded_payment_category(ent, message)
         ent = strip_ungrounded_day_scope(ent, message)
+        ent = strip_ungrounded_leave_dates(ent, message)
         preserve_dates = overwrite and not message_explicitly_states_leave_date(message)
+        if preserve_dates and message_mentions_leave_duration(message):
+            preserve_dates = False
         preserved_start = draft.get("start_date") if preserve_dates else None
         preserved_end = draft.get("end_date") if preserve_dates else None
         had_scope = bool(draft.get("day_scope"))
@@ -223,6 +256,13 @@ class LeaveEntityPipeline:
         if not had_scope and not message_explicitly_states_day_scope(message):
             draft.pop("day_scope", None)
 
+        if not message_explicitly_states_payment_category(message):
+            draft.pop("leave_payment_category", None)
+
+        if should_suppress_inferred_leave_dates(message):
+            draft.pop("start_date", None)
+            draft.pop("end_date", None)
+
         if preserve_dates:
             if preserved_start:
                 draft["start_date"] = preserved_start
@@ -240,8 +280,17 @@ class LeaveEntityPipeline:
         overwrite: bool,
     ) -> None:
         """LLM entities first; regex reason only as fallback."""
+        from chat.services.leave.reason_value import (
+            extract_reason_value,
+            is_boilerplate_leave_reason,
+        )
+
         reason = str(entities.get("reason") or entities.get("description") or "").strip()
+        if reason and is_boilerplate_leave_reason(reason):
+            reason = str(extract_reason_value(message) or "").strip()
         existing = str(draft.get("reason") or "").strip()
+        if existing and is_boilerplate_leave_reason(existing):
+            existing = ""
         generic_implied = bool(draft.get("_reason_implied")) or existing.startswith(
             "অসুস্থতা"
         )

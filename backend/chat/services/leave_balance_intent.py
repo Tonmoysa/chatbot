@@ -9,16 +9,9 @@ import re
 
 
 def _is_leave_application_message(message: str) -> bool:
-    """New leave request — not a balance lookup."""
-    low = (message or "").lower()
-    return bool(
-        re.search(
-            r"(ছুটি|chuti|chhuti|chutti|leave).{0,40}"
-            r"(চাই|lagbe|lage|apply|request|নিতে|লাগবে|nit(e)?\s*chai|nite\s*chai)",
-            low,
-        )
-        or re.search(r"\b(apply|request)\s+(for\s+)?(a\s+)?leave\b", low)
-    )
+    from chat.services.workflow_navigation import is_leave_application_message
+
+    return is_leave_application_message(message)
 
 
 def is_leave_balance_query(message: str) -> bool:
@@ -34,15 +27,27 @@ def is_leave_balance_query(message: str) -> bool:
     low = raw.lower()
 
     if re.search(
-        r"\b(balance|remaining|left|pto|how\s+many\s+days|vacation\s+left|baki|baaki)\b",
+        r"\b(balance|remaining|left|pto|how\s+many\s+days|vacation\s+left)\b",
         low,
     ):
         if re.search(r"\b(leave|chuti|chhuti|chutti|pto|vacation|holiday|ছুটি)\b", low) or re.search(
             r"(ছুটি|ছুটির)", raw
         ):
             return True
-        if re.search(r"\b(balance|remaining|baki|baaki)\b", low):
+        if re.search(r"\b(balance|remaining)\b", low):
             return True
+
+    if re.search(r"\b(baki|baaki)\b", low):
+        if re.search(
+            r"\b(expense|kharcha|khoroch|draft|line|claim|summary|summery|pending)\b",
+            low,
+        ) or re.search(r"(খরচ|expense)", raw, re.I):
+            return False
+        if re.search(r"\b(leave|chuti|chhuti|chutti|pto|vacation|holiday|ছুটি)\b", low) or re.search(
+            r"(ছুটি|ছুটির)", raw
+        ):
+            return True
+        return False
 
     if re.search(r"(ছুটি\s*কত|কত\s*দিন|কয়\s*দিন|কতদিন|কয়দিন|কয়\s*টা\s*ছুটি)", raw):
         return True

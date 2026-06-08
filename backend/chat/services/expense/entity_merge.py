@@ -8,6 +8,7 @@ LLM fills gaps when regex finds no lines or only partial amounts.
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any
 
 from chat.services.expense.normalization import (
@@ -311,11 +312,77 @@ def merge_parser_and_llm(
 
     Parser line items win when present. LLM lines are used only when parser is empty.
     """
+    def _explicit_category_mentions(msg: str) -> set[str]:
+        """
+        Extract canonical categories explicitly mentioned in user text.
+        Used to decide when regex/parser category is likely wrong.
+        """
+        if not msg:
+            return set()
+        low = (msg or "").lower()
+        cats: set[str] = set()
+        # Travel categories.
+        if re.search(r"\b(bus|bos|বাস|বাসে)\b", low):
+            cats.add("Bus")
+        if re.search(r"\b(bike|baik|baike|bicycle|bike)\b", low) or re.search(
+            r"\b(বাইক|বাইকে)\b", msg, re.I
+        ):
+            cats.add("Bike")
+        if re.search(r"\b(rickshaw|riksha|riksha|রিকশা|রিকশায়|রিক্সা)\b", msg, re.I):
+            cats.add("Rickshaw")
+        if re.search(r"\b(train|ট্রেন)\b", msg, re.I):
+            cats.add("Train")
+        if re.search(r"\b(cng|সিএনজি|auto)\b", msg, re.I):
+            cats.add("CNG")
+        if re.search(r"\b(metro|মেট্রো|metro rail|metrorail|metroral|rail)\b", low) or re.search(
+            r"\b(মেট্রো)\b", msg, re.I
+        ):
+            cats.add("Metro Rail")
+        # Food categories.
+        if re.search(r"\b(lunch|lanch|luch|lunc|খাওয়া|খাবার|লাঞ্ছ|লাঞ্চ)\b", msg, re.I):
+            cats.add("Lunch")
+        if re.search(r"\b(snack|snacks|s্ন্যাক|স্ন্যাক)\b", msg, re.I) or re.search(
+            r"\b(স্ন্যাক)\b", msg, re.I
+        ):
+            cats.add("Snack")
+        return cats
+
     sources: dict[str, str] = {"items": "parser"}
     if parser.items:
+        # Default: keep parser items (fast path, deterministic).
         for idx, item in enumerate(parser.items):
             if _line_has_parser_signal(item):
                 sources[f"line_{idx}_category"] = "parser"
+
+        # Reconcile category conflicts when user text explicitly mentions another category.
+        explicit = _explicit_category_mentions(message)
+        parser_cats = {normalize_category_label(it.category) for it in parser.items if it.category}
+        # Only trigger when we have explicit evidence and parser misses some of it.
+        if explicit and any(c in explicit for c in parser_cats) and not explicit.issubset(parser_cats):
+            # Build llm items and prefer those that cover explicit categories better.
+            llm_items: list[ExpenseLineItem] = []
+            for row in _llm_rows(llm_entities):
+                item = _row_to_item(row, message=message)
+                if item:
+                    llm_items.append(item)
+            if llm_items:
+                llm_items = [
+                    item
+                    for item in llm_items
+                    if _line_has_parser_signal(item)
+                    and _usable_llm_category(
+                        item.category, message="", notes=item.notes
+                    )
+                ]
+            if llm_items:
+                llm_cats = {normalize_category_label(it.category) for it in llm_items if it.category}
+                # Pick llm if it covers more explicitly mentioned categories.
+                if len(explicit & llm_cats) > len(explicit & parser_cats):
+                    sources["items"] = "llm_conflict_reconcile"
+                    return ExtractionResult(
+                        items=llm_items, malformed=list(parser.malformed)
+                    ), sources
+
         return parser, sources
 
     llm_items: list[ExpenseLineItem] = []

@@ -50,7 +50,9 @@ def merge_parser_and_llm(
     Returns merged extraction and per-field source map for tracing.
     """
     sources: dict[str, str] = {}
-    ext = dict(llm_entities or {})
+    from chat.services.leave.normalization import strip_ungrounded_leave_dates
+
+    ext = strip_ungrounded_leave_dates(dict(llm_entities or {}), message)
 
     # Do not let LLM override parser-high payment/scope.
     if parser.leave_payment_category.confidence == "high":
@@ -100,6 +102,13 @@ def merge_parser_and_llm(
         sources["reason"] = "llm_description"
 
     pay = ext.get("leave_payment_category")
+    if pay and parser.leave_payment_category.confidence != "high":
+        from chat.services.leave.normalization import (
+            message_explicitly_states_payment_category,
+        )
+
+        if not message_explicitly_states_payment_category(message):
+            pay = None
     if pay and parser.leave_payment_category.confidence != "high":
         p = str(pay).lower()
         if p in {"paid", "pto", "annual", "casual"}:
@@ -163,10 +172,17 @@ def overlay_llm_semantic_fields(
     if not llm_used:
         return sources
 
+    from chat.services.leave.reason_value import (
+        extract_reason_value,
+        is_boilerplate_leave_reason,
+    )
+
     reason = str(
         llm_entities.get("reason") or llm_entities.get("description") or ""
     ).strip()
-    if reason and len(reason) >= 3:
+    if reason and is_boilerplate_leave_reason(reason):
+        reason = str(extract_reason_value(message) or "").strip()
+    if reason and len(reason) >= 3 and not is_boilerplate_leave_reason(reason):
         _set(extraction.reason, reason[:2000], confidence="high", source="llm_primary")
         sources["reason"] = "llm_primary"
 

@@ -33,18 +33,26 @@ export const SPEECH_AUTO_DETECT_LANGUAGE =
 export const SPEECH_FORCE_PRIMARY_LANGUAGE =
   import.meta.env.VITE_SPEECH_FORCE_PRIMARY_LANGUAGE !== "false";
 
-/** Start mic on bn-BD unless draft/stored text says otherwise (Bangla-first HR app). */
+/**
+ * Start mic language: banglish (en-IN) handles English correctly; switches to bn-BD
+ * when genuine Bengali script is heard. Override with VITE_SPEECH_DEFAULT_MODE=bn|en.
+ */
 export const SPEECH_DEFAULT_START_MODE =
-  import.meta.env.VITE_SPEECH_DEFAULT_MODE?.trim() || "bn";
+  import.meta.env.VITE_SPEECH_DEFAULT_MODE?.trim() || "banglish";
 
 /** Max STT language switches per dictation session (prevents restart thrashing). */
 export const SPEECH_LANG_SWITCH_MAX = Number(
-  import.meta.env.VITE_SPEECH_LANG_SWITCH_MAX || 1
+  import.meta.env.VITE_SPEECH_LANG_SWITCH_MAX || 2
 );
 
 /** Min accumulated chars before switching STT language mid-session. */
 export const SPEECH_LANG_SWITCH_MIN_CHARS = Number(
   import.meta.env.VITE_SPEECH_LANG_SWITCH_MIN_CHARS || 15
+);
+
+/** Shorter threshold when leaving Bengali STT for clear English speech. */
+export const SPEECH_EN_SWITCH_MIN_CHARS = Number(
+  import.meta.env.VITE_SPEECH_EN_SWITCH_MIN_CHARS || 8
 );
 
 export const SPEECH_CONTINUOUS = true;

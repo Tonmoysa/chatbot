@@ -17,7 +17,11 @@ from chat.services.expense.expense_confirm import (
     _REMOVE_TRAVEL_GROUP_ALT_RE,
     _REMOVE_TRAVEL_GROUP_RE,
     _REMOVE_VERB_CAT_RE,
+    _REPLACE_KORE_DAW_RE,
     _REPLACE_RE,
+    _REPLACE_TA_CAT_RE,
+    _REPLACE_KE_KORO_RE,
+    _REPLACE_SETAKE_RE,
     _SET_AMOUNT_RE,
     _TRANSFER_RE,
     _UPDATE_AMOUNT_RE,
@@ -48,6 +52,38 @@ def parse_correction_plan(message: str) -> CorrectionCommandPlan:
         plan.replacements.append(
             (normalize_category(m.group("from_cat")), normalize_category(m.group("to_cat")))
         )
+
+    for m in _REPLACE_KORE_DAW_RE.finditer(low):
+        pair = (
+            normalize_category(m.group("from_cat")),
+            normalize_category(m.group("to_cat")),
+        )
+        if pair not in plan.replacements:
+            plan.replacements.append(pair)
+
+    for m in _REPLACE_TA_CAT_RE.finditer(low):
+        pair = (
+            normalize_category(m.group("from_cat")),
+            normalize_category(m.group("to_cat")),
+        )
+        if pair not in plan.replacements:
+            plan.replacements.append(pair)
+
+    for m in _REPLACE_KE_KORO_RE.finditer(low):
+        pair = (
+            normalize_category(m.group("from_cat")),
+            normalize_category(m.group("to_cat")),
+        )
+        if pair not in plan.replacements:
+            plan.replacements.append(pair)
+
+    for m in _REPLACE_SETAKE_RE.finditer(low):
+        pair = (
+            normalize_category(m.group("from_cat")),
+            normalize_category(m.group("to_cat")),
+        )
+        if pair not in plan.replacements:
+            plan.replacements.append(pair)
 
     if wants_travel_group_remove(low):
         plan.remove_travel_group = True

@@ -6,6 +6,7 @@ Template-based (no LLM) — predictable, testable, bilingual-friendly.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from chat.services.leave_slot_extraction import LeaveSlotExtraction
@@ -56,6 +57,14 @@ class LeaveConversationManager:
         lines: list[str] = []
         missing_set = set(missing)
 
+        if draft.get("days") and SLOT_DATES in missing_set:
+            try:
+                n = int(float(draft["days"]))
+                if n > 1:
+                    lines.append(f"**{n} দিনের** ছুটি — নোট করা হয়েছে।")
+            except (TypeError, ValueError):
+                pass
+
         if (
             draft.get("start_date")
             and SLOT_DATES not in missing_set
@@ -74,7 +83,7 @@ class LeaveConversationManager:
 
         if not lines:
             return ""
-        return "\n".join(lines[:3]) + "\n\n"
+        return "\n".join(lines[:4]) + "\n\n"
 
     @staticmethod
     def _ack_date(draft: dict[str, Any]) -> str:
@@ -102,6 +111,39 @@ class LeaveConversationManager:
         scope = str(draft.get("day_scope") or "").strip().lower()
         label = "Full day" if scope == "full" else "Half day"
         return f"**{label}** — ঠিক আছে।"
+
+    def _build_dates_question(self, draft: dict[str, Any], date_error: str | None) -> str:
+        if date_error == "IN_PAST":
+            return "আজকের আগের তারিখে ছুটি দেওয়া যাবে না। আজ বা পরের দিন দিন।"
+        if date_error == "BAD_RANGE":
+            return "শেষ তারিখ যেন প্রথম তারিখের আগে না হয় — আবার লিখুন।"
+
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        tomorrow_s = tomorrow.isoformat()
+        today_s = today.isoformat()
+
+        n_days: int | None = None
+        try:
+            if draft.get("days"):
+                n_days = int(float(draft["days"]))
+        except (TypeError, ValueError):
+            n_days = None
+
+        if n_days and n_days > 1:
+            example_end = (today + timedelta(days=n_days - 1)).isoformat()
+            return (
+                f"আপনি **{n_days} দিনের** ছুটি চেয়েছেন। ছুটি **কোন তারিখ থেকে** শুরু হবে?\n"
+                f"• **আগামীকাল** ({tomorrow_s}) থেকে\n"
+                f"• নির্দিষ্ট শুরুর তারিখ — যেমন **{today_s}**\n"
+                f"• অথবা রেঞ্জ লিখুন — **{today_s}** থেকে **{example_end}**"
+            )
+
+        return (
+            "ছুটি **কোন তারিখে** চান?\n"
+            f"• **আগামীকাল** ({tomorrow_s}) বা **কাল**\n"
+            f"• নির্দিষ্ট তারিখ — যেমন **{today_s}**"
+        )
 
     def _build_ask_body(
         self,
@@ -139,15 +181,7 @@ class LeaveConversationManager:
             )
 
         if primary_slot == SLOT_DATES:
-            if date_error == "IN_PAST":
-                return "আজকের আগের তারিখে ছুটি দেওয়া যাবে না। আজ বা পরের দিন দিন।"
-            if date_error == "BAD_RANGE":
-                return "শেষ তারিখ যেন প্রথম তারিখের আগে না হয় — আবার লিখুন।"
-            return (
-                "**কোন তারিখ(গুলো)** ছুটি চান?\n"
-                "• এক দিন: কাল / আগামীকাল / ২০২৬-০৫-১৫\n"
-                "• একাধিক: ২০২৬-০৫-১২ থেকে ২০২৬-০৫-১৪"
-            )
+            return self._build_dates_question(draft, date_error)
 
         if primary_slot == SLOT_REASON:
             return (
@@ -157,8 +191,9 @@ class LeaveConversationManager:
 
         if primary_slot == SLOT_DOCUMENT:
             return (
-                "এই ছুটির জন্য **ডাক্তারের চিট** বা কাগজ দিতে পারেন?\n"
-                "আপলোড/পেস্ট করুন, অথবা এখন না হলে **skip** লিখুন — ম্যানেজার দেখবেন।"
+                "অসুস্থতার ছুটির জন্য **ডাক্তারের চিট** বা প্রাসঙ্গিক কাগজ দরকার হতে পারে।\n"
+                "এখন **আপলোড/পেস্ট** করুন, না হলে **skip** বা **parbo na** লিখুন — "
+                "ম্যানেজার রিভিউ নেবেন।"
             )
 
         return "আর একটু তথ্য দরকার — নিচে লিখে পাঠান।"

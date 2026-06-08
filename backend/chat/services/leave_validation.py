@@ -53,14 +53,9 @@ class LeaveValidationResult:
 
 
 def _effective_leave_bucket(entities: dict[str, Any]) -> str:
-    lt = str(entities.get("leave_type") or "").strip().lower()
-    reason_l = str(entities.get("reason") or "").lower()
-    if lt in {"sick", "medical", "health"}:
-        return "sick"
-    sickish = ("sick", "ill", "fever", "medical", "doctor", "hospital", "অসুস্থ")
-    if any(w in reason_l for w in sickish):
-        return "sick"
-    return "other"
+    from chat.services.leave_draft_utils import effective_leave_bucket
+
+    return effective_leave_bucket(entities)
 
 
 def medical_doc_required(

@@ -46,6 +46,19 @@ def wants_expense_meta_question(message: str) -> bool:
         return True
     if re.search(r"(কি\s+add\s+কর|কি\s+যোগ\s+কর|কি\s+কর\s*ছ)", raw):
         return True
+    if re.search(
+        r"(কত|মোট).{0,20}(কস্ট|খরচ|expense).{0,25}(এড|add|যোগ|করছি|korchi)",
+        raw,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(r"\b(expense|kharcha|khoroch|summary|summery|draft|pending)\b", low) or re.search(
+        r"(খরচ|expense)", raw, re.I
+    ):
+        if re.search(
+            r"\b(keno|why|kothai|where|missing|shudhu|only|just|incomplete)\b", low
+        ) or re.search(r"\bbaki\s+(expense|line|gula|kharcha)\b", low):
+            return True
     if re.search(r"\b(ki|what)\b", low) and re.search(
         r"\b(add|adding|added|jog|correction|correct|change|update)\b", low
     ):
@@ -269,10 +282,12 @@ def format_meta_question_answer(
     lang: str | None = None,
 ) -> str | None:
     """Answer meta/clarify questions from session action memory + draft state."""
+    from chat.services.expense.session_ledger import draft_line_rows_for_block
+
     wf = workflow_state or {}
     action = read_last_bot_action(wf)
     block = read_expense_block(wf)
-    items = list(block.get("items") or [])
+    items = draft_line_rows_for_block(block)
     stage = str(block.get("stage") or "")
     low = (message or "").lower()
 

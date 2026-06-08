@@ -174,7 +174,9 @@ def format_expense_total_check_message(
     """Recount draft + session ledger totals deterministically."""
     wf = workflow_state or {}
     block = read_expense_block(wf)
-    items = list(block.get("items") or [])
+    from chat.services.expense.session_ledger import draft_line_rows_for_block
+
+    items = draft_line_rows_for_block(block)
     if not items and not (
         wf.get("expense_submissions_history") or wf.get("expense_last_submission")
     ):

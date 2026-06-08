@@ -3,6 +3,13 @@
  * Handles script cleanup, stutter dedupe, and common HR-domain mis-hearings.
  */
 
+import {
+  SPEECH_LANG_MODES,
+  isBengaliPhoneticEnglish,
+  repairBengaliPhoneticEnglish,
+  resolveTranscriptProcessingMode,
+} from "./speechLanguageDetect.js";
+
 /** @type {[RegExp, string][]} */
 const ROMAN_BANGLISH_FIXES = [
   [/\bcorti\b/gi, "chuti"],
@@ -119,16 +126,40 @@ export function postProcessBanglaTranscript(text, langOrOptions = "bn-BD") {
   const hasBengali = BENGALI_RANGE.test(t);
   const banglaLang = isBanglaSpeechLanguage(langTag);
 
-  if (mode === "en") {
+  if (isBengaliPhoneticEnglish(t)) {
+    t = repairBengaliPhoneticEnglish(t);
     return collapseStutterRepeats(t).replace(/\s+/g, " ").trim();
   }
 
-  if (hasBengali || banglaLang || mode === "bn") {
+  const effective = resolveTranscriptProcessingMode(t, { mode, lang: langTag });
+  const processMode = effective.mode;
+
+  if (
+    processMode === SPEECH_LANG_MODES.EN ||
+    effective.source === "phonetic_en_script" ||
+    (processMode === SPEECH_LANG_MODES.UNKNOWN && mode === "en")
+  ) {
+    return collapseStutterRepeats(t).replace(/\s+/g, " ").trim();
+  }
+
+  if (
+    hasBengali ||
+    banglaLang ||
+    processMode === SPEECH_LANG_MODES.BN ||
+    mode === "bn"
+  ) {
     t = cleanBengaliScript(t);
   }
-  if (mode !== "en" && (mode === "banglish" || mode === "bn" || !hasBengali || /[a-zA-Z]{2,}/.test(t))) {
+
+  const applyBanglishFixes =
+    processMode === SPEECH_LANG_MODES.BANGLISH ||
+    mode === "banglish" ||
+    (processMode === SPEECH_LANG_MODES.BN && !hasBengali && /[a-zA-Z]{2,}/.test(t));
+
+  if (applyBanglishFixes && processMode !== SPEECH_LANG_MODES.EN) {
     t = cleanRomanBanglish(t);
   }
+
   return t.trim();
 }
 

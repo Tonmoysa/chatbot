@@ -55,3 +55,38 @@ describe("speechLangChainForMode", () => {
     expect(speechLangChainForMode(SPEECH_LANG_MODES.BN)[0]).toBe("bn-BD");
   });
 });
+
+describe("resolveTranscriptProcessingMode", () => {
+  it("detects English even when explicit mode is bn", async () => {
+    const { resolveTranscriptProcessingMode } = await import(
+      "./speechLanguageDetect.js"
+    );
+    const r = resolveTranscriptProcessingMode(
+      "please tell me the expense summary",
+      { mode: SPEECH_LANG_MODES.BN }
+    );
+    expect(r.mode).toBe(SPEECH_LANG_MODES.EN);
+    expect(r.confidence).toBeGreaterThan(0.4);
+  });
+
+  it("detects genuine Bengali script immediately", async () => {
+    const { resolveTranscriptProcessingMode } = await import(
+      "./speechLanguageDetect.js"
+    );
+    const r = resolveTranscriptProcessingMode("লাস্ট দিনে কোন এক্সপেন্স দিছিলাম", {
+      mode: SPEECH_LANG_MODES.EN,
+    });
+    expect(r.mode).toBe(SPEECH_LANG_MODES.BN);
+  });
+
+  it("detects phonetic English written in Bengali script", async () => {
+    const { resolveTranscriptProcessingMode } = await import(
+      "./speechLanguageDetect.js"
+    );
+    const r = resolveTranscriptProcessingMode("প্লিজ টেল মি দা এক্সপেন্স সামারি", {
+      mode: SPEECH_LANG_MODES.BN,
+    });
+    expect(r.mode).toBe(SPEECH_LANG_MODES.EN);
+    expect(r.source).toBe("phonetic_en_script");
+  });
+});

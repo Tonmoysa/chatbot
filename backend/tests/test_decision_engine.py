@@ -360,12 +360,25 @@ def test_expense_day_summary_shows_totals_and_remaining(monkeypatch):
 
     for mod in (
         "chat.services.entity_extractor.date",
+        "chat.services.expense.entity_pipeline.date",
         "chat.services.expense_incurred_date.date",
         "chat.services.decision_engine.date",
         "chat.services.orchestrator.date",
         "chat.services.expense_workflow.date",
     ):
         monkeypatch.setattr(mod, FixedDate)
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.hr_query_classifier.LLMClient.is_configured",
+        lambda self: False,
+    )
 
     emp = "expense-summary-pytest-unique"
     orch = ChatOrchestrator()

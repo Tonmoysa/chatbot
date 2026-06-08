@@ -147,7 +147,7 @@ def _strong_expense_day_summary(message: str) -> bool:
                 or re.search(r"(মোট|কত)", raw)
             )
             and re.search(
-                r"\b(cost|kharcha|khoroch|kharch|expense|taka|money|koroch)\b",
+                r"\b(cost|kharcha|khoroch|khorose|koroch|kharch|expense|taka|money|koroch)\b",
                 low,
             )
         )
@@ -158,7 +158,7 @@ def _strong_expense_day_summary(message: str) -> bool:
     )
     want_info = bool(
         re.search(
-            r"\b(summary|summaries|breakdown|overview|how\s+much|total|totals|list|"
+            r"\b(summary|summaries|summery|breakdown|overview|how\s+much|total|totals|list|"
             r"forgot|don't remember|do not remember|lost track|remind|remaining|limit)\b",
             low,
         )
@@ -173,7 +173,10 @@ def _strong_expense_day_summary(message: str) -> bool:
         or re.search(r"কত\s*হয়েছে", raw)
     )
     domain = bool(
-        re.search(r"\b(expense|reimbursement|claim|spent|cost|money)\b", low)
+        re.search(
+            r"\b(expense|reimbursement|claim|spent|cost|money|khorose|koroch|khoroch|kharcha|kharch)\b",
+            low,
+        )
         or re.search(r"(খরচ|টাকা|taka|খরচের)", raw.lower())
     )
     if banglish_total_spend and domain:
@@ -296,11 +299,12 @@ _WIZARD_PAYMENT_BN_RE = re.compile(
     r"(বেতনসহ|বেতন\s*ছাড়া|বিনা\s*বেতন|বেতন\s*সহ)"
 )
 _WIZARD_DAYSCOPE_RE = re.compile(
-    r"\b(full|half|fullday|halfday|whole\s*day|half\s*day|semi)\b",
+    r"\b(full|half|fullday|halfday|ful\s*day|whole\s*day|half\s*day|semi)\b",
     re.I,
 )
 _WIZARD_DAYSCOPE_BN_RE = re.compile(
-    r"(পুরো\s*দিন|হাফ\s*দিন|অর্ধ\s*দিন|সম্পূর্ণ\s*দিন|অর্ধ)"
+    r"(পুরো\s*দিন|হাফ\s*দিন|হাফ\s*ডে|অর্ধ\s*দিন|সম্পূর্ণ\s*দিন|অর্ধ|"
+    r"ফুল{1,2}(?:ি)?\s*(?:ডে|দিন))"
 )
 _WIZARD_DATES_RE = re.compile(
     r"\b(today|tomorrow|yesterday|tonight|tonite|"
@@ -396,9 +400,12 @@ _WIZARD_SIDE_QUESTION_RE = re.compile(
 def looks_like_wizard_side_question(message: str) -> bool:
     """True when the user is asking a question, not supplying a wizard slot value."""
     from chat.services.leave_balance_intent import is_leave_balance_query
+    from chat.services.expense.routing import is_expense_draft_status_question
 
     text = (message or "").strip()
     if not text:
+        return False
+    if is_expense_draft_status_question(text):
         return False
     if is_leave_balance_query(text):
         return True
@@ -586,6 +593,19 @@ class IntentDetector:
                     }
         if chitchat:
             return {"intent": INTENT_UNKNOWN, "confidence": 0.9, "source": "rules_chitchat"}
+        from chat.services.hr_query_classifier import (
+            CONFIDENCE_RULES,
+            HrQueryContext,
+            rules_classify_hr_query,
+        )
+
+        hr_rules = rules_classify_hr_query(message, context=HrQueryContext())
+        if hr_rules.maps_to_intent and hr_rules.confidence >= CONFIDENCE_RULES:
+            return {
+                "intent": hr_rules.maps_to_intent,
+                "confidence": hr_rules.confidence,
+                "source": f"hr_query_rules+{hr_rules.source}",
+            }
         return {"intent": self._rule_intent(text, message), "confidence": 0.6, "source": "rules"}
 
     def _rule_intent(self, text: str, raw_message: str = "") -> str:

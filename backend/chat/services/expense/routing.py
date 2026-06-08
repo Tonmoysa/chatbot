@@ -7,6 +7,32 @@ from __future__ import annotations
 import re
 
 
+def is_expense_draft_status_question(message: str) -> bool:
+    """Expense totals / draft completeness — not an unrelated side question."""
+    from chat.services.expense.session_action_memory import wants_expense_meta_question
+    from chat.services.expense.session_ledger import wants_session_expense_ledger_query
+    from chat.services.intent_detector import _strong_expense_day_summary
+
+    text = (message or "").strip()
+    if not text:
+        return False
+    if wants_expense_meta_question(text):
+        return True
+    if wants_session_expense_ledger_query(text):
+        return True
+    if _strong_expense_day_summary(text):
+        return True
+    low = text.lower()
+    if re.search(r"\b(expense|kharcha|khoroch|summary|summery|draft|pending)\b", low) or re.search(
+        r"(খরচ|expense)", text, re.I
+    ):
+        if re.search(
+            r"\b(keno|why|kothai|where|missing|only|shudhu|add|koto|total|mot)\b", low
+        ) or re.search(r"\bbaki\s+(expense|line|gula|kharcha)\b", low):
+            return True
+    return False
+
+
 def looks_like_expense_wizard_continuation(message: str) -> bool:
     """True when the user is clearly continuing the expense draft (not a side question)."""
     from chat.services.expense.expense_confirm import (
@@ -33,6 +59,8 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
+    if is_expense_draft_status_question(text):
+        return True
     if wants_expense_submit_command(text) or wants_expense_done_command(text):
         return True
     if is_expense_wizard_command(text):

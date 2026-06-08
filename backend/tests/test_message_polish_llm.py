@@ -4,12 +4,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from chat.constants import INTENT_EXPENSE_CLAIM
+from chat.constants import INTENT_EXPENSE_CLAIM, INTENT_LEAVE_REQUEST
 from chat.services.message_polish import polish_outbound_message
 from chat.services.message_polish_llm import (
     extract_locked_facts,
     facts_preserved,
     is_llm_message_polish_enabled,
+    leave_facts_preserved,
+    polish_leave_wizard_message,
     polish_template_message,
 )
 
@@ -119,6 +121,108 @@ def test_polish_outbound_expense_wizard_collecting(monkeypatch):
     )
     assert "Any more" in out
     assert "**50 Tk**" in out
+
+
+def test_polish_outbound_leave_wizard_collecting(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.message_polish_llm.polish_leave_wizard_message",
+        lambda msg, **kwargs: msg.replace(
+            "এখন জানাবেন", "দয়া করে জানাবেন"
+        ),
+    )
+    base = (
+        "**3 দিনের** ছুটি — নোট করা হয়েছে।\n"
+        "কারণ: **onek osusto** — নোট করা হয়েছে।\n\n"
+        "এখন জানাবেন:\n"
+        "• **Paid** নাকি **unpaid**?\n"
+        "• **Full Day** নাকি **Half Day**?"
+    )
+    out = polish_outbound_message(
+        base,
+        intent=INTENT_LEAVE_REQUEST,
+        outcome="NEEDS_CLARIFICATION",
+        user_message="3 diner sick leave",
+        decision={"rules_applied": ["LEAVE_WORKFLOW_COLLECTING"]},
+        trace_id="leave-polish-1",
+    )
+    assert "দয়া করে জানাবেন" in out
+    assert "**onek osusto**" in out
+    assert "**Paid**" in out
+
+
+def test_leave_facts_preserved_document_prompt_rephrase():
+    original = (
+        "ছুটির তারিখ **2026-06-09** থেকে **2026-06-11** — আমার কাছে আছে।\n"
+        "কারণ: onek osusto — নোট করা হয়েছে।\n\n"
+        "এই ছুটির জন্য **ডাক্তারের চিট** বা কাগজ দিতে পারেন?\n"
+        "আপলোড/পেস্ট করুন, অথবা এখন না হলে **skip** / **parbo na** লিখুন।"
+    )
+    polished = (
+        "আপনার ছুটির তারিখ **2026-06-09** থেকে **2026-06-11** নোট করা হয়েছে।\n"
+        "কারণ: onek osusto।\n\n"
+        "অনুগ্রহ করে ডাক্তারের প্রেসক্রিপশন বা সংশ্লিষ্ট কাগজ আপলোড করুন। "
+        "এখন সম্ভব না হলে skip বা parbo na লিখুন — ম্যানেজার রিভিউ নেবেন।"
+    )
+    assert leave_facts_preserved(original, polished)
+
+
+def test_polish_leave_wizard_document_prompt_uses_llm(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.message_polish_llm.is_llm_message_polish_enabled",
+        lambda: True,
+    )
+    llm = MagicMock()
+    llm.is_configured.return_value = True
+    llm.chat_text.return_value = (
+        "অনুগ্রহ করে ডাক্তারের প্রেসক্রিপশন বা সংশ্লিষ্ট কাগজ আপলোড করুন। "
+        "এখন সম্ভব না হলে skip বা parbo na লিখুন — ম্যানেজার রিভিউ নেবেন।"
+    )
+    base = (
+        "এই ছুটির জন্য **ডাক্তারের চিট** বা কাগজ দিতে পারেন?\n"
+        "আপলোড/পেস্ট করুন, অথবা এখন না হলে **skip** / **parbo na** লিখুন — ম্যানেজার দেখবেন।"
+        "_(ছুটি আবেদন — নিচে উত্তর দিন)_"
+    )
+    out = polish_leave_wizard_message(
+        base,
+        user_message="agamikal theke",
+        trace_id="leave-doc-polish",
+        llm=llm,
+    )
+    assert "প্রেসক্রিপশন" in out or "ডাক্তার" in out
+    assert "skip" in out.lower()
+    assert out != base
+    assert out.endswith("_(ছুটি আবেদন — নিচে উত্তর দিন)_")
+
+
+def test_polish_leave_wizard_preserves_footer_marker(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.message_polish_llm.is_llm_message_polish_enabled",
+        lambda: True,
+    )
+    llm = MagicMock()
+    llm.is_configured.return_value = True
+    llm.chat_text.return_value = (
+        "আপনার **3 দিনের** ছুটির অনুরোধ নোট করা হয়েছে।\n"
+        "কারণ: **onek osusto**।\n\n"
+        "দয়া করে জানাবেন — **Paid** নাকি **unpaid**?"
+    )
+    from chat.services.message_polish_llm import polish_leave_wizard_message
+
+    base = (
+        "**3 দিনের** ছুটি — নোট করা হয়েছে।\n"
+        "কারণ: **onek osusto** — নোট করা হয়েছে।\n\n"
+        "এখন জানাবেন:\n"
+        "• **Paid** নাকি **unpaid**?"
+        "_(ছুটি আবেদন — নিচে উত্তর দিন)_"
+    )
+    out = polish_leave_wizard_message(
+        base,
+        user_message="3 diner sick",
+        trace_id="leave-marker",
+        llm=llm,
+    )
+    assert out.endswith("_(ছুটি আবেদন — নিচে উত্তর দিন)_")
+    assert "**onek osusto**" in out
 
 
 def test_polish_outbound_skips_submit_confirm(monkeypatch):

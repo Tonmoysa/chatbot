@@ -68,7 +68,8 @@ _VAGUE_DATE_RE = re.compile(
 _TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         r"\b(sick|medical|health)\s*leave\b|\bsick(?:ness)?\b|\bill(?:ness)?\b|"
-        r"medical\s*leave|অসুস্থ|জ্বর|মেডিকেল",
+        r"medical\s*leave|অসুস্থ|জ্বর|মেডিকেল|"
+        r"\bosusto\b|\boshustho\b|onek\s+osusto",
         "sick",
     ),
     (r"\bcasual\s*leave\b|\bcasual\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
@@ -153,6 +154,7 @@ _HEALTH_REASON_RE = re.compile(
     r"matha\s*betha|mathar?\s*betha|pet\s*betha|stomach\s*(?:pain|ache|hurt)|"
     r"headache|head\s*(?:pain|ache)|fever|"
     r"পেট\s*ব্যথা|মাথা\s*ব্যথা|জ্বর|ব্যথা|অসুস্থ|"
+    r"(?:onek\s+|khub\s+|bishal\s+)?(?:osusto|oshustho|অসুস্থ)|"
     r"doctor|ডাক্তার|medical\s+appointment"
     r")\b",
     re.I | re.UNICODE,
@@ -189,79 +191,15 @@ def _normalize_reason_token(reason: str) -> str:
     return s
 
 
-def extract_reason_from_message(message: str) -> str | None:
+def extract_reason_from_message(message: str, *, edit_context: bool = False) -> str | None:
     """
     Pull a leave reason from compound or short wizard answers.
 
     Examples: ``for my family program``, ``family wedding``, ``fever``.
-  """
-    raw = (message or "").strip()
-    if len(raw) < 4:
-        return None
-    low = raw.lower()
-    if _SIDE_QUESTION_IN_REASON_RE.search(raw):
-        return None
-    if re.match(r"^(paid|unpaid|lwop|full|half)\b", low) and len(raw.split()) <= 3:
-        return None
+    """
+    from chat.services.leave.reason_value import extract_reason_value
 
-    m = _REASON_FOR_RE.search(raw)
-    if m:
-        reason = _trim_reason_fragment(m.group(1))
-        if len(reason) >= 4:
-            return reason[:2000]
-
-    m = _REASON_CAUSE_RE.search(raw)
-    if m:
-        reason = _trim_reason_fragment(m.group(1))
-        if len(reason) >= 4:
-            return reason[:2000]
-
-    m = _REASON_BN_JONNO_RE.search(raw)
-    if m:
-        reason = _normalize_reason_token(_trim_reason_fragment(m.group(1)))
-        if len(reason) >= 3:
-            return reason[:2000]
-
-    m = _REASON_BN_TAI_INLINE_RE.search(raw)
-    if m:
-        reason = _trim_reason_fragment(m.group(1))
-        if len(reason) >= 3:
-            return reason[:2000]
-
-    m = _REASON_BN_TAI_RE.search(raw)
-    if m:
-        reason = _trim_reason_fragment(m.group(1))
-        if len(reason) >= 3:
-            return reason[:2000]
-
-    m = _REASON_BN_BOLE_RE.search(raw)
-    if m:
-        reason = _trim_reason_fragment(m.group(1))
-        if len(reason) >= 3:
-            return reason[:2000]
-
-    if _LEAVE_INTENT_RE.search(raw):
-        hm = _HEALTH_REASON_RE.search(raw)
-        if hm:
-            return hm.group(0).strip()[:2000]
-
-    m = _REASON_KEYWORD_RE.search(raw)
-    if m:
-        return m.group(0).strip()[:2000]
-
-    if _LEAVE_INTENT_RE.search(raw) and re.search(r"\bfamil+y\b", low):
-        m_fam = re.search(r"\bfamil+y\b", raw, re.I)
-        if m_fam:
-            return _normalize_reason_token(m_fam.group(0))
-
-    # Short wizard reply (e.g. ``family program``, ``fever``) — not leave boilerplate.
-    if len(raw.split()) <= 8 and not _LEAVE_INTENT_RE.search(raw):
-        if not re.search(
-            r"\b(tomorrow|today|kal|agamikal|unpaid|paid|lwop|full|half)\b",
-            low,
-        ):
-            return raw[:2000]
-    return None
+    return extract_reason_value(message, edit_context=edit_context)
 
 
 def is_payment_only_message(message: str) -> bool:
@@ -369,7 +307,9 @@ def extract_leave_slots(
         ds = (today + timedelta(days=1)).isoformat()
         _set(out.start_date, ds, confidence="high", source="tomorrow_en")
         _set(out.end_date, ds, confidence="high", source="tomorrow_en")
-    elif re.search(r"(আগামীকাল|agamikal|agami\s*kal|kalke|kalker|\bkal\b)", low):
+    elif re.search(
+        r"(আগামীকাল|agamikal|agamkal|agami\s*kal|kalke|kalker|\bkal\b)", low
+    ):
         ds = (today + timedelta(days=1)).isoformat()
         _set(out.start_date, ds, confidence="high", source="tomorrow_bn")
         _set(out.end_date, ds, confidence="high", source="tomorrow_bn")
@@ -440,6 +380,9 @@ def extract_leave_slots(
 
     reason = extract_reason_from_message(raw)
     if reason and out.reason.confidence != "high":
-        _set(out.reason, reason, confidence="high", source="rules_reason")
+        from chat.services.workflow_navigation import is_leave_navigation_phrase
+
+        if not is_leave_navigation_phrase(raw):
+            _set(out.reason, reason, confidence="high", source="rules_reason")
 
     return out

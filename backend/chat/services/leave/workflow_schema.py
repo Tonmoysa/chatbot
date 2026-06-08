@@ -49,10 +49,10 @@ class LeaveWorkflowSchema:
 
     ask_order: tuple[str, ...] = (
         SLOT_DATE_CLARIFY,
-        SLOT_DATES,
         SLOT_LEAVE_TYPE,
         SLOT_PAYMENT,
         SLOT_SCOPE,
+        SLOT_DATES,
         SLOT_REASON,
         SLOT_DOCUMENT,
     )

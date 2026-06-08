@@ -20,7 +20,11 @@ MessagePolishType = Literal[
     "expense_ack",
     "expense_summary",
     "expense_wizard_prompt",
+    "leave_wizard",
+    "leave_review",
 ]
+
+_LEAVE_WIZ_MARKER = "_(ছুটি আবেদন — নিচে উত্তর দিন)_"
 
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _REF_RE = re.compile(r"\bEXP-[A-Za-z0-9-]+\b", re.I)
@@ -69,6 +73,28 @@ RULES
 - Do NOT add yes/no confirmation prompts — those are appended separately.
 - Do NOT add or remove expense lines.
 - Output ONLY the summary body (header + bullets + total)."""
+
+_LEAVE_WIZARD_SYSTEM = """You rephrase a leave application wizard message (collecting dates, payment, scope, document).
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish user, English for en).
+- Keep ALL dates (YYYY-MM-DD), day counts, **bold** tokens, paid/unpaid, Full/Half day EXACTLY as in REFERENCE.
+- Keep bullet lines (- ...) and option examples; you may warm up intro/acknowledgment sentences only.
+- Same intent: note what was captured, then ask the pending question.
+- Warm, professional HR colleague tone — clear and respectful, not robotic.
+- Max ~150 words.
+- Do NOT invent dates, reasons, leave types, or new options.
+- Output ONLY the rephrased message text."""
+
+_LEAVE_REVIEW_SYSTEM = """You rephrase a leave application review before submit.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- Every date, date range (→), reason text, paid/unpaid, scope, attachment line must appear exactly.
+- Keep **yes** / **edit** / **cancel** options and their Bengali hints if present.
+- 1 short professional intro + summary bullets + confirm question.
+- Do NOT change factual field values or add new fields.
+- Output ONLY the rephrased message text."""
 
 _EXPENSE_WIZARD_PROMPT_SYSTEM = """You rephrase ONE expense wizard follow-up question.
 
@@ -131,6 +157,74 @@ def facts_preserved(original: str, polished: str) -> bool:
     return all(_fact_preserved(f, polished) for f in facts)
 
 
+def leave_facts_preserved(original: str, polished: str) -> bool:
+    """
+    Semantic guardrail for leave wizard/review polish.
+
+    Allows natural rephrasing (no exact **bold** match) but keeps dates, duration,
+    reason, payment/scope, skip hints, and document intent.
+    """
+    orig = (original or "").strip()
+    pol = (polished or "").strip()
+    if not pol:
+        return False
+
+    for iso in _ISO_DATE_RE.findall(orig):
+        if iso not in pol:
+            return False
+
+    if "→" in orig and "→" not in pol:
+        return False
+
+    for m in re.finditer(r"(\d+)\s*দিন", orig):
+        n = m.group(1)
+        if n not in pol and m.group(0) not in pol:
+            return False
+
+    reason_m = re.search(r"কারণ:\s*([^—\n]+)", orig)
+    if reason_m:
+        reason = re.sub(r"\*+", "", reason_m.group(1)).strip()
+        if len(reason) >= 3 and reason.lower() not in pol.lower():
+            return False
+
+    low_o = orig.lower()
+    low_p = pol.lower()
+
+    if re.search(r"\bpaid\b", low_o) and not re.search(r"\bpaid\b", low_p):
+        return False
+    if "unpaid" in low_o and "unpaid" not in low_p:
+        return False
+    if ("full day" in low_o or "পুরো দিন" in orig) and not (
+        "full day" in low_p or "পুরো দিন" in pol
+    ):
+        return False
+    if ("half day" in low_o or "হাফ দিন" in orig) and not (
+        "half day" in low_p or "হাফ দিন" in pol
+    ):
+        return False
+    if ("skip" in low_o or "parbo na" in low_o) and not (
+        "skip" in low_p or "parbo na" in low_p
+    ):
+        return False
+
+    if re.search(r"ডাক্তার|চিট|doctor|medical\s+note", orig, re.I):
+        if not re.search(
+            r"ডাক্তার|চিট|doctor|medical|কাগজ|document|prescription|note",
+            pol,
+            re.I,
+        ):
+            return False
+
+    if "জমা দেবেন" in orig or "**yes**" in orig:
+        if "yes" not in low_p and "জমা" not in pol:
+            return False
+
+    if "সংযুক্তি" in orig and "সংযুক্তি" not in pol:
+        return False
+
+    return True
+
+
 def _lang_line(user_lang: str) -> str:
     if user_lang == "en":
         return "REPLY_LANGUAGE: English."
@@ -148,6 +242,10 @@ def _system_prompt(message_type: MessagePolishType) -> str:
         return _EXPENSE_WIZARD_PROMPT_SYSTEM
     if message_type == "expense_wizard":
         return _EXPENSE_WIZARD_SYSTEM
+    if message_type == "leave_wizard":
+        return _LEAVE_WIZARD_SYSTEM
+    if message_type == "leave_review":
+        return _LEAVE_REVIEW_SYSTEM
     return _OUT_OF_SCOPE_SYSTEM
 
 
@@ -316,6 +414,60 @@ def polish_expense_message_with_envelope(
     if ask:
         return ask
     return None
+
+
+def polish_leave_wizard_message(
+    base: str,
+    *,
+    user_message: str,
+    trace_id: str | None = None,
+    review: bool = False,
+    user_lang: str | None = None,
+    min_length: int = 20,
+    llm: LLMClient | None = None,
+) -> str:
+    """
+    Rephrase leave wizard/review templates — same facts, warmer professional tone.
+    Preserves the collecting-phase footer marker when present.
+    """
+    template = (base or "").strip()
+    if not template:
+        return template
+
+    if not is_llm_message_polish_enabled() or not trace_id:
+        return template
+
+    has_marker = _LEAVE_WIZ_MARKER in template
+    body = template.replace(_LEAVE_WIZ_MARKER, "").strip() if has_marker else template
+    message_type: MessagePolishType = "leave_review" if review else "leave_wizard"
+
+    client = llm or LLMClient()
+    if not client.is_configured():
+        return template
+
+    lang = user_lang or detect_user_language(user_message or body)
+    try:
+        out = client.chat_text(
+            system_prompt=_system_prompt(message_type),
+            user_prompt=(
+                f"{_lang_line(lang)}\n\n"
+                f"User said:\n{user_message or '(n/a)'}\n\n"
+                f"REFERENCE (same meaning — preserve dates, day counts, reason, options):\n{body}"
+            ),
+            trace_id=trace_id,
+        )
+    except Exception:
+        return template
+
+    polished_body = (out or "").strip()
+    if len(polished_body) < min_length:
+        return template
+    if not leave_facts_preserved(body, polished_body):
+        return template
+
+    if has_marker:
+        return polished_body.rstrip() + _LEAVE_WIZ_MARKER
+    return polished_body
 
 
 def polish_template_message(

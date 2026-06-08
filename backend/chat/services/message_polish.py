@@ -213,6 +213,9 @@ def polish_clarification_message(text: str) -> str:
 _EXPENSE_WIZARD_POLISH_RULES = frozenset(
     {"EXPENSE_WORKFLOW_COLLECTING", "EXPENSE_WORKFLOW_REVIEW"}
 )
+_LEAVE_WIZARD_POLISH_RULES = frozenset(
+    {"LEAVE_WORKFLOW_COLLECTING", "LEAVE_WORKFLOW_AWAITING_CONFIRMATION"}
+)
 _EXPENSE_WIZARD_SKIP_POLISH_RULES = frozenset(
     {
         "EXPENSE_WORKFLOW_SUBMIT_CONFIRM",
@@ -227,6 +230,11 @@ def _should_llm_polish_expense_wizard(rules_applied: list[str] | None) -> bool:
     if rules & _EXPENSE_WIZARD_SKIP_POLISH_RULES:
         return False
     return bool(rules & _EXPENSE_WIZARD_POLISH_RULES)
+
+
+def _should_llm_polish_leave_wizard(rules_applied: list[str] | None) -> bool:
+    rules = {str(r or "") for r in (rules_applied or [])}
+    return bool(rules & _LEAVE_WIZARD_POLISH_RULES)
 
 
 def polish_outbound_message(
@@ -274,6 +282,21 @@ def polish_outbound_message(
 
     if outcome == "NEEDS_CLARIFICATION":
         rules = list(decision.get("rules_applied") or [])
+        if (
+            intent == INTENT_LEAVE_REQUEST
+            and trace_id
+            and _should_llm_polish_leave_wizard(rules)
+        ):
+            from chat.services.message_polish_llm import polish_leave_wizard_message
+
+            review = "LEAVE_WORKFLOW_AWAITING_CONFIRMATION" in rules
+            polished = polish_leave_wizard_message(
+                msg,
+                user_message=user_message,
+                trace_id=trace_id,
+                review=review,
+            )
+            return polish_clarification_message(polished)
         if (
             intent == INTENT_EXPENSE_CLAIM
             and trace_id

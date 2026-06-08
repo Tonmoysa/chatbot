@@ -3,6 +3,13 @@
  * Modes: bn (Bengali script), en (English), banglish (Romanized Bengali).
  */
 
+import {
+  isBengaliPhoneticEnglish,
+  repairBengaliPhoneticEnglish,
+} from "./bengaliPhoneticEnglish.js";
+
+export { isBengaliPhoneticEnglish, repairBengaliPhoneticEnglish };
+
 export const SPEECH_LANG_MODES = {
   BN: "bn",
   EN: "en",
@@ -237,4 +244,49 @@ export function storeSpeechMode(mode) {
   if (mode === SPEECH_LANG_MODES.BN || mode === SPEECH_LANG_MODES.EN || mode === SPEECH_LANG_MODES.BANGLISH) {
     localStorage.setItem(STORAGE_KEY, mode);
   }
+}
+
+/**
+ * Pick post-processing + STT mode from explicit session mode or transcript content.
+ * Prevents English speech from being romanized when the mic started on bn-BD.
+ * @param {string} text
+ * @param {{ mode?: string, lang?: string, minChars?: number }} [options]
+ */
+export function resolveTranscriptProcessingMode(text, options = {}) {
+  const explicit = options.mode;
+  const raw = (text || "").trim();
+  if (!raw) {
+    return { mode: SPEECH_LANG_MODES.UNKNOWN, confidence: 0, source: "empty" };
+  }
+
+  if (BENGALI_RANGE.test(raw)) {
+    if (isBengaliPhoneticEnglish(raw)) {
+      return {
+        mode: SPEECH_LANG_MODES.EN,
+        confidence: 0.92,
+        source: "phonetic_en_script",
+      };
+    }
+    return { mode: SPEECH_LANG_MODES.BN, confidence: 0.99, source: "script" };
+  }
+
+  if (explicit === SPEECH_LANG_MODES.EN) {
+    return { mode: SPEECH_LANG_MODES.EN, confidence: 1, source: "explicit" };
+  }
+
+  const minChars = options.minChars ?? 6;
+  const det = detectSpeechLanguageMode(raw, { minChars });
+  if (det.mode !== SPEECH_LANG_MODES.UNKNOWN && det.confidence >= 0.4) {
+    return { mode: det.mode, confidence: det.confidence, source: "detected" };
+  }
+
+  if (
+    explicit === SPEECH_LANG_MODES.EN ||
+    explicit === SPEECH_LANG_MODES.BN ||
+    explicit === SPEECH_LANG_MODES.BANGLISH
+  ) {
+    return { mode: explicit, confidence: 0.5, source: "explicit" };
+  }
+
+  return { mode: SPEECH_LANG_MODES.UNKNOWN, confidence: 0, source: "fallback" };
 }

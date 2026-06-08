@@ -38,6 +38,8 @@ def test_is_leave_balance_query_positive(message):
         "amar ajke expense hoyeche 100 taka bus e",
         "lunch 100 taka",
         "travel cost remove koro",
+        "baki expense gula kothai",
+        "tahole keno expense e summary te only lunch add korcho",
     ],
 )
 def test_is_leave_balance_query_negative(message):

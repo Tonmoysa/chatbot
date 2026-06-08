@@ -9,6 +9,8 @@ from chat.services.expense.expense_fsm import save_expense_last_submission
 from chat.services.expense.session_ledger import (
     build_session_expense_ledger,
     format_session_expense_ledger_message,
+    infer_session_expense_summary_date,
+    line_incompleteness_notes,
     wants_session_expense_ledger_query,
 )
 from chat.services.intent_detector import IntentDetector, _strong_expense_day_summary
@@ -93,9 +95,10 @@ def test_merge_submitted_batches_dedupes_mock_and_exp_same_claim():
 @pytest.mark.django_db
 def test_single_expense_submit_day_summary_not_doubled(monkeypatch):
     """Regression: one yes/yes submit → one line in expense summary."""
-    fixed = dt.date(2026, 6, 7)
+    fixed = dt.date(2026, 6, 8)
     for mod in (
         "chat.services.entity_extractor.date",
+        "chat.services.expense.entity_pipeline.date",
         "chat.services.expense_incurred_date.date",
         "chat.services.decision_engine.date",
         "chat.services.orchestrator.date",
@@ -108,6 +111,10 @@ def test_single_expense_submit_day_summary_not_doubled(monkeypatch):
     )
     monkeypatch.setattr(
         "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.hr_query_classifier.LLMClient.is_configured",
         lambda self: False,
     )
 
@@ -182,6 +189,181 @@ def test_build_session_expense_ledger_submitted_and_pending():
     assert "EXP-A" in msg
     assert "Pending" in msg
     assert "250" in msg
+
+
+def test_pending_line_and_queue_included_in_ledger():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "incurred_date_iso": "2026-06-08",
+            "items": [{"category": "Lunch", "amount": 100}],
+            "pending_step": "from_to",
+            "pending_line": {"category": "Bike", "amount": 200},
+            "pending_queue": [{"category": "Metro Rail", "amount": 400}],
+        }
+    }
+    ledger = build_session_expense_ledger(
+        wf,
+        crm_breakdown={"expense_day_entries": [], "expense_day_items": []},
+        incurred_date_iso="2026-06-08",
+    )
+    assert ledger["pending_total"] == 700
+    msg = format_session_expense_ledger_message(ledger)
+    assert "700" in msg
+    assert "Bike" in msg or "bike" in msg.lower()
+    assert "Metro Rail" in msg or "metro" in msg.lower()
+    assert "From/To" in msg
+
+
+def test_infer_session_expense_date_ignores_leave_entity_date():
+    wf = {
+        "active_flow": "leave",
+        "review_pending": True,
+        "draft": {"start_date": "2026-06-09"},
+        "suspended_expense": {
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "incurred_date_iso": "2026-06-08",
+                "items": [{"category": "Lunch", "amount": 100}],
+                "pending_line": {
+                    "category": "Metro Rail",
+                    "amount": 400,
+                    "from_location": "",
+                    "to_location": "",
+                },
+                "pending_step": "from_to",
+            }
+        },
+    }
+    inc = infer_session_expense_summary_date(
+        wf,
+        message="okay expense summery ta bolo",
+        hints={"date": "2026-06-09", "start_date": "2026-06-09"},
+        today=dt.date(2026, 6, 8),
+    )
+    assert inc == "2026-06-08"
+
+
+def test_suspended_draft_visible_when_lookup_date_wrong():
+    wf = {
+        "suspended_expense": {
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "incurred_date_iso": "2026-06-08",
+                "items": [
+                    {"category": "Lunch", "amount": 100},
+                    {"category": "Bus", "amount": 200, "from_location": "budda", "to_location": "mirpur"},
+                ],
+                "pending_line": {
+                    "category": "Metro Rail",
+                    "amount": 400,
+                    "from_location": "",
+                    "to_location": "",
+                },
+                "pending_step": "from_to",
+            }
+        },
+    }
+    ledger = build_session_expense_ledger(
+        wf,
+        crm_breakdown={"expense_day_entries": [], "expense_day_items": []},
+        incurred_date_iso="2026-06-09",
+    )
+    assert ledger["incurred_date_iso"] == "2026-06-08"
+    assert ledger["pending_total"] == 700
+    msg = format_session_expense_ledger_message(ledger)
+    assert "2026-06-08" in msg
+    assert "Lunch" in msg
+    assert "Metro Rail" in msg or "metro" in msg.lower()
+    assert "From/To" in msg
+
+
+def test_line_incompleteness_notes_travel():
+    notes = line_incompleteness_notes(
+        {"category": "Bus", "amount": 200, "from_location": "", "to_location": ""}
+    )
+    assert notes
+    assert "From/To" in notes[0]
+
+
+@pytest.mark.django_db
+def test_expense_summary_during_leave_review_shows_suspended_draft(monkeypatch):
+    """Regression: expense summary while leave review must read suspended expense session."""
+    fixed = dt.date(2026, 6, 8)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+    for mod in (
+        "chat.services.entity_extractor.date",
+        "chat.services.expense_incurred_date.date",
+        "chat.services.decision_engine.date",
+        "chat.services.orchestrator.date",
+        "chat.services.expense_workflow.date",
+    ):
+        monkeypatch.setattr(mod, type("D", (dt.date,), {"today": classmethod(lambda cls: fixed)}))
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+
+    from chat.constants import INTENT_EXPENSE_DAY_SUMMARY, INTENT_LEAVE_REQUEST
+    from chat.services.leave_workflow import is_leave_in_progress, process_leave_turn
+    from chat.services.workflow_suspend import has_suspended_expense, suspend_expense_for_workflow_switch
+
+    orch = ChatOrchestrator()
+    emp = "leave-exp-summary"
+    wf: dict = {}
+    exp = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="lunch 100 taka, bus 200 taka, rail 400 taka",
+        session_id=None,
+        employee_id=emp,
+        trace_id="les-exp-start",
+    )
+    sid = exp["_session_id"]
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID, session_id=sid, employee_id=emp
+    )
+    session.refresh_from_db()
+    wf_exp = dict(session.workflow_state or {})
+    wf_exp = suspend_expense_for_workflow_switch(wf_exp)
+    leave_pack = process_leave_turn(
+        workflow_state=wf_exp,
+        message="ami kalke leave nite chai fully paid soril kharap full day",
+        entities={},
+        company_id=COMPANY_ID,
+    )
+    session.workflow_state = leave_pack["workflow_state"]
+    session.save(update_fields=["workflow_state", "updated_at"])
+    session.refresh_from_db()
+    assert has_suspended_expense(session.workflow_state)
+    assert is_leave_in_progress(session.workflow_state)
+
+    pack = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="okay expense summery ta bolo",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="les-exp-summary",
+    )
+    assert pack["intent"] == INTENT_EXPENSE_DAY_SUMMARY
+    body = pack["response"]["message"] or ""
+    assert "2026-06-08" in body
+    assert "Lunch" in body
+    assert "700" in body or "100" in body
+    assert "From/To" in body
+    assert "পাওয়া যায়নি" not in body
+    assert "জমা দেবেন" not in body
+    assert "ছুটি আবেদন" not in body
+    session.refresh_from_db()
+    assert is_leave_in_progress(session.workflow_state)
+    assert pack["intent"] != INTENT_LEAVE_REQUEST or is_leave_in_progress(session.workflow_state)
 
 
 @pytest.mark.django_db

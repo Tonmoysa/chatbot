@@ -16,9 +16,9 @@ from chat.services.leave_confirm import parse_edit_slot
 def is_leave_navigation_phrase(message: str) -> bool:
     """Resume/back-to-leave navigation — not a draft field update."""
     try:
-        from chat.services.workflow_suspend import wants_resume_suspended_leave
+        from chat.services.workflow_navigation import is_leave_navigation_phrase as _nav
 
-        return wants_resume_suspended_leave(message)
+        return _nav(message)
     except Exception:
         return False
 

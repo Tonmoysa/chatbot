@@ -83,14 +83,9 @@ def _is_policy_query(message: str) -> bool:
 def _is_leave_application_message(message: str) -> bool:
     if _is_policy_query(message):
         return False
-    low = (message or "").lower()
-    return bool(
-        re.search(
-            r"(ছুটি|chuti|chhuti|leave).{0,40}(চাই|lagbe|lage|apply|request|নিতে|লাগবে|nit(e)?\s*chai)",
-            low,
-        )
-        or re.search(r"\b(apply|request)\s+(for\s+)?(a\s+)?leave\b", low)
-    )
+    from chat.services.workflow_navigation import is_leave_application_message
+
+    return is_leave_application_message(message)
 
 
 def _canonical_leave_wizard_token(message: str) -> bool:
@@ -138,9 +133,11 @@ def classify_workflow_turn(
         or is_confirmation_cancel(message)
         or expense_is_confirmation_yes(message)
         or expense_is_confirmation_no(message)
-        or wants_expense_summary(message)
     ):
         return TURN_CONFIRM
+
+    if wants_expense_summary(message):
+        return TURN_CHITCHAT
 
     if balance_probe:
         return TURN_POLICY_QUERY
@@ -153,6 +150,26 @@ def classify_workflow_turn(
 
     if expense_active and _is_leave_application_message(message):
         return TURN_NEW_WORKFLOW
+
+    if expense_active or leave_active:
+        from chat.services.wizard_interrupt_classifier import (
+            WizardInterruptContext,
+            interrupt_is_workflow_switch,
+            rules_wizard_interrupt,
+        )
+
+        intr_ctx = WizardInterruptContext(
+            expense_active=expense_active,
+            leave_active=leave_active,
+            leave_review_pending=leave_review_pending,
+            expense_review_pending=expense_review_pending,
+            pending_leave_step=pending_leave_step or "",
+        )
+        intr = rules_wizard_interrupt(message, context=intr_ctx)
+        if interrupt_is_workflow_switch(intr) and intr.maps_to_turn:
+            return intr.maps_to_turn
+        if intr.maps_to_turn == TURN_POLICY_QUERY:
+            return TURN_POLICY_QUERY
 
     if leave_active:
         if pending_leave_step in ("reason", "supporting_document"):

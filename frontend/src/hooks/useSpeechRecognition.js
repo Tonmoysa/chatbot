@@ -17,7 +17,11 @@ import {
   SPEECH_INTERIM_DEBOUNCE_MS,
   SPEECH_LANG_SWITCH_MAX,
 } from "../services/speech/speechConfig.js";
-import { storeSpeechMode } from "../services/speech/speechLanguageDetect.js";
+import {
+  isBengaliPhoneticEnglish,
+  readStoredSpeechMode,
+  storeSpeechMode,
+} from "../services/speech/speechLanguageDetect.js";
 import { generateTraceId, logSpeechEvent } from "../utils/trace.js";
 
 /**
@@ -121,6 +125,10 @@ export function useSpeechRecognition({ disabled = false, draftText = "" } = {}) 
         });
         if (!normalized) return;
 
+        if (isBengaliPhoneticEnglish(normalized)) {
+          void maybeAdaptSpeechLanguage(normalized);
+        }
+
         if (isFinal) {
           clearInterimTimer();
           const parts = finalPartsRef.current;
@@ -147,6 +155,15 @@ export function useSpeechRecognition({ disabled = false, draftText = "" } = {}) 
             interimRef.current = normalized;
             setInterimText(normalized);
             rebuildSessionText(normalized);
+            const interimAccumulated = [
+              ...finalPartsRef.current,
+              normalized,
+            ]
+              .join(" ")
+              .trim();
+            if (interimAccumulated.length >= 6) {
+              void maybeAdaptSpeechLanguage(interimAccumulated);
+            }
           }, SPEECH_INTERIM_DEBOUNCE_MS);
         }
       },
@@ -199,6 +216,7 @@ export function useSpeechRecognition({ disabled = false, draftText = "" } = {}) 
 
     const session = resolveSpeechSession(undefined, {
       draftText: draftTextRef.current,
+      storedMode: readStoredSpeechMode(),
     });
     speechLangRef.current = session.lang;
     speechModeRef.current = session.mode;

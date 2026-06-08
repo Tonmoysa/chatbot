@@ -131,9 +131,16 @@ def build_leave_review_summary(draft: dict[str, Any]) -> str:
 
     ]
 
-    if draft.get("document_text"):
+    from chat.services.leave_draft_utils import (
+        has_real_supporting_document,
+        supporting_document_needed,
+    )
 
-        lines.append("• সংযুক্তি: আছে")
+    if supporting_document_needed(draft):
+        if has_real_supporting_document(draft):
+            lines.append("• সংযুক্তি: আছে")
+        elif draft.get("supporting_document_waived"):
+            lines.append("• সংযুক্তি: এখন নেই — ম্যানেজার রিভিউ নেবেন")
 
     return "\n".join(lines)
 
@@ -295,6 +302,25 @@ def parse_edit_field_choice(message: str) -> str | None:
     return None
 
 
+def is_bare_field_choice(message: str, slot: str | None = None) -> bool:
+    """True when the user only names a field (e.g. ``reason``) without a new value."""
+    from chat.services.leave.turn_parser import message_has_inline_edit_value
+
+    text = (message or "").strip()
+    if not text or _EDIT_RE.search(text):
+        return False
+    if slot and message_has_inline_edit_value(text, slot):
+        return False
+    chosen = parse_edit_field_choice(text)
+    if not chosen:
+        return False
+    if slot and chosen != slot:
+        return False
+    if len(re.findall(r"\S+", text)) > 3:
+        return False
+    return True
+
+
 def parse_edit_slot(message: str) -> str | None:
     if not _EDIT_RE.search(message or ""):
         return None
@@ -362,19 +388,22 @@ def try_apply_inline_edit_value(
     if slot == SLOT_REASON:
         if low in {"reason", "কারণ", "kar", "keno", "why", "cause"}:
             return False
-        reason = _reason_from_message(raw)
+        from chat.services.leave.turn_apply import apply_leave_field_update
+        from chat.services.leave.turn_parser import extract_inline_field_value
+        from chat.services.leave.turn_schema import LeaveFieldUpdate
+
+        val = extract_inline_field_value(
+            SLOT_REASON, raw, edit_context=True
+        )
+        if val:
+            return apply_leave_field_update(
+                draft,
+                LeaveFieldUpdate(slot=SLOT_REASON, value=val, raw_value=raw),
+                message=raw,
+            )
+        reason = _reason_from_message(raw, edit_context=True)
         if reason and len(reason.strip()) >= 3:
             draft["reason"] = reason.strip()
-            draft.pop("_reason_implied", None)
-            return True
-        cleaned = re.sub(
-            r"^(?:reason|কারণ|kar[oa]n)\s*[:,-]?\s*",
-            "",
-            raw,
-            flags=re.I,
-        ).strip()
-        if len(cleaned) >= 4:
-            draft["reason"] = cleaned
             draft.pop("_reason_implied", None)
             return True
     return False
@@ -468,6 +497,73 @@ def _restore_edit_snapshot(workflow_state: dict[str, Any]) -> tuple[dict[str, An
     return wf, snap
 
 
+def _begin_edit_slot_with_inline_apply(
+    workflow_state: dict[str, Any],
+    draft: dict[str, Any],
+    slot: str,
+    message: str,
+    entities: dict[str, Any] | None = None,
+    *,
+    trace_id: str = "",
+) -> dict[str, Any]:
+    """
+    Start a field edit but apply an inline value when the same message includes it.
+
+    Fixes review turns like ``reason change koro... pet betha`` without re-asking.
+    """
+    from chat.services.leave.turn_apply import (
+        apply_leave_field_update,
+        apply_leave_inline_edit,
+    )
+    from chat.services.leave.turn_parser import (
+        extract_inline_field_value,
+        message_has_inline_edit_value,
+        resolve_leave_turn,
+    )
+    from chat.services.leave.turn_schema import LeaveFieldUpdate, TURN_EDIT_FIELD
+
+    if is_bare_field_choice(message, slot):
+        return _begin_edit_slot(workflow_state, draft, slot)
+
+    inline_val = extract_inline_field_value(
+        slot, message, entities=entities, edit_context=True
+    )
+    if inline_val:
+        d = dict(draft)
+        if apply_leave_field_update(
+            d,
+            LeaveFieldUpdate(slot=slot, value=inline_val, raw_value=message),
+            message=message,
+        ):
+            return _finish_edit_return_review(workflow_state, d)
+
+    if message_has_inline_edit_value(message, slot):
+        decision = resolve_leave_turn(
+            message,
+            draft=draft,
+            review_pending=True,
+            entities=entities,
+            trace_id=trace_id,
+            use_llm=True,
+        )
+        if (
+            decision.turn_type == TURN_EDIT_FIELD
+            and decision.field_update
+            and decision.field_update.value
+        ):
+            d = dict(draft)
+            if apply_leave_field_update(d, decision.field_update, message=message):
+                return _finish_edit_return_review(workflow_state, d)
+
+    pack = _begin_edit_slot(workflow_state, draft, slot)
+    d2 = dict(read_leave_state(pack["workflow_state"]).get("draft") or draft)
+    if apply_leave_inline_edit(d2, slot, message, entities):
+        return _finish_edit_return_review(pack["workflow_state"], d2)
+    if patch_draft_from_message(d2, message, entities):
+        return _finish_edit_return_review(pack["workflow_state"], d2)
+    return pack
+
+
 def _begin_edit_slot(
     workflow_state: dict[str, Any],
     draft: dict[str, Any],
@@ -519,13 +615,9 @@ def _process_edit_menu_turn(
 
     slot = parse_edit_field_choice(message)
     if slot:
-        pack = _begin_edit_slot(wf, d, slot)
-        d2 = dict(read_leave_state(pack["workflow_state"]).get("draft") or d)
-        if try_apply_inline_edit_value(d2, slot, message):
-            return _finish_edit_return_review(pack["workflow_state"], d2)
-        if patch_draft_from_message(d2, message, None):
-            return _finish_edit_return_review(pack["workflow_state"], d2)
-        return pack
+        return _begin_edit_slot_with_inline_apply(
+            wf, d, slot, message, entities=None
+        )
 
     return {
         "workflow_state": wf,
@@ -690,6 +782,8 @@ def process_confirmation_turn(
 
     entities: dict[str, Any] | None = None,
 
+    trace_id: str = "",
+
 ) -> dict[str, Any]:
 
     """Handle yes / edit / cancel at review. Terminal lock happens only after CRM submit."""
@@ -781,7 +875,9 @@ def process_confirmation_turn(
     edit_slot = parse_edit_slot(message)
 
     if edit_slot:
-        return _begin_edit_slot(wf, d, edit_slot)
+        return _begin_edit_slot_with_inline_apply(
+            wf, d, edit_slot, message, entities
+        )
 
     if not is_confirmation_yes(message) and _EDIT_RE.search(message or ""):
         snap = dict(d)
@@ -825,8 +921,65 @@ def process_confirmation_turn(
 
 
     if _looks_like_slot_correction(message):
+        from chat.services.leave.review_turn_parser import (
+            review_update_needs_date_question,
+            try_apply_review_compound_update,
+        )
+        from chat.services.leave.turn_apply import apply_leave_field_update
+        from chat.services.leave.turn_parser import resolve_leave_turn
+        from chat.services.leave.turn_schema import TURN_EDIT_FIELD
+        from chat.services.leave_slots import SLOT_DATES, generate_question, get_missing_slots
 
-        changed = patch_draft_from_message(d, message, entities)
+        d["_last_user_message"] = message
+        changed = try_apply_review_compound_update(
+            d,
+            message,
+            entities=entities,
+            trace_id=trace_id,
+            use_llm=True,
+        )
+        if not changed:
+            decision = resolve_leave_turn(
+                message,
+                draft=d,
+                review_pending=True,
+                entities=entities,
+                use_llm=True,
+            )
+            if (
+                decision.turn_type == TURN_EDIT_FIELD
+                and decision.field_update
+                and decision.field_update.value
+            ):
+                changed = apply_leave_field_update(
+                    d, decision.field_update, message=message
+                )
+        if not changed:
+            changed = patch_draft_from_message(d, message, entities)
+
+        if review_update_needs_date_question(d):
+            missing = get_missing_slots(d)
+            slot = missing[0] if missing else SLOT_DATES
+            wf = apply_leave_state(
+                wf,
+                draft=d,
+                step=slot,
+                status=STATUS_ACTIVE,
+                review_pending=False,
+            )
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(d),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": generate_question(
+                    slot,
+                    d,
+                    remaining=len(missing),
+                ),
+                "cancelled": False,
+                "draft_patched": True,
+            }
 
         wf = apply_leave_state(
 

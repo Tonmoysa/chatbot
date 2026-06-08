@@ -53,9 +53,9 @@ def message_has_relative_date_signal(message: str) -> bool:
         re.I,
     )
     yesterday_re = re.compile(
-        r"(গতকাল|"
-        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
-        re.I,
+        r"(গতকাল|লাস্ট\s*দিন|গত\s*দিন|"
+        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day|previous\s+day)\b)",
+        re.I | re.UNICODE,
     )
     tomorrow_re = re.compile(
         r"(আগামীকাল|"
@@ -100,9 +100,9 @@ def infer_expense_incurred_date_iso(
         re.I,
     )
     yesterday_re = re.compile(
-        r"(গতকাল|"
-        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day)\b)",
-        re.I,
+        r"(গতকাল|লাস্ট\s*দিন|গত\s*দিন|"
+        r"\b(kalke|goto\s*kal|gata\s*kal|gato\s*kal|yesterday|last\s+day|previous\s+day)\b)",
+        re.I | re.UNICODE,
     )
     today_re = re.compile(
         r"(আজ(কের)?|"

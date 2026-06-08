@@ -30,11 +30,19 @@ SICK_SIGNALS: tuple[str, ...] = (
     "মাথা ব্যথা",
     "জ্বর",
     "অসুস্থ",
+    "onek osusto",
+    "osusto",
+    "oshustho",
     "doctor",
     "ডাক্তার",
     "medical",
     "illness",
     "sick",
+)
+
+_DURATION_RE = re.compile(
+    r"\b(\d+)\s*(din|diner|days?|দিন)\b",
+    re.I | re.UNICODE,
 )
 
 _PAYMENT_LWOP_RE = re.compile(
@@ -46,8 +54,18 @@ _PAYMENT_PAID_RE = re.compile(
     r"\b(paid|with\s+pay|betonsokh|বেতনসহ|বেতন\s*সহ)\b",
     re.I,
 )
-_SCOPE_HALF_RE = re.compile(r"\b(half[- ]?day|half|হাফ|অর্ধ\s*দিন)\b", re.I)
-_SCOPE_FULL_RE = re.compile(r"\b(full[- ]?day|full|পুরো\s*দিন|সম্পূর্ণ\s*দিন)\b", re.I)
+_SCOPE_HALF_RE = re.compile(
+    r"(?:\b(half[- ]?day|half)\b|হাফ\s*(?:দিন|ডে)?|অর্ধ\s*দিন)",
+    re.I | re.UNICODE,
+)
+_SCOPE_FULL_RE = re.compile(
+    r"(?:"
+    r"\b(full[- ]?day|full|ful\s*day|whole\s*day)\b|"
+    r"পুরো\s*দিন|সম্পূর্ণ\s*দিন|"
+    r"ফুল{1,2}(?:ি)?\s*(?:ডে|দিন)"
+    r")",
+    re.I | re.UNICODE,
+)
 
 
 _LEAVE_DATE_SIGNAL_RE = re.compile(
@@ -63,6 +81,22 @@ _LEAVE_DATE_SIGNAL_RE = re.compile(
     r")",
     re.I | re.UNICODE,
 )
+
+
+def message_mentions_leave_duration(message: str) -> bool:
+    """True when the user states a leave length in days (e.g. 3 diner jonno)."""
+    return bool(_DURATION_RE.search((message or "").strip()))
+
+
+def extract_leave_duration_days(message: str) -> int | None:
+    m = _DURATION_RE.search((message or "").strip())
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+        return n if n > 0 else None
+    except ValueError:
+        return None
 
 
 def message_explicitly_states_leave_date(message: str) -> bool:
@@ -88,12 +122,85 @@ def message_explicitly_states_leave_date(message: str) -> bool:
     return False
 
 
+def parse_day_scope_answer(message: str) -> str | None:
+    """
+    Parse explicit full/half day from user text (voice STT, Bangla, Banglish, English).
+
+    Returns DAY_SCOPE_FULL, DAY_SCOPE_HALF, or None when not clearly stated.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    has_half = bool(_SCOPE_HALF_RE.search(text))
+    has_full = bool(_SCOPE_FULL_RE.search(text))
+    if has_half and not has_full:
+        return DAY_SCOPE_HALF
+    if has_full and not has_half:
+        return DAY_SCOPE_FULL
+    if has_half and has_full:
+        if re.search(r"(?:half|হাফ|অর্ধ)", text, re.I | re.UNICODE):
+            return DAY_SCOPE_HALF
+        return DAY_SCOPE_FULL
+    return None
+
+
 def message_explicitly_states_day_scope(message: str) -> bool:
     """True only when the user clearly said full/half day in this message."""
+    return parse_day_scope_answer(message) is not None
+
+
+def message_explicitly_states_payment_category(message: str) -> bool:
+    """True only when the user clearly said paid or unpaid in this message."""
     text = (message or "").strip()
     if not text:
         return False
-    return bool(_SCOPE_HALF_RE.search(text) or _SCOPE_FULL_RE.search(text))
+    if _PAYMENT_LWOP_RE.search(text) or _PAYMENT_PAID_RE.search(text):
+        return True
+    return bool(
+        re.search(
+            r"\b(paid|unpaid|lwop)\b.{0,20}\b(hobe|habe|lagbe|nite|chai)\b|"
+            r"\b(hobe|habe|lagbe)\b.{0,20}\b(paid|unpaid|lwop)\b",
+            text,
+            re.I | re.UNICODE,
+        )
+    )
+
+
+def strip_ungrounded_payment_category(
+    entities: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    """Remove invented paid/unpaid unless the message explicitly states payment."""
+    if not entities or message_explicitly_states_payment_category(message):
+        return entities
+    out = dict(entities)
+    out.pop("leave_payment_category", None)
+    return out
+
+
+def should_suppress_inferred_leave_dates(message: str) -> bool:
+    """
+    True when the user gave leave length (e.g. 3 din) but not a calendar start date.
+
+    LLM often guesses tomorrow — we must ask SLOT_DATES instead.
+    """
+    text = (message or "").strip()
+    if not message_mentions_leave_duration(text):
+        return False
+    return not message_explicitly_states_leave_date(text)
+
+
+def strip_ungrounded_leave_dates(
+    entities: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    """Drop guessed calendar dates when only duration was stated."""
+    if not entities or not should_suppress_inferred_leave_dates(message):
+        return entities
+    out = dict(entities)
+    for key in ("start_date", "end_date", "date"):
+        out.pop(key, None)
+    return out
 
 
 def strip_ungrounded_day_scope(
@@ -171,9 +278,9 @@ def normalize_reason_text(reason: Any) -> str | None:
     s = str(reason).strip()
     if len(s) < 3:
         return None
-    if re.fullmatch(r"famil+y", s, re.I):
-        return "family"
-    return s[:2000]
+    from chat.services.leave_draft_utils import canonicalize_leave_reason
+
+    return canonicalize_leave_reason(s) or None
 
 
 def normalize_leave_draft(draft: dict[str, Any]) -> None:
@@ -194,6 +301,11 @@ def normalize_leave_draft(draft: dict[str, Any]) -> None:
     if reason:
         draft["reason"] = reason
 
+    from chat.services.leave_draft_utils import reconcile_leave_type_from_reason
+
+    reconcile_leave_type_from_reason(draft)
+    reason = str(draft.get("reason") or "").strip() or None
+
     last_msg = str(draft.get("_last_user_message") or "")
     combined = " ".join(
         x
@@ -213,3 +325,7 @@ def normalize_leave_draft(draft: dict[str, Any]) -> None:
     if lt in ("sick", "medical") and not draft.get("reason") and draft.get("start_date"):
         draft.setdefault("reason", "অসুস্থতা / sick leave")
         draft["_reason_implied"] = True
+
+    from chat.services.leave_draft_utils import apply_duration_end_date
+
+    apply_duration_end_date(draft)

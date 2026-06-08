@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from typing import Any
 
 LEAVE_PAYMENT_PAID = "paid"
@@ -11,6 +12,40 @@ DAY_SCOPE_FULL = "full"
 DAY_SCOPE_HALF = "half"
 
 _SICK_DOCUMENT_MIN_SPAN_DAYS = 3
+
+_NON_SICK_LEAVE_REASON_RE = re.compile(
+    r"(?:"
+    r"famil+y?(?:\s+problem|\s+program|\s+issue|\s+event)?|"
+    r"famil\s+program|"
+    r"family\s+program|family\s+problem|family\s+issue|family\s+event|"
+    r"ফ্যামিলি|পরিবার|"
+    r"wedding|marriage|biye|বিয়ে|"
+    r"travel|trip|tour|vacation|holiday|যাত্রা|"
+    r"funeral|bereavement|শোক|"
+    r"ceremon|program(?:me)?|event|অনুষ্ঠান|প্রোগ্রাম|"
+    r"annual\s+leave|casual\s+leave|maternity|paternity"
+    r")",
+    re.I | re.UNICODE,
+)
+
+_REASON_HOBE_META_RE = re.compile(
+    r"^(.+?)\s+(?:hobe|habe|hoy|হবে|হয়)\s+(?:reason|reas[oi]n|karon|কারণ)\s*$",
+    re.I | re.UNICODE,
+)
+
+_NON_SICK_LEAVE_TYPES = frozenset(
+    {
+        "casual",
+        "annual",
+        "maternity",
+        "paternity",
+        "bereavement",
+        "compensatory",
+        "emergency",
+        "wedding",
+        "travel",
+    }
+)
 
 
 def today() -> date:
@@ -34,11 +69,67 @@ def calendar_span_days(draft: dict[str, Any]) -> int:
     return max(0, (e - s).days) + 1
 
 
+def canonicalize_leave_reason(reason: str) -> str:
+    """Normalize Banglish reason corrections (famil program, X hobe reason)."""
+    text = (reason or "").strip()
+    if not text:
+        return ""
+    m = _REASON_HOBE_META_RE.match(text)
+    if m:
+        text = m.group(1).strip()
+    if re.fullmatch(r"famil+y?", text, re.I):
+        return "family"
+    if re.search(r"famil+y?\s+program", text, re.I):
+        return "family program"
+    if re.fullmatch(r"tour", text, re.I):
+        return "travel"
+    if re.fullmatch(r"travel|trip|vacation", text, re.I):
+        return text.lower()
+    return text[:2000]
+
+
+def reason_indicates_non_sick_leave(reason: str) -> bool:
+    """Family, travel, wedding, etc. — never treat as sick for document rules."""
+    text = canonicalize_leave_reason(reason)
+    if not text:
+        return False
+    return bool(_NON_SICK_LEAVE_REASON_RE.search(text))
+
+
+def reconcile_leave_type_from_reason(draft: dict[str, Any]) -> None:
+    """Keep leave_type aligned with the stated reason (sick vs family/casual)."""
+    reason = canonicalize_leave_reason(str(draft.get("reason") or ""))
+    if not reason:
+        return
+    if reason != str(draft.get("reason") or "").strip():
+        draft["reason"] = reason
+    if reason_indicates_non_sick_leave(reason):
+        lt = str(draft.get("leave_type") or "").lower()
+        if lt in ("sick", "medical", "health"):
+            draft["leave_type"] = "casual"
+        draft.pop("_reason_implied", None)
+        clear_supporting_document_if_unneeded(draft)
+        return
+    from chat.services.leave.normalization import infer_leave_type_from_text
+
+    inferred = infer_leave_type_from_text(reason)
+    if inferred:
+        draft["leave_type"] = inferred
+
+
 def effective_leave_bucket(draft: dict[str, Any]) -> str:
+    cached = draft.get("_leave_bucket")
+    if cached in ("sick", "other"):
+        return str(cached)
+    reason = str(draft.get("reason") or "")
+    if reason_indicates_non_sick_leave(reason):
+        return "other"
     lt = str(draft.get("leave_type") or "").strip().lower()
-    reason_l = str(draft.get("reason") or "").lower()
+    if lt in _NON_SICK_LEAVE_TYPES:
+        return "other"
     if lt in {"sick", "medical", "health"}:
         return "sick"
+    reason_l = reason.lower()
     try:
         from chat.services.leave.normalization import text_has_sick_signal
 
@@ -58,11 +149,78 @@ def supporting_document_needed(draft: dict[str, Any]) -> bool:
     )
 
 
+def clear_supporting_document_if_unneeded(draft: dict[str, Any]) -> None:
+    """Drop document fields when sick/medical proof is no longer required."""
+    if supporting_document_needed(draft):
+        return
+    draft.pop("document_text", None)
+    draft.pop("supporting_document_waived", None)
+
+
+_DOCUMENT_SKIP_RE = re.compile(
+    r"(?:"
+    r"^skip$|"
+    r"\bskip\b|"
+    r"parbo\s*na|parbona|parben\s*na|parbo\s*nah|nah\s*parbo|"
+    r"parchi\s*na|debo\s*na|dite\s*parbo\s*na|dite\s*parchi\s*na|"
+    r"thak|thakbe|rekhe\s*din|por\s*e\s*debo|"
+    r"না\s*পারব|পারব\s*না|দিতে\s*পারব\s*না|"
+    r"ache\s*na|nai|nei"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def is_supporting_document_skip_message(message: str) -> bool:
+    """True when the user cannot / will not attach a document now (wizard skip)."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if text.lower() == "skip":
+        return True
+    return bool(_DOCUMENT_SKIP_RE.search(text))
+
+
+def has_real_supporting_document(draft: dict[str, Any]) -> bool:
+    """True only when uploaded/pasted document content exists (not a refusal phrase)."""
+    if draft.get("supporting_document_waived"):
+        return False
+    doc = str(draft.get("document_text") or "").strip()
+    if not doc:
+        return False
+    return not is_supporting_document_skip_message(doc)
+
+
 def normalize_end_equals_start_if_missing(draft: dict[str, Any]) -> None:
     s = draft.get("start_date")
     if draft.get("end_date") or not s:
         return
     draft["end_date"] = str(s).strip().split("T")[0]
+
+
+def apply_duration_end_date(draft: dict[str, Any]) -> None:
+    """
+    Extend end_date when draft.days > 1 and only a start day was captured.
+
+    E.g. days=3 from turn 1 + \"agamikal theke\" on the date step → 3-day span.
+    Skips when the calendar range already covers the requested day count.
+    """
+    s = parse_iso(draft.get("start_date"))
+    if not s:
+        return
+    try:
+        n = int(float(draft.get("days") or 0))
+    except (TypeError, ValueError):
+        return
+    if n <= 1:
+        return
+    e = parse_iso(draft.get("end_date") or draft.get("start_date"))
+    if not e:
+        e = s
+    current_span = max(1, (e - s).days + 1)
+    if current_span >= n:
+        return
+    draft["end_date"] = (s + timedelta(days=n - 1)).isoformat()
 
 
 def validate_dates(draft: dict[str, Any]) -> tuple[bool, str | None]:

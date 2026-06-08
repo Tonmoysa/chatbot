@@ -16,9 +16,59 @@ from chat.services.expense.expense_confirm import (
 )
 
 
+def draft_category_names(
+    items: list[dict[str, Any]],
+    block: dict[str, Any] | None = None,
+) -> set[str]:
+    """Categories in committed lines plus open pending queue entries."""
+    cats = {
+        str(row.get("category") or "").lower()
+        for row in items
+        if str(row.get("category") or "").strip()
+    }
+    if not block:
+        return cats
+    pending = block.get("pending_line")
+    if isinstance(pending, dict):
+        cat = str(pending.get("category") or "").strip()
+        if cat:
+            cats.add(cat.lower())
+    for row in block.get("pending_queue") or []:
+        if isinstance(row, dict):
+            cat = str(row.get("category") or "").strip()
+            if cat:
+                cats.add(cat.lower())
+    return cats
+
+
+def _replace_category_in_pending(
+    block: dict[str, Any],
+    from_cat: str,
+    to_cat: str,
+) -> bool:
+    from_l = from_cat.lower()
+    to_l = to_cat.lower()
+    if from_l == to_l:
+        return False
+    changed = False
+    pending = block.get("pending_line")
+    if isinstance(pending, dict):
+        if str(pending.get("category") or "").lower() == from_l:
+            pending["category"] = to_cat
+            changed = True
+    queue = block.get("pending_queue")
+    if isinstance(queue, list):
+        for row in queue:
+            if isinstance(row, dict) and str(row.get("category") or "").lower() == from_l:
+                row["category"] = to_cat
+                changed = True
+    return changed
+
+
 def execute_correction_plan(
     items: list[dict[str, Any]],
     plan: CorrectionCommandPlan,
+    block: dict[str, Any] | None = None,
 ) -> CommandExecuteResult:
     """Apply a correction plan — mirrors legacy apply_corrections ordering."""
     changed = False
@@ -26,6 +76,8 @@ def execute_correction_plan(
 
     for from_cat, to_cat in plan.replacements:
         if _replace_category(out, from_cat, to_cat):
+            changed = True
+        if block is not None and _replace_category_in_pending(block, from_cat, to_cat):
             changed = True
 
     if plan.remove_travel_group:

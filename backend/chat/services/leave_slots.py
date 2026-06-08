@@ -4,6 +4,7 @@ Dynamic slot-filling: missing-slot detection and natural question generation.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from chat.services.leave_policies import CompanyLeavePolicy
@@ -71,6 +72,10 @@ def prefill_draft_from_extraction(
     ):
         draft["days"] = extraction.days.value
 
+    from chat.services.leave_draft_utils import apply_duration_end_date
+
+    apply_duration_end_date(draft)
+
 
 def apply_wizard_answer(
     draft: dict[str, Any],
@@ -103,15 +108,17 @@ def apply_wizard_answer(
         ex = extract_leave_slots(msg, skip_leave_phrase_gate=True)
         prefill_draft_from_extraction(draft, ex)
     elif pending_slot == SLOT_REASON:
-        r = _reason_from_message(msg)
+        edit_ctx = len(re.findall(r"\S+", msg)) > 4 or bool(
+            re.search(r"\b(change|update|kor[eo]|hobe|ashole)\b", msg, re.I)
+        )
+        r = _reason_from_message(msg, edit_context=edit_ctx)
         if r:
             draft["reason"] = r
             draft.pop("_reason_implied", None)
     elif pending_slot == SLOT_DOCUMENT:
-        if msg.lower() == "skip":
-            draft["supporting_document_waived"] = True
-        else:
-            draft["document_text"] = msg[:2000]
+        from chat.services.leave.document_turn_parser import apply_document_answer
+
+        apply_document_answer(draft, msg, use_llm=False)
     else:
         _infer_payment_category(msg, draft)
         _infer_day_scope(msg, draft)

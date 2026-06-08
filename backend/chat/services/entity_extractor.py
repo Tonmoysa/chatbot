@@ -141,6 +141,8 @@ Rules:
 - expense_lines: one object per cost when amounts can be inferred from the message.
 - category: map food→Lunch, transport/rickshaw/bus→matching travel category, unknown→Other.
 - Travel categories (Bus, Rickshaw, Train, Bike, CNG, Metro Rail) need from_location/to_location when a route is stated.
+- Bengali voice: convert number words (একশো=100, দুইশো=200) and Bengali digits; বাসে/বাইকে/লাঞ্ছ → Bus/Bike/Lunch.
+- Multi-line voice dumps: "বাসে mirpur টু motijheel একশো টাকা, তারপরে বাইকে ... দুইশো, লাঞ্ছ একশো" → three expense_lines.
 - Free-form examples: "office theke bashay 150" → travel line with route + amount; "ajke khawa 200" → Lunch 200.
 - expense_incurred_date: ajke/aj=today ({today}), kal/kalke=yesterday, agamikal=tomorrow.
 - amount: top-level only when a single total is stated without line breakdown.
@@ -420,6 +422,13 @@ class EntityExtractor:
             e["expense_incurred_date"] = infer_expense_incurred_date_iso(
                 message=message, hints=e, today=date.today()
             )
+
+        from chat.services.leave.normalization import should_suppress_inferred_leave_dates
+
+        if should_suppress_inferred_leave_dates(message):
+            e.pop("start_date", None)
+            e.pop("end_date", None)
+            e.pop("date", None)
 
         # If user asks "read what's written here", tag it for decision engine.
         if wants_doc_read:

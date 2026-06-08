@@ -43,7 +43,7 @@ _EXPENSE_SUBMIT_RE = re.compile(
     re.I,
 )
 _EXPENSE_SPEND_DOMAIN_RE = re.compile(
-    r"\b(expense|kharcha|khoroch|খরচ|reimbursement)\b",
+    r"\b(expense|kharcha|khoroch|khorose|koroch|kharch|খরচ|reimbursement)\b",
     re.I,
 )
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)")
@@ -195,7 +195,7 @@ _QUESTION_SHAPE_RE = re.compile(
 _HR_IN_SCOPE_RE = re.compile(
     r"\b("
     r"leave|chuti|chhuti|holiday|pto|vacation|time\s*off|"
-    r"expense|reimburs|claim|cost|kharcha|khoroch|taka|money|"
+    r"expense|reimburs|claim|cost|kharcha|khoroch|khorose|koroch|taka|money|"
     r"salary|beton|payroll|overtime|"
     r"attendance|clock|punch|timesheet|"
     r"policy|policies|rule|rules|regulation|regulations|handbook|guideline|"
@@ -212,13 +212,15 @@ _HR_IN_SCOPE_RE = re.compile(
 
 _HR_IN_SCOPE_BN_RE = re.compile(
     r"(ছুটি|খরচ|বেতন|নিয়ম|বিধি|পলিসি|হ্যান্ডবুক|উপস্থিতি|"
-    r"টাকা|রিইম্বার্স|মেডিকেল|অসুস্থ|অনুমোদন|ম্যানেজার|ভাতা|বাজেট)",
+    r"টাকা|রিইম্বার্স|মেডিকেল|অসুস্থ|অনুমোদন|ম্যানেজার|ভাতা|বাজেট|"
+    r"এক্সপেন্স|কস্ট)",
     re.UNICODE,
 )
 
 _PURE_CHITCHAT_RE = re.compile(
     r"^\s*("
     r"hi|hello|hey|hola|sup|yo|salam|thanks?|thank\s*you|bye|ok|okay|"
+    r"kemon\s*ach[oe]n?|ki\s*khobor|"
     r"হ্যালো|হাই|ধন্যবাদ|কেমন\s*আছ"
     r")\s*[!.?,…]*\s*$",
     re.I | re.UNICODE,
@@ -280,6 +282,34 @@ def is_hr_assistant_in_scope(message: str) -> bool:
         return False
     raw = (message or "").strip()
     low = raw.lower()
+    try:
+        from chat.services.expense_workflow import wants_expense_summary
+
+        if wants_expense_summary(raw):
+            return True
+    except Exception:
+        pass
+    try:
+        from chat.services.intent_detector import _strong_expense_day_summary
+
+        if _strong_expense_day_summary(raw):
+            return True
+    except Exception:
+        pass
+    try:
+        from chat.services.hr_query_classifier import (
+            HrQueryContext,
+            rules_classify_hr_query,
+        )
+
+        hr_rules = rules_classify_hr_query(raw, context=HrQueryContext())
+        if hr_rules.in_hr_scope and hr_rules.query_kind not in (
+            "unknown",
+            "chitchat",
+        ):
+            return True
+    except Exception:
+        pass
     if is_rules_query(raw) or is_expense_entitlement_query(raw):
         return True
     if _HR_IN_SCOPE_RE.search(low) or _HR_IN_SCOPE_BN_RE.search(raw):

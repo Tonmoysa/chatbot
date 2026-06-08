@@ -1,6 +1,7 @@
 import {
   SPEECH_AUTO_DETECT_LANGUAGE,
   SPEECH_DEFAULT_START_MODE,
+  SPEECH_EN_SWITCH_MIN_CHARS,
   SPEECH_FORCE_PRIMARY_LANGUAGE,
   SPEECH_LANG_SWITCH_MIN_CHARS,
   SPEECH_LANGUAGE_PREFERENCE,
@@ -9,6 +10,10 @@ import { postProcessBanglaTranscript } from "./banglaTranscript.js";
 import {
   SPEECH_LANG_MODES,
   detectSpeechLanguageMode,
+  isBengaliPhoneticEnglish,
+  readStoredSpeechMode,
+  repairBengaliPhoneticEnglish,
+  resolveTranscriptProcessingMode,
   scoreTranscriptForMode,
   speechLangChainForMode,
   speechLangTagForMode,
@@ -72,6 +77,16 @@ export function resolveSpeechSession(
           modeLocked: true,
         };
       }
+    }
+
+    const stored = options.storedMode ?? readStoredSpeechMode();
+    if (stored) {
+      return {
+        lang: speechLangTagForMode(stored, preference),
+        mode: stored,
+        languageChain: speechLangChainForMode(stored, preference),
+        modeLocked: false,
+      };
     }
 
     const startMode =
@@ -145,11 +160,21 @@ const BENGALI_SCRIPT_RE = /[\u0980-\u09FF]/;
  */
 export function refineSpeechSessionFromTranscript(text, current) {
   const raw = (text || "").trim();
-  if (raw.length < SPEECH_LANG_SWITCH_MIN_CHARS) {
+  if (!raw) {
     return current;
   }
 
   if (BENGALI_SCRIPT_RE.test(raw)) {
+    if (isBengaliPhoneticEnglish(raw)) {
+      const lang = speechLangTagForMode(SPEECH_LANG_MODES.EN, SPEECH_LANGUAGE_PREFERENCE);
+      return {
+        mode: SPEECH_LANG_MODES.EN,
+        lang,
+        languageChain: speechLangChainForMode(SPEECH_LANG_MODES.EN, SPEECH_LANGUAGE_PREFERENCE),
+        confidence: 0.92,
+        modeLocked: true,
+      };
+    }
     if (current.mode === SPEECH_LANG_MODES.BN) return current;
     const lang = speechLangTagForMode(SPEECH_LANG_MODES.BN, SPEECH_LANGUAGE_PREFERENCE);
     return {
@@ -161,7 +186,17 @@ export function refineSpeechSessionFromTranscript(text, current) {
     };
   }
 
-  const det = detectSpeechLanguageMode(raw, { minChars: 12 });
+  const minCharsForSwitch =
+    current.mode === SPEECH_LANG_MODES.BN && !current.modeLocked
+      ? SPEECH_EN_SWITCH_MIN_CHARS
+      : SPEECH_LANG_SWITCH_MIN_CHARS;
+  if (raw.length < minCharsForSwitch) {
+    return current;
+  }
+
+  const det = detectSpeechLanguageMode(raw, {
+    minChars: Math.min(8, minCharsForSwitch),
+  });
   if (det.mode === SPEECH_LANG_MODES.UNKNOWN) {
     return current;
   }
@@ -172,9 +207,13 @@ export function refineSpeechSessionFromTranscript(text, current) {
   }
 
   const leaveBnThreshold =
-    current.mode === SPEECH_LANG_MODES.BN && !current.modeLocked ? 0.74 : 0.82;
+    current.mode === SPEECH_LANG_MODES.BN && !current.modeLocked ? 0.52 : 0.82;
   const requiredConfidence =
-    current.mode === SPEECH_LANG_MODES.BN ? leaveBnThreshold : 0.68;
+    current.mode === SPEECH_LANG_MODES.BN && det.mode === SPEECH_LANG_MODES.EN
+      ? leaveBnThreshold
+      : current.mode === SPEECH_LANG_MODES.BN
+        ? 0.74
+        : 0.68;
 
   if (det.confidence < requiredConfidence) {
     return current;
@@ -250,10 +289,37 @@ export function normalizeTranscript(text, options = {}) {
   t = t.replace(/([,.!?;:])([^\s])/g, "$1 $2");
   t = t.trim();
   if (!t) return "";
-  return postProcessBanglaTranscript(t, {
-    lang: options.lang || resolveSpeechLanguage(),
-    mode: options.mode,
-  });
+
+  let mode = options.mode;
+  let lang = options.lang || resolveSpeechLanguage();
+  if (SPEECH_AUTO_DETECT_LANGUAGE && mode !== SPEECH_LANG_MODES.EN) {
+    const inferred = resolveTranscriptProcessingMode(t, { mode, lang });
+    if (inferred.mode === SPEECH_LANG_MODES.EN && inferred.confidence >= 0.42) {
+      mode = SPEECH_LANG_MODES.EN;
+      lang = speechLangTagForMode(SPEECH_LANG_MODES.EN, SPEECH_LANGUAGE_PREFERENCE);
+    } else if (
+      inferred.mode === SPEECH_LANG_MODES.BN &&
+      inferred.confidence >= 0.5
+    ) {
+      mode = SPEECH_LANG_MODES.BN;
+      lang = speechLangTagForMode(SPEECH_LANG_MODES.BN, SPEECH_LANGUAGE_PREFERENCE);
+    } else if (
+      inferred.mode === SPEECH_LANG_MODES.BANGLISH &&
+      inferred.confidence >= 0.45 &&
+      mode !== SPEECH_LANG_MODES.EN
+    ) {
+      mode = SPEECH_LANG_MODES.BANGLISH;
+      lang = speechLangTagForMode(SPEECH_LANG_MODES.BANGLISH, SPEECH_LANGUAGE_PREFERENCE);
+    }
+  }
+
+  if (isBengaliPhoneticEnglish(t)) {
+    t = repairBengaliPhoneticEnglish(t);
+    mode = SPEECH_LANG_MODES.EN;
+    lang = speechLangTagForMode(SPEECH_LANG_MODES.EN, SPEECH_LANGUAGE_PREFERENCE);
+  }
+
+  return postProcessBanglaTranscript(t, { lang, mode });
 }
 
 /**

@@ -7,6 +7,7 @@ Deterministic parsing — no LLM approval or outcome decisions here.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -72,10 +73,42 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "travel": "Bus",
     "other": "Other",
     "misc": "Other",
+    "বাসে": "Bus",
+    "বাস": "Bus",
+    "বাইকে": "Bike",
+    "বাইক": "Bike",
+    "লাঞ্ছ": "Lunch",
+    "লাঞ্চ": "Lunch",
+    "রিকশায়": "Rickshaw",
+}
+
+_BN_DIGIT_MAP = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+_BN_NUMBER_WORDS: dict[str, int] = {
+    "একশো": 100,
+    "একশ": 100,
+    "দুইশো": 200,
+    "দুইশ": 200,
+    "তিনশো": 300,
+    "তিনশ": 300,
+    "চারশো": 400,
+    "চারশ": 400,
+    "পাঁচশো": 500,
+    "পাঁচশ": 500,
+    "পঞ্চাশ": 50,
+    "চল্লিশ": 40,
+    "ত্রিশ": 30,
+    "বিশ": 20,
+    "দশ": 10,
+    "এক": 1,
+    "দুই": 2,
+    "তিন": 3,
+    "চার": 4,
+    "পাঁচ": 5,
 }
 
 _AMOUNT_RE = re.compile(
-    r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?\s*(?:টাকা|taka|tk|tks|bdt|৳)?(?!\d)",
+    r"(?<!\d)([\d০-৯]{1,6})(?:[.,](\d{1,2}))?\s*(?:টাকা|taka|tk|tks|bdt|৳)?(?!\d)",
     re.I,
 )
 
@@ -83,8 +116,154 @@ _CATEGORY_TOKEN = (
     r"(?:lunch|lanch|luch|lunc|snacks?|bus|rickshaw|riksha|train|bike|bicycle|"
     r"cng|auto|metro(?:\s*rail)?|rail|uber|cab|taxi|food|meal|transport|travel|"
     r"other|misc|"
-    r"খাওয়া|খাবার|বাস|রিকশা|ট্রেন|সাইকেল|সিএনজি|মেট্রো)"
+    r"খাওয়া|খাবার|বাস|বাসে|বাইক|বাইকে|লাঞ্ছ|লাঞ্চ|রিকশা|রিকশায়|ট্রেন|সাইকেল|সিএনজি|মেট্রো)"
 )
+
+_ROUTE_TO_CONNECTOR = r"(?:to|টু)"
+
+# Common Dhaka place names — voice often keeps Bengali script; romanize for CRM/display.
+_BN_PLACE_ROMAN: dict[str, str] = {
+    "মিরপুর": "mirpur",
+    "মতিঝিল": "motijheel",
+    "মতিজিল": "motijheel",
+    "উত্তরা": "uttora",
+    "বাড্ডা": "badda",
+    "গুলশান": "gulshan",
+    "বনানী": "banani",
+    "ধানমন্ডি": "dhanmondi",
+    "ফার্মগেট": "farmgate",
+    "শাহবাগ": "shahbagh",
+}
+
+_BIKE_HINT_RE = re.compile(
+    r"(?:\b(bike|baik|baike|bicycle)\b|বাইক)",
+    re.I,
+)
+
+
+def preprocess_expense_message(message: str) -> str:
+    """
+    Normalize Bengali voice/STT text before regex extraction.
+
+    Converts Bengali digits and number words, route connector টু → to, and
+    common locative category forms (বাসে → bus) so one-shot voice dumps parse.
+    """
+    text = unicodedata.normalize("NFKC", (message or "").strip())
+    if not text:
+        return text
+    text = text.translate(_BN_DIGIT_MAP)
+    text = re.sub(r"\s+টু\s+", " to ", text, flags=re.I)
+    for word, val in sorted(_BN_NUMBER_WORDS.items(), key=lambda x: -len(x[0])):
+        text = re.sub(
+            rf"(?<![\w\u0980-\u09FF]){re.escape(word)}(?![\w\u0980-\u09FF])",
+            str(val),
+            text,
+        )
+    # Bike before bus — STT sometimes writes বাইকে; also catch Romanized voice tokens.
+    text = text.replace("বাইকে", " bike ")
+    text = text.replace("বাইক", " bike ")
+    text = re.sub(r"\b(baik|baike|bike|bicycle)\b", " bike ", text, flags=re.I)
+    text = text.replace("বাসে", " bus ")
+    text = text.replace("লাঞ্ছ", " lunch ")
+    text = text.replace("লাঞ্চ", " lunch ")
+    for bn, en in _BN_PLACE_ROMAN.items():
+        text = text.replace(bn, f" {en} ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _romanize_known_place(label: str) -> str:
+    s = strip_location_punctuation((label or "").strip())
+    if not s:
+        return s
+    for bn, en in _BN_PLACE_ROMAN.items():
+        if bn in s:
+            s = s.replace(bn, en)
+    return strip_location_punctuation(s)
+
+
+def _location_key(label: str) -> str:
+    return _romanize_known_place(label).lower()
+
+
+def _routes_are_reverse(a: ExpenseLineItem, b: ExpenseLineItem) -> bool:
+    if not (
+        a.from_location
+        and a.to_location
+        and b.from_location
+        and b.to_location
+    ):
+        return False
+    af, at = _location_key(a.from_location), _location_key(a.to_location)
+    bf, bt = _location_key(b.from_location), _location_key(b.to_location)
+    return bool(af and at and bf and bt and af == bt and at == bf)
+
+
+def _message_has_bike_hint(message: str) -> bool:
+    return bool(_BIKE_HINT_RE.search(message or ""))
+
+
+def _disambiguate_return_leg_categories(
+    items: list[ExpenseLineItem],
+    raw_message: str,
+) -> list[ExpenseLineItem]:
+    """
+    Voice/STT often maps বাইকে → বাসে. When two Bus lines share a reverse commute
+    (mirpur↔motijheel), relabel the return leg as Bike unless both are explicit bus.
+    """
+    if not items:
+        return items
+    bus_rows = [
+        it
+        for it in items
+        if it.category == "Bus"
+        and is_travel_category(it.category)
+        and it.from_location
+        and it.to_location
+    ]
+    if len(bus_rows) < 2:
+        return items
+
+    bike_hint = _message_has_bike_hint(raw_message)
+    out = list(items)
+    for i, first in enumerate(bus_rows):
+        for second in bus_rows[i + 1 :]:
+            if not _routes_are_reverse(first, second):
+                continue
+            if not bike_hint and first.amount == second.amount:
+                continue
+            # Prefer fixing the later leg (return trip) in original item order.
+            try:
+                idx = out.index(second)
+            except ValueError:
+                continue
+            out[idx] = ExpenseLineItem(
+                category="Bike",
+                amount=second.amount,
+                from_location=second.from_location,
+                to_location=second.to_location,
+                notes=second.notes,
+            )
+            return out
+    return out
+
+
+def _romanize_travel_locations(items: list[ExpenseLineItem]) -> list[ExpenseLineItem]:
+    fixed: list[ExpenseLineItem] = []
+    for it in items:
+        if not is_travel_category(it.category):
+            fixed.append(it)
+            continue
+        fixed.append(
+            ExpenseLineItem(
+                category=it.category,
+                amount=it.amount,
+                from_location=_romanize_known_place(it.from_location),
+                to_location=_romanize_known_place(it.to_location),
+                notes=it.notes,
+            )
+        )
+    return fixed
 
 # Words between category and amount in natural BN/EN (e.g. "bus vara 30 taka").
 _CAT_TO_AMT_GAP = (
@@ -123,7 +302,8 @@ _DECLARED_TOTAL_RE = re.compile(
 )
 
 # Banglish route: "uttora theke mirpur bus" (location before থেকে, not after).
-_LOC_LABEL = r"[a-zA-Z0-9\u0980-\u09FF][\w\s\-]{1,60}"
+# Tail must allow Bengali vowel signs (ি, ু, …) — \\w alone misses those codepoints.
+_LOC_LABEL = r"[a-zA-Z0-9\u0980-\u09FF][\w\u0980-\u09FF\s\-]{0,59}"
 _BANGLISH_ROUTE_CONNECTOR = r"(?:theke|thke|থেকে|from)"
 
 _ROUTE_BANGLISH_RE = re.compile(
@@ -157,10 +337,12 @@ _ROUTE_AMOUNT_ONLY_RE = re.compile(
 
 _FROM_TO_SIMPLE_RE = re.compile(
     r"(?:"
-    r"(?:from|theke|থেকে)\s*(?P<frm>[a-zA-Z0-9\u0980-\u09FF][\w\s\-]{0,60})\s+"
-    r"(?:to|theke|যাওয়া|e|এ|পর্যন্ত|porjonto)\s*(?P<to>[a-zA-Z0-9\u0980-\u09FF][\w\s\-]{0,60})"
+    r"(?:from|theke|থেকে)\s*(?P<frm>[a-zA-Z0-9\u0980-\u09FF][\w\u0980-\u09FF\s\-]{0,59})\s+"
+    rf"(?:{_ROUTE_TO_CONNECTOR}|theke|যাওয়া|e|এ|পর্যন্ত|porjonto)\s*"
+    r"(?P<to>[a-zA-Z0-9\u0980-\u09FF][\w\u0980-\u09FF\s\-]{0,59})"
     r"|"
-    r"(?P<frm2>[a-zA-Z][\w\s\-]{1,60})\s+to\s+(?P<to2>[a-zA-Z][\w\s\-]{1,60})"
+    rf"(?P<frm2>[a-zA-Z][\w\u0980-\u09FF\s\-]{{0,59}})\s+{_ROUTE_TO_CONNECTOR}\s+"
+    r"(?P<to2>[a-zA-Z][\w\u0980-\u09FF\s\-]{0,59})"
     r")",
     re.I,
 )
@@ -172,12 +354,27 @@ _HYPHEN_ROUTE_RE = re.compile(
 
 # Tight "place to place" scan — enumerate around each ``to`` token (see _iter_simple_to_candidates).
 _LOC_WORD = r"[a-zA-Z0-9\u0980-\u09FF][\w\-]*"
-_SIMPLE_TO_SEP_RE = re.compile(r"\s+to\s+", re.I)
+_SIMPLE_TO_SEP_RE = re.compile(rf"\s+{_ROUTE_TO_CONNECTOR}\s+", re.I)
+
+# Voice/BN: "bus mirpur to motijheel 100" or "mirpur to motijheel bike 200"
+_TRAVEL_CAT_ROUTE_AMT_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN})\s+"
+    rf"(?P<frm>{_LOC_LABEL})\s+{_ROUTE_TO_CONNECTOR}\s+(?P<to>{_LOC_LABEL})\s+"
+    rf"(?P<amt>{_AMOUNT_RE.pattern})",
+    re.I,
+)
+_TRAVEL_ROUTE_CAT_AMT_RE = re.compile(
+    rf"(?P<frm>{_LOC_LABEL})\s+{_ROUTE_TO_CONNECTOR}\s+(?P<to>{_LOC_LABEL})\s+"
+    rf"(?P<cat>{_CATEGORY_TOKEN})\s+"
+    rf"(?P<amt>{_AMOUNT_RE.pattern})",
+    re.I,
+)
 
 # Preamble / expense words that should not appear inside a location label.
 _ROUTE_JUNK_WORDS_RE = re.compile(
-    r"\b(?:ajke|aajke|amar|ami|my|expense|expenses|hoyeche|hocche|cost|kharch|"
-    r"খরচ|taka|টাকা|tk|then|abar|first|note|kor|korechi|kore|lagche|laglo)\b",
+    r"\b(?:ajke|aajke|amar|ami|my|expense|expenses|hoyeche|hocche|hoyese|cost|kharch|"
+    r"খরচ|হয়েছে|হয়েছে|hoyeche|taka|টাকা|tk|then|abar|tarpor|তারপর|first|note|"
+    r"kor|korechi|kore|lagche|laglo|khoroch)\b",
     re.I,
 )
 
@@ -322,9 +519,24 @@ def _trim_route_location_tail(loc: str) -> str:
     return s.strip()
 
 
+def _strip_route_endpoint(raw: str) -> str:
+    """Drop STT/preamble junk before the real place name (e.g. 'হয়েছে motijheel')."""
+    s = _clean_location_label(_trim_route_location_tail(raw))
+    for _ in range(5):
+        if not s:
+            break
+        if _looks_like_location_label(s) or not _ROUTE_JUNK_WORDS_RE.search(s):
+            return _romanize_known_place(s)
+        parts = s.split(None, 1)
+        if len(parts) < 2:
+            break
+        s = parts[1].strip()
+    return _romanize_known_place(s)
+
+
 def _valid_location_pair(frm: str, to: str) -> tuple[str, str] | None:
-    frm = _clean_location_label(_trim_route_location_tail(frm))
-    to = _clean_location_label(_trim_route_location_tail(to))
+    frm = _strip_route_endpoint(frm)
+    to = _strip_route_endpoint(to)
     if frm and to and len(frm) >= 2 and len(to) >= 2:
         return frm, to
     return None
@@ -530,20 +742,21 @@ def normalize_category(raw: str) -> str:
 
 def _parse_amount_match(m: re.Match[str]) -> float | None:
     try:
-        whole = m.group(1)
-        frac = m.group(2) or ""
+        whole = str(m.group(1) or "").translate(_BN_DIGIT_MAP)
+        frac = str(m.group(2) or "").translate(_BN_DIGIT_MAP)
         return float(f"{whole}.{frac}" if frac else whole)
     except (TypeError, ValueError, IndexError):
         return None
 
 
 def _split_clauses(message: str) -> list[str]:
-    text = (message or "").strip()
+    text = preprocess_expense_message(message)
     if not text:
         return []
     parts = re.split(
         r"[,;।\n]+|\s+এবং\s+|\s+and\s+|\s*\+\s*"
-        r"|\s+then\s+|\s+tarpor\s+|\s+abar\s+|\s+again\s+|\s+pore\s+"
+        r"|\s+then\s+|\s+tarpor\s+|\s+তারপরে\s+|\s+তারপর\s+"
+        r"|\s+abar\s+|\s+again\s+|\s+pore\s+"
         # Banglish: "...and lunch", "..and bus", or "cost hoyeche...50 ta lunch"
         r"|\s*\.{2,}\s*and\s+|\s*\.{2,}\s+(?=\d)"
         # "cost hoyeche.luch 20" — period before word, no space (not decimals like 3.50)
@@ -561,7 +774,13 @@ def _span_overlaps(covered: list[tuple[int, int]], start: int, end: int) -> bool
 def _clean_location_label(raw: str) -> str:
     s = (raw or "").strip()
     s = re.sub(
-        r"^(?:first\s+cost|cost|খরচ|amar|ami|my)\s+",
+        r"^(?:first\s+cost|cost|খরচ|khoroch|hoyeche|hocche|হয়েছে|হয়েছে|amar|ami|my)\s+",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
+    s = re.sub(
+        r"^(?:খরচ|হয়েছে|হয়েছে)\s+",
         "",
         s,
         flags=re.I,
@@ -711,9 +930,45 @@ def _extract_alias_category_line(
     return None
 
 
+def _extract_travel_route_patterns(
+    clause: str, covered: list[tuple[int, int]]
+) -> list[ExpenseLineItem]:
+    """Bangla/Banglish voice: category+route+amount or route+category+amount."""
+    found: list[ExpenseLineItem] = []
+    for pattern in (_TRAVEL_CAT_ROUTE_AMT_RE, _TRAVEL_ROUTE_CAT_AMT_RE):
+        for m in pattern.finditer(clause):
+            if _span_overlaps(covered, m.start(), m.end()):
+                continue
+            amt_m = _AMOUNT_RE.search(m.group("amt") or "")
+            val = _parse_amount_match(amt_m) if amt_m else None
+            if val is None or val <= 0:
+                continue
+            pair = _valid_location_pair(m.group("frm") or "", m.group("to") or "")
+            if not pair:
+                continue
+            covered.append((m.start(), m.end()))
+            found.append(
+                ExpenseLineItem(
+                    category=normalize_category(m.group("cat")),
+                    amount=val,
+                    from_location=pair[0],
+                    to_location=pair[1],
+                )
+            )
+    return found
+
+
 def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
+    clause = preprocess_expense_message(clause)
     found: list[ExpenseLineItem] = []
     covered: list[tuple[int, int]] = []
+
+    route_hits = _extract_travel_route_patterns(clause, covered)
+    if route_hits:
+        found.extend(route_hits)
+        _attach_trailing_route(clause, found)
+        found.extend(_uncategorized_amounts_in_clause(clause, covered))
+        return found
 
     for m in _TA_AMOUNT_CAT_RE.finditer(clause):
         amt_m = _AMOUNT_RE.search(m.group("amt") or "")
@@ -843,6 +1098,8 @@ def extract_expense_items(message: str) -> ExtractionResult:
     """
     Extract zero or more expense line items from one user message.
     """
+    raw_message = message or ""
+    message = preprocess_expense_message(raw_message)
     clauses = _split_clauses(message)
     if not clauses:
         clauses = [message or ""]
@@ -877,6 +1134,7 @@ def extract_expense_items(message: str) -> ExtractionResult:
                 break
 
     items = _collapse_metro_train_duplicates(items, message)
+    items = _romanize_travel_locations(items)
 
     # Deduplicate identical category+amount in same message (accidental double-parse)
     seen: set[tuple[str, float]] = set()

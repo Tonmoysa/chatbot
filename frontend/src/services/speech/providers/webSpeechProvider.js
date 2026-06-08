@@ -12,6 +12,10 @@ import {
   speechErrorMessage,
   speechLanguageFallbackChain,
 } from "../speechUtils.js";
+import {
+  SPEECH_LANG_MODES,
+  resolveTranscriptProcessingMode,
+} from "../speechLanguageDetect.js";
 import { logSpeechEvent } from "../../../utils/trace.js";
 import { BaseSpeechProvider } from "./baseProvider.js";
 
@@ -63,8 +67,26 @@ export class WebSpeechProvider extends BaseSpeechProvider {
       let final = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
+        let pickMode = this.#speechMode;
+        if (!this.#modeLocked) {
+          const rawAlt = result[0]?.transcript || "";
+          const inferred = resolveTranscriptProcessingMode(rawAlt, {
+            mode: this.#speechMode,
+          });
+          if (
+            inferred.mode === SPEECH_LANG_MODES.EN &&
+            inferred.confidence >= 0.45
+          ) {
+            pickMode = SPEECH_LANG_MODES.EN;
+          } else if (
+            inferred.mode === SPEECH_LANG_MODES.BANGLISH &&
+            inferred.confidence >= 0.45
+          ) {
+            pickMode = SPEECH_LANG_MODES.BANGLISH;
+          }
+        }
         const transcript = pickBestTranscript(result, {
-          mode: this.#speechMode,
+          mode: pickMode,
           modeLocked: this.#modeLocked,
         });
         if (result.isFinal) {

@@ -138,15 +138,62 @@ _REMOVE_TRAVEL_GROUP_ALT_RE = re.compile(
 
 _REPLACE_RE = re.compile(
     rf"(?P<from_cat>{_CATEGORY_TOKEN})"
-    r"(?:\s+er|\s+ar|\s+the|\s+theke|\s+from)?"
+    r"(?:\s+er|\s+ar|\s+the|\s+theke|\s+from|\s+ke)?"
     r"\s*"
     r"(?:poriborte|poribortte|instead|replace|change\s*kore|er\s*jaygay|er\s*jagay|"
+    r"er\s*jaigai|er\s*jaigay|jaigai|jaigay|jaiga|take|"
     r"substitute|পরিবর্তে|বদলে|badle|bodle|poriborto)"
     r".{0,30}?"
     rf"(?:(?:tumi|you|ami|me)\s*)?(?P<to_cat>{_CATEGORY_TOKEN})"
-    r"(?:\s+(?:add|koro|kor|daw|debo|diye|lagbe|den|din|coro|হবে|দাও|দিন))?",
+    r"(?:\s+(?:add|koro|kor|daw|debo|diye|lagbe|den|din|coro|হবে|দাও|দিন|kore\s*daw|kore\s*de|kore\s*dao))?",
     re.I | re.UNICODE,
 )
+
+# "lunch ke snack kore daw" / "lunch snack kore daw"
+_REPLACE_KORE_DAW_RE = re.compile(
+    rf"(?P<from_cat>{_CATEGORY_TOKEN})(?:\s+ke)?\s+"
+    rf"(?P<to_cat>{_CATEGORY_TOKEN})\s+"
+    r"kore\s+(?:daw|de|dao)",
+    re.I | re.UNICODE,
+)
+
+# "bus ta bike hobe" / "lunch ta snack" — common Banglish category swap
+_REPLACE_TA_CAT_RE = re.compile(
+    rf"(?P<from_cat>{_CATEGORY_TOKEN})\s+ta\s+"
+    rf"(?P<to_cat>{_CATEGORY_TOKEN})"
+    r"(?:\s+(?:hobe|habe|hoy|হবে|হয়))?\b",
+    re.I | re.UNICODE,
+)
+
+# "bus ke bike koro" / "lunch ke snack kore daw"
+_REPLACE_KE_KORO_RE = re.compile(
+    rf"(?P<from_cat>{_CATEGORY_TOKEN})\s+ke\s+"
+    rf"(?P<to_cat>{_CATEGORY_TOKEN})"
+    r"(?:\s+(?:koro|kor|banay|baniye|banao|kore\s*(?:daw|de|dao)|hobe|habe|hoy))?\b",
+    re.I | re.UNICODE,
+)
+
+# "bus ta ache setake bike koro" / "je lunch ta ache setake snack hobe"
+_REPLACE_SETAKE_RE = re.compile(
+    rf"(?P<from_cat>{_CATEGORY_TOKEN})\s+ta\s+"
+    r"(?:ache|ase|ach[e]?|ay|aase)\s+"
+    rf"setake\s+(?P<to_cat>{_CATEGORY_TOKEN})"
+    r"(?:\s+(?:koro|kor|kore\s*(?:daw|de|dao)|hobe|habe|hoy))?\b",
+    re.I | re.UNICODE,
+)
+
+_CATEGORY_REPLACE_PATTERNS = (
+    _REPLACE_RE,
+    _REPLACE_KORE_DAW_RE,
+    _REPLACE_TA_CAT_RE,
+    _REPLACE_KE_KORO_RE,
+    _REPLACE_SETAKE_RE,
+)
+
+
+def _has_category_replace_pattern(text: str) -> bool:
+    low = text or ""
+    return any(p.search(low) for p in _CATEGORY_REPLACE_PATTERNS)
 
 
 def _normalize_correction_message(message: str) -> str:
@@ -172,6 +219,10 @@ def _is_fresh_multi_category_expense_claim(message: str) -> bool:
         _REMOVE_TRAVEL_GROUP_RE.search(low)
         or _REMOVE_TRAVEL_GROUP_ALT_RE.search(low)
         or _REPLACE_RE.search(low)
+        or _REPLACE_KORE_DAW_RE.search(low)
+        or _REPLACE_TA_CAT_RE.search(low)
+        or _REPLACE_KE_KORO_RE.search(low)
+        or _REPLACE_SETAKE_RE.search(low)
         or _TRANSFER_RE.search(low)
         or _PARTIAL_DEDUCT_RE.search(low)
         or _UPDATE_AMOUNT_RE.search(low)
@@ -201,7 +252,13 @@ def looks_like_expense_correction(message: str) -> bool:
         return False
     if _REMOVE_TRAVEL_GROUP_RE.search(low) or _REMOVE_TRAVEL_GROUP_ALT_RE.search(low):
         return True
-    if _REPLACE_RE.search(low):
+    if (
+        _REPLACE_RE.search(low)
+        or _REPLACE_KORE_DAW_RE.search(low)
+        or _REPLACE_TA_CAT_RE.search(low)
+        or _REPLACE_KE_KORO_RE.search(low)
+        or _REPLACE_SETAKE_RE.search(low)
+    ):
         return True
     if re.search(
         r"\b(remove|delete|বাদ|bad\s*d(iy|i)ao|remove\s*কর)\b",
@@ -467,7 +524,8 @@ def wants_travel_group_remove(message: str) -> bool:
 
 
 def wants_category_replace(message: str) -> bool:
-    return bool(_REPLACE_RE.search(message or ""))
+    text = message or ""
+    return _has_category_replace_pattern(text)
 
 
 def travel_group_not_found_notice(
@@ -519,8 +577,10 @@ def build_correction_failure_notice(
     low = message or ""
     if wants_travel_group_remove(low) and not _travel_lines_present(items):
         return travel_group_not_found_notice(items, lang=lang)
-    m = _REPLACE_RE.search(low)
-    if m:
+    for pattern in _CATEGORY_REPLACE_PATTERNS:
+        m = pattern.search(low)
+        if not m or "from_cat" not in m.groupdict():
+            continue
         from_cat = normalize_category(m.group("from_cat"))
         if not _category_present(items, from_cat):
             return replace_not_found_notice(from_cat, lang=lang)
