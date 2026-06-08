@@ -583,3 +583,105 @@ def test_suspend_leave_snapshot_unit():
     sl = suspended["suspended_leave"]
     assert sl["draft"].get("leave_type") == "sick"
     assert sl.get("step")
+
+
+@pytest.mark.django_db
+def test_expense_recap_during_leave_review_then_submit_leave_preserves_draft(
+    monkeypatch,
+):
+    """Expense day-summary side questions must park leave — not wipe paid/scope/dates."""
+    fixed = dt.date(2026, 6, 8)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+    for mod in (
+        "chat.services.entity_extractor.date",
+        "chat.services.expense_incurred_date.date",
+        "chat.services.decision_engine.date",
+        "chat.services.orchestrator.date",
+        "chat.services.expense_workflow.date",
+    ):
+        monkeypatch.setattr(mod, type("D", (dt.date,), {"today": classmethod(lambda cls: fixed)}))
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.message_polish_llm.is_llm_message_polish_enabled",
+        lambda: False,
+    )
+
+    orch = ChatOrchestrator()
+    emp = "wf-exp-recap-leave-submit"
+    leave_msg = (
+        "ami kalke ekta fammily program e attend korbo tai amar 3 days leave lagbe"
+    )
+    r1 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message=leave_msg,
+        session_id=None,
+        employee_id=emp,
+        trace_id="erl-leave-start",
+    )
+    sid = r1["_session_id"]
+    r2 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="paid and full day",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="erl-leave-paid",
+    )
+    r3 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="agamikal",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="erl-leave-date",
+    )
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID,
+        employee_id=emp,
+        session_id=sid,
+    )
+    session.refresh_from_db()
+    st = read_leave_state(session.workflow_state)
+    assert st.get("review_pending") or "জমা দেবেন" in (r3["response"]["message"] or "")
+
+    r_exp = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="amar expense koto ajke?",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="erl-exp-recap",
+    )
+    assert r_exp["intent"] == "EXPENSE_DAY_SUMMARY"
+    session.refresh_from_db()
+    assert has_suspended_leave(session.workflow_state)
+    sl = session.workflow_state.get("suspended_leave") or {}
+    draft = sl.get("draft") or {}
+    assert sl.get("review_pending") is True
+    assert draft.get("leave_payment_category") == "paid"
+    assert draft.get("day_scope") == "full"
+    assert draft.get("start_date") == "2026-06-09"
+    assert "fammily program" in str(draft.get("reason") or "").lower()
+
+    r_submit = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="leave request ta submit koro",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="erl-leave-submit",
+    )
+    assert r_submit["intent"] == INTENT_LEAVE_REQUEST
+    msg = r_submit["response"]["message"] or ""
+    assert "Paid" in msg or "paid" in msg.lower()
+    assert "2026-06-09" in msg
+    assert "জমা দেবেন" in msg or "জমা হয়নি" in msg
+    assert "কারণ" in msg or "family program" in msg.lower()
+    assert "Paid নাকি unpaid" not in msg
+    session.refresh_from_db()
+    assert is_leave_in_progress(session.workflow_state)
+    assert read_leave_state(session.workflow_state).get("review_pending")

@@ -73,11 +73,72 @@ def wants_recent_expense_recall_query(message: str) -> bool:
     return False
 
 
+def wants_pending_expense_query(message: str) -> bool:
+    """
+    User asks whether any pending/unsubmitted expense draft exists in this session.
+
+    E.g. ``pending kono expense ache tomar kache?``, ``amar kache pending expense ache ki?``
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    has_pending = bool(
+        re.search(
+            r"\b(pending|draft|unsubmitted|parked|collecting)\b",
+            low,
+        )
+        or re.search(
+            r"(পেন্ডিং|ড্রাফট|জমা\s*হয়নি|জমা\s*হয়নি|হয়নি|হয়নি)",
+            raw,
+            re.I | re.UNICODE,
+        )
+    )
+    if not has_pending:
+        return False
+    has_expense_domain = bool(
+        message_mentions_expense_spend(raw)
+        or re.search(r"\b(kharcha|khoroch|draft|line)\b", low)
+        or re.search(r"(খরচ|ড্রাফট|লাইন)", raw, re.I | re.UNICODE)
+    )
+    if not has_expense_domain:
+        return False
+    if re.search(r"(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?(?!\d)", raw):
+        try:
+            from chat.services.expense_extraction import extract_expense_items
+
+            ext = extract_expense_items(raw)
+            if ext.items:
+                return False
+        except Exception:
+            pass
+    return bool(
+        re.search(
+            r"(?:"
+            r"\bache\b|\base\b|\bexists?\b|\bhave\b|\bany\b|\bkono\b|"
+            r"\bki\b|\bwhat\b|\bshow\b|\blist\b|"
+            r"tomar\s+kache|amar\s+kache|your|session|"
+            r"কোন|কি|আছে|আছে\s*কি|তোমার\s*কাছে|আমার\s*কাছে|"
+            r"\b(daw|dao|dekhao|bolo|বল|দাও|দেখ)"
+            r")",
+            low,
+            re.I,
+        )
+        or re.search(
+            r"(তোমার\s*কাছে|আমার\s*কাছে|session)",
+            raw,
+            re.I | re.UNICODE,
+        )
+    )
+
+
 def wants_session_expense_ledger_query(message: str) -> bool:
     """User asks for same-day spend recap / history / how much they added."""
     raw = message or ""
     low = raw.lower()
     if wants_recent_expense_recall_query(raw):
+        return True
+    if wants_pending_expense_query(raw):
         return True
     if not message_mentions_expense_spend(raw):
         return False

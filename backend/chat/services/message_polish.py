@@ -12,6 +12,7 @@ from typing import Any
 from chat.constants import (
     EXPENSE_DAY_CAP_BDT,
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_HR_POLICY,
     INTENT_LEAVE_REQUEST,
 )
@@ -211,14 +212,17 @@ def polish_clarification_message(text: str) -> str:
 
 
 _EXPENSE_WIZARD_POLISH_RULES = frozenset(
-    {"EXPENSE_WORKFLOW_COLLECTING", "EXPENSE_WORKFLOW_REVIEW"}
+    {
+        "EXPENSE_WORKFLOW_COLLECTING",
+        "EXPENSE_WORKFLOW_REVIEW",
+        "EXPENSE_WORKFLOW_SUBMIT_CONFIRM",
+    }
 )
 _LEAVE_WIZARD_POLISH_RULES = frozenset(
     {"LEAVE_WORKFLOW_COLLECTING", "LEAVE_WORKFLOW_AWAITING_CONFIRMATION"}
 )
 _EXPENSE_WIZARD_SKIP_POLISH_RULES = frozenset(
     {
-        "EXPENSE_WORKFLOW_SUBMIT_CONFIRM",
         "EXPENSE_WORKFLOW_SUBMITTED",
         "EXPENSE_WORKFLOW_EMPTY",
     }
@@ -272,31 +276,87 @@ def polish_outbound_message(
         sub = crm_payload.get("leave_submission") or {}
         if not ref:
             ref = str(sub.get("reference_id") or sub.get("request_id") or "")
-        return format_leave_submitted_message(
+        card = format_leave_submitted_message(
             entities=entities,
             decision=decision,
             reference_id=ref,
             deduped=bool(crm_payload.get("_deduped")),
             lang=lang,
         )
+        if trace_id and not crm_payload.get("_deduped"):
+            from chat.services.message_polish_llm import (
+                leave_facts_preserved,
+                polish_template_message,
+            )
+
+            polished = polish_template_message(
+                card,
+                user_message=user_message,
+                message_type="leave_submitted",
+                trace_id=trace_id,
+                user_lang=lang,
+                min_length=30,
+            )
+            if leave_facts_preserved(card, polished):
+                return polished
+        return card
+
+    if (
+        intent == INTENT_EXPENSE_CLAIM
+        and outcome == "SUBMITTED"
+        and trace_id
+    ):
+        from chat.services.expense_message_facts import build_submit_success_envelope
+        from chat.services.message_polish_llm import polish_expense_message_with_envelope
+
+        items = list(entities.get("expense_items") or [])
+        total = sum(float(r.get("amount") or 0) for r in items)
+        ref = str(crm_payload.get("request_id") or "").strip()
+        sub = crm_payload.get("expense_submission") or {}
+        if not ref:
+            ref = str(sub.get("reference_id") or sub.get("request_id") or "")
+        inc = str(entities.get("expense_incurred_date") or "")
+        reply_lang = str(
+            ((crm_payload.get("expense_wizard") or {}).get("reply_language"))
+            or lang
+        )
+        if reply_lang not in ("bn", "en", "banglish"):
+            reply_lang = lang
+        envelope = build_submit_success_envelope(
+            item_count=len(items),
+            total=total,
+            incurred_date_iso=inc,
+            reference_id=ref,
+            lang=reply_lang if reply_lang in ("bn", "en", "banglish") else "bn",  # type: ignore[arg-type]
+            template=msg,
+        )
+        polished = polish_expense_message_with_envelope(
+            envelope,
+            user_message=user_message,
+            trace_id=trace_id,
+        )
+        if polished and polished.strip():
+            return collapse_pdf_line_breaks(polished)
 
     if outcome == "NEEDS_CLARIFICATION":
         rules = list(decision.get("rules_applied") or [])
-        if (
-            intent == INTENT_LEAVE_REQUEST
-            and trace_id
-            and _should_llm_polish_leave_wizard(rules)
-        ):
-            from chat.services.message_polish_llm import polish_leave_wizard_message
-
-            review = "LEAVE_WORKFLOW_AWAITING_CONFIRMATION" in rules
-            polished = polish_leave_wizard_message(
-                msg,
-                user_message=user_message,
-                trace_id=trace_id,
-                review=review,
+        if intent == INTENT_LEAVE_REQUEST and trace_id:
+            review = (
+                "LEAVE_WORKFLOW_AWAITING_CONFIRMATION" in rules
+                or "জমা দেবেন" in msg
+                or "জমা হয়নি" in msg
+                or "submit hoyni" in msg.lower()
             )
-            return polish_clarification_message(polished)
+            if _should_llm_polish_leave_wizard(rules) or review:
+                from chat.services.message_polish_llm import polish_leave_wizard_message
+
+                polished = polish_leave_wizard_message(
+                    msg,
+                    user_message=user_message,
+                    trace_id=trace_id,
+                    review=review,
+                )
+                return polish_clarification_message(polished)
         if (
             intent == INTENT_EXPENSE_CLAIM
             and trace_id
@@ -304,7 +364,14 @@ def polish_outbound_message(
         ):
             expense_facts = entities.get("expense_message_facts")
             if isinstance(expense_facts, dict) and (
-                expense_facts.get("polishable_part") or expense_facts.get("ask_envelope")
+                expense_facts.get("polishable_part")
+                or expense_facts.get("ask_envelope")
+                or expense_facts.get("message_type")
+                in (
+                    "expense_validation_block",
+                    "expense_clarify",
+                    "expense_submit_confirm",
+                )
             ):
                 from chat.services.message_polish_llm import (
                     polish_expense_message_with_envelope,
@@ -329,7 +396,25 @@ def polish_outbound_message(
             return polish_clarification_message(polished)
         return polish_clarification_message(msg)
 
-    if intent == INTENT_LEAVE_REQUEST:
-        return polish_clarification_message(msg)
+    if intent == INTENT_EXPENSE_DAY_SUMMARY and trace_id:
+        from chat.services.expense_message_facts import build_session_ledger_envelope
+        from chat.services.message_polish_llm import polish_expense_day_recap_message
+
+        ledger = crm_payload.get("session_expense_ledger")
+        ledger_dict = ledger if isinstance(ledger, dict) else {}
+        recap_lang = detect_user_language(user_message or msg)
+        envelope = build_session_ledger_envelope(
+            ledger_dict,
+            template=msg,
+            lang=recap_lang if recap_lang in ("bn", "en", "banglish") else "bn",
+        )
+        polished = polish_expense_day_recap_message(
+            msg,
+            envelope=envelope,
+            user_message=user_message,
+            trace_id=trace_id,
+        )
+        if polished and polished.strip():
+            return collapse_pdf_line_breaks(polished)
 
     return collapse_pdf_line_breaks(msg)

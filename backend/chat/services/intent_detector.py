@@ -15,7 +15,10 @@ from chat.constants import (
     INTENT_UNKNOWN,
     INTENT_WFH_REQUEST,
 )
-from chat.services.expense_workflow import wants_expense_summary
+from chat.services.expense_workflow import (
+    wants_expense_spend_recap_query,
+    wants_expense_summary,
+)
 from chat.services.expense.session_ledger import wants_session_expense_ledger_query
 from chat.services.llm_client import LLMClient
 from chat.services.policy_intent_helpers import is_expense_entitlement_query, is_rules_query
@@ -52,7 +55,11 @@ def _strong_expense_claim(message: str) -> bool:
     """Banglish / informal cost lines; do not match expense *status* or *summary* queries."""
     from chat.services.expense_workflow import wants_resume_or_show_expense
 
-    if wants_expense_summary(message) or wants_resume_or_show_expense(message):
+    if (
+        wants_expense_summary(message)
+        or wants_expense_spend_recap_query(message)
+        or wants_resume_or_show_expense(message)
+    ):
         return False
     # Structured category+amount lines (e.g. "lunch 100, train 60 uttora to mirpur")
     # should be treated as an expense claim even if the user doesn't say "expense/cost".
@@ -156,6 +163,13 @@ def _strong_expense_day_summary(message: str) -> bool:
             low,
         )
     )
+    domain = bool(
+        re.search(
+            r"\b(expense|reimbursement|claim|spent|cost|money|khorose|koroch|khoroch|kharcha|kharch)\b",
+            low,
+        )
+        or re.search(r"(খরচ|টাকা|taka|খরচের)", raw.lower())
+    )
     want_info = bool(
         re.search(
             r"\b(summary|summaries|summery|breakdown|overview|how\s+much|total|totals|list|"
@@ -171,13 +185,11 @@ def _strong_expense_day_summary(message: str) -> bool:
         or re.search(r"\bkoto\s+hoise\b", low)
         or re.search(r"\bkoto\s+hoyese\b", low)
         or re.search(r"কত\s*হয়েছে", raw)
-    )
-    domain = bool(
-        re.search(
-            r"\b(expense|reimbursement|claim|spent|cost|money|khorose|koroch|khoroch|kharcha|kharch)\b",
-            low,
+        or (
+            domain
+            and re.search(r"\b(amar|amai|amake|my)\b", low)
+            and re.search(r"\b(bolo|daw|dao|dekhao|show|tell|list)\b", low)
         )
-        or re.search(r"(খরচ|টাকা|taka|খরচের)", raw.lower())
     )
     if banglish_total_spend and domain:
         return True
@@ -196,7 +208,7 @@ Definitions:
 - LEAVE_REQUEST: user wants to book/take/apply leave
 - WFH_REQUEST: work from home
 - EXPENSE_CLAIM: submit reimbursement/expense
-- EXPENSE_DAY_SUMMARY: how much spent today / daily expense total / list or summary of today's expenses / remaining 300 BDT limit; also Banglish like "amar total cost koto" or "ajker expense er list daw"
+- EXPENSE_DAY_SUMMARY: how much spent today / daily expense total / list or summary of today's expenses / remaining 300 BDT limit; also Banglish like "amar total cost koto" or "ajker expense er list daw"; also pending draft questions like "pending kono expense ache tomar kache?" or "pending expense ta daw"
 - EXPENSE_STATUS: track expense/reimbursement status
 - ATTENDANCE_CORRECTION: fix clock-in/out, attendance mistake
 - REQUEST_STATUS: generic status of leave/wfh/etc
@@ -217,6 +229,7 @@ Classification examples (follow exactly):
 - "kalke chuti lagbe" / "I want leave tomorrow" → LEAVE_REQUEST
 - "350 taka cost hoyeche" / "submit 200 BDT expense" → EXPENSE_CLAIM
 - "ajke koto khoroch hoyeche" → EXPENSE_DAY_SUMMARY
+- "pending kono expense ache tomar kache?" / "amar kache pending expense ache ki?" → EXPENSE_DAY_SUMMARY
 """
 
 
@@ -571,6 +584,15 @@ class IntentDetector:
                             "confidence": 0.99,
                             "source": "rules_override_entitlement",
                         }
+                    if wants_expense_spend_recap_query(message) and intent in (
+                        INTENT_EXPENSE_CLAIM,
+                        INTENT_UNKNOWN,
+                    ):
+                        return {
+                            "intent": INTENT_EXPENSE_DAY_SUMMARY,
+                            "confidence": 0.99,
+                            "source": "rules_override_recap",
+                        }
                     if _strong_expense_claim(message) and intent not in (
                         INTENT_EXPENSE_CLAIM,
                         INTENT_EXPENSE_STATUS,
@@ -641,6 +663,8 @@ class IntentDetector:
         ):
             return INTENT_EXPENSE_STATUS
         if wants_expense_summary(raw_message or text):
+            return INTENT_EXPENSE_DAY_SUMMARY
+        if wants_expense_spend_recap_query(raw_message or text):
             return INTENT_EXPENSE_DAY_SUMMARY
         if re.search(r"\b(expense|reimbursement|claim)\b", text):
             return INTENT_EXPENSE_CLAIM

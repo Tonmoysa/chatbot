@@ -79,7 +79,10 @@ _DEFER_LEAVE_SUBMIT_RE = re.compile(
     r"(?:submit|joma|জমা|kor[eo]?|কর[ো]?)|"
     r"(?:age|আগে|first|prothom|before).{0,25}(?:submit|joma|জমা).{0,35}"
     r"(?:leave|ছুটি|chuti|chhuti|request)|"
-    r"leave\s+request\s+ta\s+age",
+    r"leave\s+request\s+ta\s+age|"
+    r"(?:leave|ছুটি|chuti|chhuti).{0,20}(?:request|application|abedon|আবেদন)?"
+    r".{0,15}(?:submit|joma|জমা).{0,15}(?:koro|kor|daw|dao|debo|de|diye|kore)|"
+    r"leave\s+request\s+ta\s+submit",
     re.I | re.UNICODE,
 )
 
@@ -224,10 +227,19 @@ def wants_defer_expense_for_leave_submit(message: str) -> bool:
     if _DEFER_LEAVE_SUBMIT_RE.search(t):
         return True
     low = t.lower()
+    if (
+        re.search(r"\b(leave|chuti|chhuti|request|ছুটি)\b", low, re.I)
+        and re.search(r"\b(submit|joma|জমা)\b", low, re.I)
+        and re.search(
+            r"\b(age|আগে|first|prothom|before|on)\s*(koro|kor|কর)\b", low, re.I
+        )
+        and not re.search(r"\b(expense|খরচ|kharcha)\b", low, re.I)
+    ):
+        return True
     return bool(
         re.search(r"\b(leave|chuti|chhuti|request|ছুটি)\b", low, re.I)
         and re.search(r"\b(submit|joma|জমা)\b", low, re.I)
-        and re.search(r"\b(age|আগে|first|prothom|before|on)\s*(koro|kor|কর)\b", low, re.I)
+        and re.search(r"\b(koro|kor|daw|dao|debo|de|diye|kore)\b", low, re.I)
         and not re.search(r"\b(expense|খরচ|kharcha)\b", low, re.I)
     )
 

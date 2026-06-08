@@ -832,6 +832,22 @@ def _route_from_clause_suffix(
         if pair:
             return pair
 
+    # Fallback: category + nearest amount (no item-pair regex), e.g.
+    # "train e cost hoyeche 80 taka uttora to motejhil"
+    for m in _AMOUNT_RE.finditer(clause):
+        val = _parse_amount_match(m)
+        if val is None or round(val, 2) != target_amt:
+            continue
+        suffix = clause[m.end() :].strip()
+        if not suffix:
+            continue
+        pair = parse_from_to_locations(suffix)
+        if not pair:
+            continue
+        frm, to = _clean_location_label(pair[0]), _clean_location_label(pair[1])
+        if frm and to and len(frm) >= 2 and len(to) >= 2:
+            return frm, to
+
     return None
 
 
@@ -1088,6 +1104,7 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
                     amount=val,
                 )
             )
+            _attach_trailing_route(clause, found)
             return found
 
     # Amount without category — do not invent "Other"; workflow will ask category.

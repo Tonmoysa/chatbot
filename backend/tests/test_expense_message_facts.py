@@ -7,11 +7,20 @@ import pytest
 from chat.constants import INTENT_EXPENSE_CLAIM
 from chat.services.expense.conversation_manager import ExpenseConversationManager
 from chat.services.expense.slots import SLOT_CATEGORY, SLOT_MORE_LINES, SLOT_REVIEW
+from chat.services.expense.clarify import ClarificationIssue
+from chat.services.expense_copy import submit_confirm_prompt
 from chat.services.expense_message_facts import (
     build_ack_envelope,
+    build_clarify_envelope,
+    build_submit_confirm_envelope,
+    build_submit_success_envelope,
+    build_validation_block_envelope,
     build_summary_envelope,
     build_wizard_message_meta,
+    clarify_facts_preserved,
     envelope_facts_preserved,
+    submit_success_facts_preserved,
+    validation_block_facts_preserved,
 )
 from chat.services.message_polish import polish_outbound_message
 from chat.services.message_polish_llm import (
@@ -193,6 +202,62 @@ def test_polish_outbound_uses_expense_message_facts(monkeypatch):
         trace_id="c-outbound",
     )
     assert out.startswith("POLISHED_ACK")
+
+
+def test_build_submit_confirm_envelope_splits_footer():
+    base = submit_confirm_prompt("banglish")
+    env = build_submit_confirm_envelope(base, lang="banglish")
+    assert env["message_type"] == "expense_submit_confirm"
+    assert "Data thik ache" in env["polishable_part"]
+    assert "CRM" in env["fixed_part"]
+
+
+def test_build_validation_block_envelope_missing_route():
+    template = (
+        "**Train** খরচের জন্য **From** ও **To** লোকেশন দুটোই লাগবে "
+        "(যেমন: office theke badda)।"
+    )
+    env = build_validation_block_envelope(
+        template,
+        items=[{"category": "Train", "amount": 80}],
+        block={},
+        lang="bn",
+    )
+    assert env["facts"]["block_kind"] == "missing_from_to"
+    assert env["facts"]["category"] == "Train"
+    assert validation_block_facts_preserved(env, template)
+
+
+def test_build_clarify_envelope_preserves_typos():
+    issues = [
+        ClarificationIssue(
+            kind="location_typo",
+            category="Bus",
+            amount=100,
+            field="from_location",
+            original="mirpuur",
+            suggestion="mirpur",
+        )
+    ]
+    template = (
+        "পর্যালোচনার আগে কিছু তথ্য নিশ্চিত করতে হবে:\n"
+        "1. **Bus** (100 Tk) · From: **mirpuur** — **mirpur** বোঝাচ্ছেন?"
+    )
+    env = build_clarify_envelope(issues, template=template, lang="bn")
+    assert clarify_facts_preserved(env, template)
+
+
+def test_build_submit_success_envelope():
+    template = "**Expense সফলভাবে জমা হয়েছে**\n\n- **তারিখ:** 2026-06-08"
+    env = build_submit_success_envelope(
+        item_count=2,
+        total=200,
+        incurred_date_iso="2026-06-08",
+        reference_id="EXP-2026-379C98",
+        lang="bn",
+        template=template,
+    )
+    assert submit_success_facts_preserved(env, template)
 
 
 def test_review_meta_skips_footer_prompt_polish():

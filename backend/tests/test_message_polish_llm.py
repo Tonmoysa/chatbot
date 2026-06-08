@@ -225,22 +225,25 @@ def test_polish_leave_wizard_preserves_footer_marker(monkeypatch):
     assert "**onek osusto**" in out
 
 
-def test_polish_outbound_skips_submit_confirm(monkeypatch):
-    called = {"n": 0}
+def test_polish_outbound_submit_confirm_uses_envelope(monkeypatch):
+    from chat.services.expense_copy import submit_confirm_prompt
+    from chat.services.expense_message_facts import build_submit_confirm_envelope
 
-    def _polish(*_a, **_k):
-        called["n"] += 1
-        return "should not run"
+    base = submit_confirm_prompt("bn")
+    envelope = build_submit_confirm_envelope(base, lang="bn")
 
-    monkeypatch.setattr("chat.services.message_polish_llm.polish_template_message", _polish)
-    base = "জমা দেবেন? **100 Tk** total."
+    monkeypatch.setattr(
+        "chat.services.message_polish_llm.polish_expense_message_with_envelope",
+        lambda env, **kwargs: "POLISHED_INTRO\n\n**Expense CRM-এ জমা দেব?**",
+    )
     out = polish_outbound_message(
         base,
         intent=INTENT_EXPENSE_CLAIM,
         outcome="NEEDS_CLARIFICATION",
         user_message="yes",
+        entities={"expense_message_facts": envelope},
         decision={"rules_applied": ["EXPENSE_WORKFLOW_SUBMIT_CONFIRM"]},
         trace_id="exp-polish-2",
     )
-    assert called["n"] == 0
-    assert out == base
+    assert out.startswith("POLISHED_INTRO")
+    assert "CRM" in out

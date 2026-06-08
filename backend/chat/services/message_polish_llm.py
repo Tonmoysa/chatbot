@@ -19,9 +19,15 @@ MessagePolishType = Literal[
     "expense_wizard",
     "expense_ack",
     "expense_summary",
+    "expense_day_recap",
     "expense_wizard_prompt",
+    "expense_validation_block",
+    "expense_clarify",
+    "expense_submit_confirm",
+    "expense_submit_success",
     "leave_wizard",
     "leave_review",
+    "leave_submitted",
 ]
 
 _LEAVE_WIZ_MARKER = "_(ছুটি আবেদন — নিচে উত্তর দিন)_"
@@ -74,6 +80,18 @@ RULES
 - Do NOT add or remove expense lines.
 - Output ONLY the summary body (header + bullets + total)."""
 
+_EXPENSE_DAY_RECAP_SYSTEM = """You rephrase a read-only expense day / session recap for the user.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS JSON is authoritative — date, every line amount/category/route, totals, cap, pending vs submitted must appear.
+- When empty_session is true, say clearly nothing was found in this chat session and how to start a new claim (keep the example format).
+- Warm, professional HR colleague tone — not robotic.
+- Preserve **bold** markdown on amounts, dates, references, and section headers when using markdown.
+- Do NOT invent expense lines, amounts, or reference IDs.
+- Do NOT ask wizard collection questions unless REFERENCE does for empty state guidance only.
+- Output ONLY the recap message text."""
+
 _LEAVE_WIZARD_SYSTEM = """You rephrase a leave application wizard message (collecting dates, payment, scope, document).
 
 RULES
@@ -95,6 +113,58 @@ RULES
 - 1 short professional intro + summary bullets + confirm question.
 - Do NOT change factual field values or add new fields.
 - Output ONLY the rephrased message text."""
+
+_EXPENSE_VALIDATION_BLOCK_SYSTEM = """You rephrase an expense wizard validation/block message.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS JSON is authoritative — block reason, category, amounts, pending lines must appear.
+- Warm, clear colleague tone — explain what is missing and what to do next.
+- Preserve **bold** on amounts, categories, and line labels.
+- Do NOT invent amounts, categories, or routes.
+- Output ONLY the block message text."""
+
+_EXPENSE_CLARIFY_SYSTEM = """You rephrase a batched expense clarification prompt before review.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS JSON lists every issue — category, amount, typo original/suggestion must appear.
+- Numbered list format is fine; keep every issue visible.
+- Preserve **bold** on amounts, categories, locations, and suggestions.
+- Keep the one-message reply instruction at the end.
+- Do NOT add or remove clarification items.
+- Output ONLY the clarification prompt."""
+
+_EXPENSE_SUBMIT_CONFIRM_SYSTEM = """You rephrase the intro line before expense CRM submit confirmation.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- Same meaning: data looks good, ready to submit to CRM.
+- 1–2 warm professional sentences only — the yes/no options are appended separately.
+- Do NOT include yes/no bullets or CRM submit options.
+- Output ONLY the intro sentence(s)."""
+
+_EXPENSE_SUBMIT_SUCCESS_SYSTEM = """You rephrase an expense submission success card.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS JSON is authoritative — date, line count, total, reference ID must appear exactly.
+- Professional HR colleague tone — concise success card with bullet list.
+- Preserve **bold** markdown and reference ID format.
+- Keep the CRM/Finance disclaimer meaning (final approval happens in company system).
+- Do NOT invent reference IDs or change amounts.
+- Output ONLY the success card text."""
+
+_LEAVE_SUBMITTED_SYSTEM = """You rephrase a leave request submission success card.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- Every date, date range (→), leave type, paid/unpaid, scope, days requested, balance, reference must appear exactly.
+- Professional HR colleague tone — organized bullet card.
+- Preserve **bold** markdown and reference ID.
+- Keep CRM/HR disclaimer meaning.
+- Do NOT invent dates or change field values.
+- Output ONLY the success card text."""
 
 _EXPENSE_WIZARD_PROMPT_SYSTEM = """You rephrase ONE expense wizard follow-up question.
 
@@ -238,6 +308,8 @@ def _system_prompt(message_type: MessagePolishType) -> str:
         return _EXPENSE_ACK_SYSTEM
     if message_type == "expense_summary":
         return _EXPENSE_SUMMARY_SYSTEM
+    if message_type == "expense_day_recap":
+        return _EXPENSE_DAY_RECAP_SYSTEM
     if message_type == "expense_wizard_prompt":
         return _EXPENSE_WIZARD_PROMPT_SYSTEM
     if message_type == "expense_wizard":
@@ -246,6 +318,16 @@ def _system_prompt(message_type: MessagePolishType) -> str:
         return _LEAVE_WIZARD_SYSTEM
     if message_type == "leave_review":
         return _LEAVE_REVIEW_SYSTEM
+    if message_type == "expense_validation_block":
+        return _EXPENSE_VALIDATION_BLOCK_SYSTEM
+    if message_type == "expense_clarify":
+        return _EXPENSE_CLARIFY_SYSTEM
+    if message_type == "expense_submit_confirm":
+        return _EXPENSE_SUBMIT_CONFIRM_SYSTEM
+    if message_type == "expense_submit_success":
+        return _EXPENSE_SUBMIT_SUCCESS_SYSTEM
+    if message_type == "leave_submitted":
+        return _LEAVE_SUBMITTED_SYSTEM
     return _OUT_OF_SCOPE_SYSTEM
 
 
@@ -349,6 +431,83 @@ def polish_expense_wizard_prompt(
     return cleaned
 
 
+def _envelope_facts_guard_ok(envelope: dict[str, Any], polished: str) -> bool:
+    from chat.services.expense_message_facts import (
+        clarify_facts_preserved,
+        envelope_facts_preserved,
+        submit_success_facts_preserved,
+        validation_block_facts_preserved,
+    )
+
+    message_type = str(envelope.get("message_type") or "")
+    if message_type in ("expense_ack", "expense_summary"):
+        return envelope_facts_preserved(envelope, polished)
+    if message_type == "expense_validation_block":
+        return validation_block_facts_preserved(envelope, polished)
+    if message_type == "expense_clarify":
+        return clarify_facts_preserved(envelope, polished)
+    if message_type == "expense_submit_success":
+        return submit_success_facts_preserved(envelope, polished)
+    template = str(envelope.get("template_fallback") or "")
+    if template:
+        return facts_preserved(template, polished)
+    return bool((polished or "").strip())
+
+
+def polish_envelope_message(
+    base: str,
+    *,
+    envelope: dict[str, Any],
+    user_message: str,
+    trace_id: str | None = None,
+    min_length: int = 20,
+    llm: LLMClient | None = None,
+) -> str:
+    """Polish any facts-backed envelope; falls back to template on failure."""
+    template = (base or "").strip()
+    if not template or not is_llm_message_polish_enabled() or not trace_id:
+        return template
+
+    message_type = str(envelope.get("message_type") or "expense_wizard")
+    if message_type not in (
+        "expense_validation_block",
+        "expense_clarify",
+        "expense_submit_confirm",
+        "expense_submit_success",
+    ):
+        return template
+
+    client = llm or LLMClient()
+    if not client.is_configured():
+        return template
+
+    lang = str(envelope.get("lang") or detect_user_language(user_message or template))
+    facts_json = json.dumps(envelope.get("facts") or {}, ensure_ascii=False, indent=2)
+    try:
+        out = client.chat_text(
+            system_prompt=_system_prompt(message_type),  # type: ignore[arg-type]
+            user_prompt=(
+                f"{_lang_line(lang)}\n\n"
+                f"User said:\n{user_message or '(n/a)'}\n\n"
+                f"FACTS (preserve every amount, category, date, reference):\n"
+                f"{facts_json}\n\n"
+                f"REFERENCE display (same meaning, preserve all **bold** and numbers):\n"
+                f"{template}"
+            ),
+            trace_id=trace_id,
+        )
+    except Exception:
+        return template
+
+    cleaned = (out or "").strip()
+    if len(cleaned) < min_length:
+        return template
+    check_envelope = {**envelope, "template_fallback": template}
+    if not _envelope_facts_guard_ok(check_envelope, cleaned):
+        return template
+    return cleaned
+
+
 def _polish_body_from_envelope(
     envelope: dict[str, Any],
     *,
@@ -376,6 +535,19 @@ def _polish_body_from_envelope(
             trace_id=trace_id,
             llm=llm,
         )
+    if message_type in (
+        "expense_validation_block",
+        "expense_clarify",
+        "expense_submit_confirm",
+        "expense_submit_success",
+    ):
+        return polish_envelope_message(
+            polishable,
+            envelope=envelope,
+            user_message=user_message,
+            trace_id=trace_id,
+            llm=llm,
+        )
     return polishable
 
 
@@ -394,9 +566,9 @@ def polish_expense_message_with_envelope(
         llm=llm,
     )
     ask_env = envelope.get("ask_envelope")
-    ask_template = str(
-        (ask_env or {}).get("polishable_part") or envelope.get("fixed_part") or ""
-    ).strip()
+    ask_template = ""
+    if isinstance(ask_env, dict):
+        ask_template = str(ask_env.get("polishable_part") or "").strip()
     ask = ask_template
     if isinstance(ask_env, dict) and ask_template:
         ask = polish_expense_wizard_prompt(
@@ -407,12 +579,17 @@ def polish_expense_message_with_envelope(
             llm=llm,
         )
 
+    fixed = str(envelope.get("fixed_part") or "").strip()
+    if body and fixed and str(envelope.get("message_type") or "") == "expense_submit_confirm":
+        return body.rstrip() + "\n\n" + fixed
     if body and ask:
         return body.rstrip() + "\n\n" + ask
     if body:
         return body
     if ask:
         return ask
+    if fixed:
+        return fixed
     return None
 
 
@@ -468,6 +645,54 @@ def polish_leave_wizard_message(
     if has_marker:
         return polished_body.rstrip() + _LEAVE_WIZ_MARKER
     return polished_body
+
+
+def polish_expense_day_recap_message(
+    base: str,
+    *,
+    envelope: dict[str, Any],
+    user_message: str,
+    trace_id: str | None = None,
+    min_length: int = 25,
+    llm: LLMClient | None = None,
+) -> str:
+    """Polish session/CRM expense day recap — same facts, natural professional tone."""
+    template = (base or "").strip()
+    if not template or not is_llm_message_polish_enabled() or not trace_id:
+        return template
+
+    client = llm or LLMClient()
+    if not client.is_configured():
+        return template
+
+    lang = str(envelope.get("lang") or detect_user_language(user_message or template))
+    facts_json = json.dumps(envelope.get("facts") or {}, ensure_ascii=False, indent=2)
+    try:
+        out = client.chat_text(
+            system_prompt=_EXPENSE_DAY_RECAP_SYSTEM,
+            user_prompt=(
+                f"{_lang_line(lang)}\n\n"
+                f"User asked:\n{user_message or '(n/a)'}\n\n"
+                f"FACTS (every amount, category, date, total, cap must appear in output):\n"
+                f"{facts_json}\n\n"
+                f"REFERENCE display (same meaning, preserve all **bold** and numbers):\n"
+                f"{template}"
+            ),
+            trace_id=trace_id,
+        )
+    except Exception:
+        return template
+
+    cleaned = (out or "").strip()
+    if len(cleaned) < min_length:
+        return template
+    check_envelope = {**envelope, "template_fallback": template}
+    from chat.services.expense_message_facts import session_recap_facts_preserved
+
+    if not session_recap_facts_preserved(check_envelope, cleaned):
+        if not facts_preserved(template, cleaned):
+            return template
+    return cleaned
 
 
 def polish_template_message(

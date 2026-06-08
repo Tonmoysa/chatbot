@@ -2,7 +2,11 @@
 
 import pytest
 
-from chat.constants import INTENT_LEAVE_REQUEST, INTENT_UNKNOWN
+from chat.constants import (
+    INTENT_EXPENSE_DAY_SUMMARY,
+    INTENT_LEAVE_REQUEST,
+    INTENT_UNKNOWN,
+)
 from chat.services.expense_workflow import is_expense_in_progress
 from chat.services.leave_workflow import is_leave_in_progress
 from chat.services.orchestrator import (
@@ -13,6 +17,8 @@ from chat.services.turn_classifier import TURN_NEW_WORKFLOW, classify_workflow_t
 from chat.services.workflow_navigation import is_leave_application_message
 from chat.services.workflow_suspend import has_suspended_expense
 from chat.services.wizard_interrupt_classifier import (
+    INTERRUPT_EXPENSE_RECAP,
+    INTERRUPT_LEAVE_SUBMIT,
     INTERRUPT_NEW_LEAVE,
     WizardInterruptContext,
     classify_wizard_interrupt,
@@ -39,6 +45,50 @@ BANGLISH_SICK_LEAVE = "amar soril kharap tai leave lagbe"
 )
 def test_leave_application_detects_bengali_and_banglish(message: str) -> None:
     assert is_leave_application_message(message)
+
+
+def test_rules_interrupt_expense_recap_during_leave_review() -> None:
+    ctx = WizardInterruptContext(leave_active=True, leave_review_pending=True)
+    decision = rules_wizard_interrupt("amar expense koto ajke?", context=ctx)
+    assert decision.interrupt_type == INTERRUPT_EXPENSE_RECAP
+    assert decision.maps_to_intent == INTENT_EXPENSE_DAY_SUMMARY
+
+
+def test_rules_interrupt_leave_submit_during_side_question() -> None:
+    ctx = WizardInterruptContext(
+        leave_active=False,
+        has_suspended_leave=True,
+    )
+    decision = rules_wizard_interrupt("leave request ta submit koro", context=ctx)
+    assert decision.maps_to_intent == INTENT_LEAVE_REQUEST
+    assert decision.interrupt_type in (INTERRUPT_LEAVE_SUBMIT, "resume_suspended_leave")
+
+
+def test_llm_fallback_expense_recap_when_rules_miss(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chat.services.expense_workflow.wants_expense_spend_recap_query",
+        lambda _m: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.wizard_interrupt_classifier.LLMClient.is_configured",
+        lambda self: True,
+    )
+    monkeypatch.setattr(
+        "chat.services.wizard_interrupt_classifier.LLMClient.chat_json",
+        lambda self, **kwargs: {
+            "interrupt_type": "expense_recap",
+            "confidence": 0.88,
+        },
+    )
+    ctx = WizardInterruptContext(leave_active=True, leave_review_pending=True)
+    decision = classify_wizard_interrupt(
+        "ajke ami koto kharcha korechi bolo",
+        context=ctx,
+        trace_id="llm-recap",
+        use_llm=True,
+    )
+    assert decision.interrupt_type == INTERRUPT_EXPENSE_RECAP
+    assert decision.source == "llm_interrupt"
 
 
 def test_rules_interrupt_new_leave_during_expense() -> None:

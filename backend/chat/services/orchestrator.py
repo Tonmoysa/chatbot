@@ -81,6 +81,7 @@ from chat.services.expense_workflow import (
     process_expense_turn,
     resume_expense_session,
     save_expense_last_submission,
+    wants_expense_spend_recap_query,
     wants_expense_summary,
 )
 from chat.services.workflow_suspend import (
@@ -338,6 +339,30 @@ def _detect_intent_during_leave_workflow(
                 "confidence": 0.99,
                 "source": "leave_workflow_gate+confirm_expense_switch",
             }
+        from chat.services.wizard_interrupt_classifier import (
+            build_leave_interrupt_context,
+            classify_wizard_interrupt,
+            interrupt_is_workflow_switch,
+        )
+
+        leave_intr = classify_wizard_interrupt(
+            message,
+            context=build_leave_interrupt_context(
+                workflow_state,
+                leave_review_pending=True,
+            ),
+            trace_id=trace_id,
+            use_llm=True,
+        )
+        if interrupt_is_workflow_switch(leave_intr) or leave_intr.maps_to_intent in (
+            INTENT_EXPENSE_DAY_SUMMARY,
+            INTENT_LEAVE_REQUEST,
+        ):
+            mapped = _intent_from_wizard_interrupt(
+                leave_intr, gate_prefix="leave_workflow_gate+confirm"
+            )
+            if mapped:
+                return mapped
         from chat.services.wizard_turn_gate import (
             is_casual_wizard_side_statement,
             is_leave_navigation_phrase,
@@ -1030,9 +1055,9 @@ class ChatOrchestrator:
             if expense_query_should_suspend_leave(message):
                 wf_state = _persist_workflow_state(
                     session,
-                    clear_suspended_leave(deactivate_leave_session(wf_state)),
+                    suspend_leave_for_workflow_switch(wf_state),
                 )
-                log_step(trace_id, "leave_cleared_for_expense_query", {})
+                log_step(trace_id, "leave_suspended_for_expense_query", {})
             elif should_clear_misrouted_leave(message, wf_state):
                 wf_state = _persist_workflow_state(
                     session,
@@ -1107,6 +1132,7 @@ class ChatOrchestrator:
             classify_hr_query,
             clear_hr_query_cache,
             decision_suppresses_out_of_scope,
+            hr_query_llm_allowed_during_wizard,
         )
 
         wizard_active_for_hr = is_leave_in_progress(wf_state) or is_expense_in_progress(
@@ -1117,7 +1143,9 @@ class ChatOrchestrator:
             message,
             context=build_hr_query_context(wf_state),
             trace_id=trace_id,
-            use_llm=not wizard_active_for_hr,
+            use_llm=True,
+            wizard_side_llm=wizard_active_for_hr
+            and hr_query_llm_allowed_during_wizard(message, wf_state),
         )
         intent, intent_result = apply_hr_query_to_intent(
             intent, intent_result, hr_query_decision, message=message
@@ -1418,9 +1446,10 @@ class ChatOrchestrator:
             wizard_dismissed_reason is None
             and (
                 wants_post_submit_expense_summary(message)
+                or _strong_expense_day_summary(message)
                 or (
                     not is_expense_in_progress(wf_gate)
-                    and wants_expense_summary(message)
+                    and wants_expense_spend_recap_query(message)
                 )
             )
         ):

@@ -61,6 +61,14 @@ def wants_expense_submit_command(message: str) -> bool:
         t
     ):
         return False
+    low = t.lower()
+    if re.search(r"\b(leave|chuti|chhuti|holiday|request)\b", low, re.I) or re.search(
+        r"(ছুটি|ছুটির)", t, re.I | re.UNICODE
+    ):
+        if _SUBMIT_CMD_RE.search(t) and re.search(
+            r"\b(hoyeche|hoyese|hoise|hoyechilo|complete|status|ki)\b", low
+        ):
+            return False
     return bool(_SUBMIT_CMD_RE.search(t))
 
 

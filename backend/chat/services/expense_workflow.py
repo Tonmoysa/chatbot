@@ -504,6 +504,13 @@ def message_mentions_expense_spend(message: str) -> bool:
 def wants_expense_summary(message: str) -> bool:
     """User wants to see expense review / day recap (not a new claim line)."""
     if _wants_finish_collecting(message):
+        low_fc = (message or "").lower()
+        if message_mentions_expense_spend(message):
+            return True
+        if re.search(r"\b(leave|chuti|chhuti|holiday|wfh)\b", low_fc) or re.search(
+            r"(ছুটি|ছুটির)", message or "", re.I | re.UNICODE
+        ):
+            return False
         return True
     raw = message or ""
     low = raw.lower().strip()
@@ -562,12 +569,89 @@ def wants_expense_summary(message: str) -> bool:
     if _EXPENSE_RECAP_KIND_RE.search(raw) and _EXPENSE_RECAP_GIVE_RE.search(low):
         if spend_domain:
             return True
+    # "amar ajker expense ta bolo" — show today's spend without saying summary/list.
+    if spend_domain and _EXPENSE_RECAP_GIVE_RE.search(low):
+        if re.search(r"\b(amar|amai|amake|my|ajke|ajker|today|aaj)\b", low) or re.search(
+            r"(আমার|আজ|আজকer's|আজকে)", raw, re.I | re.UNICODE
+        ):
+            return True
+    # "amar expense koto ajke" — how much spent today.
+    if spend_domain and re.search(r"\b(koto|how\s+much|total|mot)\b", low):
+        if re.search(r"\b(amar|amai|amake|my|ajke|ajker|today|aaj)\b", low) or re.search(
+            r"(আমার|আজ|আজকer's|আজকে)", raw, re.I | re.UNICODE
+        ):
+            return True
     return bool(
         re.search(
             r"\b(expense\s+summary|expense\s+list|খরচের\s+সারাংশ|খরচের\s+লিস্ট|দৈনিক\s+খরচ)\b",
             low,
         )
     )
+
+
+def wants_expense_spend_recap_query(message: str) -> bool:
+    """
+    Read-only expense query: session/CRM recap, today's total, show my expenses.
+    Not submitting a new claim line (no bare category+amount without recap cues).
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    try:
+        from chat.services.expense.session_ledger import wants_pending_expense_query
+
+        if wants_pending_expense_query(raw):
+            return True
+    except Exception:
+        pass
+    if not message_mentions_expense_spend(raw):
+        try:
+            from chat.services.expense.session_ledger import wants_session_expense_ledger_query
+
+            if wants_session_expense_ledger_query(raw):
+                return True
+        except Exception:
+            pass
+        return False
+    if wants_expense_summary(message):
+        return True
+    try:
+        from chat.services.expense.session_ledger import wants_session_expense_ledger_query
+
+        if wants_session_expense_ledger_query(raw):
+            return True
+    except Exception:
+        pass
+    if re.search(_AMOUNT_RE, raw):
+        try:
+            ext = extract_expense_items(raw)
+            if ext.items:
+                return False
+        except Exception:
+            pass
+        explicit_recap = bool(
+            re.search(
+                r"\b(koto|how\s+much|total|mot|summery|summary|list|bolo|daw|dao|dekhao|show)\b",
+                low,
+            )
+            or re.search(r"(কত|মোট|সারাংশ|লিস্ট|দেখ|বল|দাও)", raw, re.I | re.UNICODE)
+        )
+        if not explicit_recap:
+            return False
+    query_cue = bool(
+        re.search(
+            r"\b(koto|how\s+much|total|mot|list|summery|summary|bolo|daw|dao|dekhao|"
+            r"show|recap|history|hoyeche|hoise|hoyese|tell|give)\b",
+            low,
+        )
+        or re.search(r"(কত|মোট|দেখ|বল|দাও|সারাংশ|লিস্ট|হয়েছে)", raw, re.I | re.UNICODE)
+    )
+    context_cue = bool(
+        re.search(r"\b(amar|amai|amake|my|ajke|ajker|today|aaj|sara\s+din)\b", low)
+        or re.search(r"(আমার|আজ|আজকer's|আজকে|সারা\s*দিন)", raw, re.I | re.UNICODE)
+    )
+    return query_cue and context_cue
 
 
 def _category_options_text() -> str:
@@ -782,7 +866,22 @@ def _try_clarify_before_review(
     question = _start_clarification_turn(
         block, items, pending_entries, lang=lang
     )
-    return _pack(wf, block, items=items, question=question, inc_iso=inc_iso)
+    from chat.services.expense_message_facts import build_clarify_envelope
+
+    reply_lang = normalize_reply_lang(lang)
+    facts = build_clarify_envelope(
+        issues,
+        template=question,
+        lang=reply_lang,
+    )
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=question,
+        inc_iso=inc_iso,
+        message_facts=facts,
+    )
 
 
 def _advance_pending_queue(
@@ -1332,8 +1431,20 @@ def _handle_pending_line(
                 question = _start_clarification_turn(
                     block, items, remaining_pending, lang=lang
                 )
+                from chat.services.expense_message_facts import build_clarify_envelope
+
+                facts = build_clarify_envelope(
+                    new_issues,
+                    template=question,
+                    lang=normalize_reply_lang(lang),
+                )
                 return _pack(
-                    wf, block, items=items, question=question, inc_iso=inc_iso
+                    wf,
+                    block,
+                    items=items,
+                    question=question,
+                    inc_iso=inc_iso,
+                    message_facts=facts,
                 )
 
         adv = _try_advance_to_review(

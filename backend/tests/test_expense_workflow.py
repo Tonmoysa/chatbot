@@ -234,6 +234,22 @@ def test_extract_bus_with_banglish_route_prefix():
     assert bus.to_location == "mirpur"
 
 
+def test_extract_trailing_route_after_cost_hoyeche_amount():
+    """Train via category+amount path must pick up uttora→motejhil after the amount."""
+    msg = (
+        "amar ajke train e cost hoyeche 80 taka uttora to motejhil "
+        "then motejil to baridahara cost hoyeche bus e 60 taka"
+    )
+    ext = extract_expense_items(msg)
+    by_cat = {i.category: i for i in ext.items}
+    assert by_cat["Train"].amount == 80.0
+    assert by_cat["Train"].from_location == "uttora"
+    assert by_cat["Train"].to_location == "motejhil"
+    assert by_cat["Bus"].amount == 60.0
+    assert by_cat["Bus"].from_location == "motejil"
+    assert by_cat["Bus"].to_location == "baridahara"
+
+
 def test_from_to_step_accepts_banglish_route():
     wf: dict = {}
     r1 = process_expense_turn(workflow_state=wf, message="bus 50 taka")

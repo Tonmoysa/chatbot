@@ -14,6 +14,7 @@ from typing import Any
 
 from chat.constants import (
     INTENT_EXPENSE_CLAIM,
+    INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_HR_POLICY,
     INTENT_LEAVE_BALANCE,
     INTENT_LEAVE_REQUEST,
@@ -42,6 +43,8 @@ INTERRUPT_CHITCHAT = "chitchat"
 INTERRUPT_CONFIRM = "confirm"
 INTERRUPT_DENY = "deny"
 INTERRUPT_CANCEL = "cancel"
+INTERRUPT_EXPENSE_RECAP = "expense_recap"
+INTERRUPT_LEAVE_SUBMIT = "leave_submit_request"
 INTERRUPT_UNCLEAR = "unclear"
 
 _LEAVE_DOMAIN_RE = re.compile(
@@ -75,7 +78,8 @@ The user may be continuing the active form OR switching to a different HR task.
 Return STRICT JSON only:
 {
   "interrupt_type": "continue_expense" | "continue_leave" | "new_leave_request" | "new_expense_request" |
-    "resume_suspended_leave" | "resume_suspended_expense" | "policy_query" | "balance_query" |
+    "resume_suspended_leave" | "resume_suspended_expense" | "expense_recap" | "leave_submit_request" |
+    "policy_query" | "balance_query" |
     "chitchat" | "confirm" | "deny" | "cancel" | "unclear",
   "confidence": 0.0 to 1.0
 }
@@ -90,6 +94,10 @@ RULES
   Examples: "ajke lunch 100 taka bus 50"
 - resume_suspended_leave: return to a parked leave draft ("leave e back koro", "ছুটি তে ফিরে যাও")
 - resume_suspended_expense: return to parked expense ("expense e back koro")
+- expense_recap: read-only spend question — NOT a new claim line
+  Examples: "amar expense koto ajke", "ajker kharcha bolo", "what did I spend today"
+- leave_submit_request: user wants to submit/finish a parked leave (often after a side question)
+  Examples: "leave request ta submit koro", "chuti ta joma daw", "submit my leave now"
 - policy_query: HR rules / handbook / entitlement ("leave policy ki", "300 taka limit koto")
 - balance_query: remaining leave balance ("kotodin chuti ache")
 - chitchat: greetings, jokes, general knowledge unrelated to HR forms
@@ -111,6 +119,7 @@ class WizardInterruptContext:
     has_suspended_expense: bool = False
     pending_leave_step: str = ""
     expense_item_summary: str = ""
+    leave_draft_summary: str = ""
 
 
 @dataclass
@@ -155,6 +164,10 @@ def _map_interrupt_to_outputs(
     elif interrupt_type in (INTERRUPT_CONTINUE_EXPENSE, INTERRUPT_CONFIRM, INTERRUPT_DENY):
         intent = INTENT_EXPENSE_CLAIM
     elif interrupt_type == INTERRUPT_CONTINUE_LEAVE:
+        intent = INTENT_LEAVE_REQUEST
+    elif interrupt_type == INTERRUPT_EXPENSE_RECAP:
+        intent = INTENT_EXPENSE_DAY_SUMMARY
+    elif interrupt_type == INTERRUPT_LEAVE_SUBMIT:
         intent = INTENT_LEAVE_REQUEST
     return WizardInterruptDecision(
         interrupt_type=interrupt_type,
@@ -267,6 +280,20 @@ def rules_wizard_interrupt(
             INTERRUPT_NEW_EXPENSE, confidence=0.99, source="rules_new_expense"
         )
 
+    from chat.services.expense_workflow import wants_expense_spend_recap_query
+
+    if wants_expense_spend_recap_query(text):
+        return _map_interrupt_to_outputs(
+            INTERRUPT_EXPENSE_RECAP, confidence=0.99, source="rules_expense_recap"
+        )
+
+    from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+
+    if wants_defer_expense_for_leave_submit(text):
+        return _map_interrupt_to_outputs(
+            INTERRUPT_LEAVE_SUBMIT, confidence=0.99, source="rules_leave_submit"
+        )
+
     return WizardInterruptDecision()
 
 
@@ -284,6 +311,8 @@ def _context_block(context: WizardInterruptContext) -> str:
             lines.append("Leave is at review/confirm.")
         if context.pending_leave_step:
             lines.append(f"Pending leave step: {context.pending_leave_step}")
+    if context.leave_draft_summary:
+        lines.append(f"Leave draft: {context.leave_draft_summary}")
     if context.has_suspended_leave:
         lines.append("Suspended leave snapshot: yes")
     if context.has_suspended_expense:
@@ -375,6 +404,8 @@ def interrupt_is_workflow_switch(decision: WizardInterruptDecision) -> bool:
         INTERRUPT_NEW_EXPENSE,
         INTERRUPT_RESUME_LEAVE,
         INTERRUPT_RESUME_EXPENSE,
+        INTERRUPT_EXPENSE_RECAP,
+        INTERRUPT_LEAVE_SUBMIT,
     )
 
 
@@ -407,12 +438,36 @@ def build_leave_interrupt_context(
     pending_leave_step: str = "",
     leave_review_pending: bool = False,
 ) -> WizardInterruptContext:
-    from chat.services.workflow_suspend import has_suspended_expense
+    from chat.services.leave_fsm import read_leave_state
+    from chat.services.workflow_suspend import has_suspended_expense, has_suspended_leave
 
     wf = workflow_state or {}
+    leave_summary = ""
+    st = read_leave_state(wf)
+    draft = dict(st.get("draft") or {})
+    if draft:
+        parts = [
+            str(draft.get("start_date") or ""),
+            str(draft.get("end_date") or ""),
+            str(draft.get("leave_payment_category") or ""),
+            str(draft.get("day_scope") or ""),
+        ]
+        leave_summary = ", ".join(p for p in parts if p)
+    elif has_suspended_leave(wf):
+        sl = wf.get("suspended_leave") or {}
+        sd = dict(sl.get("draft") or {})
+        parts = [
+            str(sd.get("start_date") or ""),
+            str(sd.get("end_date") or ""),
+            str(sd.get("leave_payment_category") or ""),
+            str(sd.get("day_scope") or ""),
+        ]
+        leave_summary = ", ".join(p for p in parts if p)
     return WizardInterruptContext(
         leave_active=True,
         leave_review_pending=leave_review_pending,
         has_suspended_expense=has_suspended_expense(wf),
+        has_suspended_leave=has_suspended_leave(wf),
         pending_leave_step=pending_leave_step or "",
+        leave_draft_summary=leave_summary,
     )

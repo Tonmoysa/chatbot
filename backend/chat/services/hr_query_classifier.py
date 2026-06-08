@@ -46,6 +46,9 @@ DATE_NONE = "none"
 
 _HR_QUERY_LLM_SYSTEM = """You classify HR assistant user messages (leave, expense, attendance, company policy).
 
+CONTEXT may describe an active leave or expense wizard and parked (suspended) drafts.
+Side questions during a wizard are common — classify what the user wants NOW, not the active form step.
+
 Return STRICT JSON only:
 {
   "query_kind": "expense_day_summary" | "expense_meta" | "expense_recall" | "expense_status" |
@@ -59,7 +62,7 @@ RULES
 - expense_meta: user asks what the bot added / current draft / "ki add korcho" / "কত কস্ট এড করছি"
 - expense_recall: user asks what they submitted or added on a PAST day
   Examples: "লাস্ট দিনে কোন এক্সপেন্স দিছিলাম", "goto kal ki kharcha dilam", "what did I submit yesterday"
-- expense_day_summary: today's spend total / list / summary (not submitting new lines)
+- expense_day_summary: today's spend total / list / summary (not submitting new lines); also pending draft in session — "pending kono expense ache?", "pending expense ta daw", "amar kache pending kharcha ache ki?"
 - expense_status: submit done? / reference / tracking (not a new claim line with amounts)
 - expense_claim: user lists NEW costs with amounts (lunch 100, bus 50)
 - leave_request: apply for leave (not policy question)
@@ -165,10 +168,11 @@ def rules_classify_hr_query(
     from chat.services.expense.expense_total_dispute import is_expense_total_check_query
     from chat.services.expense.session_action_memory import wants_expense_meta_question
     from chat.services.expense.session_ledger import (
+        wants_pending_expense_query,
         wants_recent_expense_recall_query,
         wants_session_expense_ledger_query,
     )
-    from chat.services.expense_workflow import message_mentions_expense_spend
+    from chat.services.expense_workflow import message_mentions_expense_spend, wants_expense_spend_recap_query
     from chat.services.intent_detector import (
         _strong_expense_claim,
         _strong_expense_day_summary,
@@ -203,6 +207,14 @@ def rules_classify_hr_query(
             date_reference=DATE_YESTERDAY,
         )
 
+    if wants_pending_expense_query(raw):
+        return _finish_decision(
+            QUERY_EXPENSE_DAY_SUMMARY,
+            confidence=CONFIDENCE_RULES,
+            source="rules_pending_expense_query",
+            date_reference=DATE_TODAY,
+        )
+
     if wants_expense_meta_question(raw):
         return _finish_decision(
             QUERY_EXPENSE_META, confidence=CONFIDENCE_RULES, source="rules_expense_meta"
@@ -215,7 +227,11 @@ def rules_classify_hr_query(
             source="rules_expense_total_check",
         )
 
-    if _strong_expense_day_summary(raw) or wants_session_expense_ledger_query(raw):
+    if (
+        _strong_expense_day_summary(raw)
+        or wants_session_expense_ledger_query(raw)
+        or wants_expense_spend_recap_query(raw)
+    ):
         date_ref = DATE_NONE
         if re.search(
             r"(?:লাস্ট\s*দিন|গত\s*দিন|yesterday|goto\s*kal|গতকাল|কালকে)",
@@ -357,6 +373,39 @@ def _llm_classify_hr_query(
     return decision
 
 
+def hr_query_llm_allowed_during_wizard(
+    message: str,
+    workflow_state: dict[str, Any] | None = None,
+) -> bool:
+    """
+    Side questions during an active wizard still need LLM when regex is unsure.
+    Facts/decisions stay rule-bound; LLM only classifies intent.
+    """
+    raw = (message or "").strip()
+    if not raw or len(raw) < 5:
+        return False
+    try:
+        from chat.services.expense_workflow import wants_expense_spend_recap_query
+        from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+
+        from chat.services.expense.session_ledger import wants_pending_expense_query
+
+        if (
+            wants_expense_spend_recap_query(raw)
+            or wants_pending_expense_query(raw)
+            or wants_defer_expense_for_leave_submit(raw)
+        ):
+            return True
+    except Exception:
+        pass
+    if _HR_ADJACENT_RE.search(raw):
+        return True
+    wf = workflow_state or {}
+    if wf.get("suspended_leave") or wf.get("suspended_expense"):
+        return True
+    return False
+
+
 def _should_try_llm(message: str, rules: HrQueryDecision) -> bool:
     raw = (message or "").strip()
     if not raw or len(raw) < 5:
@@ -379,6 +428,7 @@ def classify_hr_query(
     trace_id: str = "",
     use_llm: bool = True,
     llm: LLMClient | None = None,
+    wizard_side_llm: bool = False,
 ) -> HrQueryDecision:
     """
     Rules-first HR query classification with optional LLM fallback.
@@ -395,7 +445,7 @@ def classify_hr_query(
         _turn_cache[cache_key] = rules
         return rules
 
-    if use_llm and _should_try_llm(message, rules):
+    if use_llm and (_should_try_llm(message, rules) or wizard_side_llm):
         llm_decision = _llm_classify_hr_query(
             message, context=ctx, trace_id=trace_id, llm=llm
         )
