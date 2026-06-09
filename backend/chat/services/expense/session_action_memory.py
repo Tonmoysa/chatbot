@@ -65,6 +65,58 @@ def format_submitted_expense_edit_blocked_answer(
     )
 
 
+_SUBMIT_TIMING_QUESTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:can|could|may)\s+(?:i|we)\b.{0,35}\bsubmit\b"
+    r"|"
+    r"\b(?:do|should)\s+(?:i|we)\s+(?:need\s+to|have\s+to)\s+submit\b"
+    r"|"
+    r"\b(?:must|need|have\s+to|required)\b.{0,20}\bsubmit\b"
+    r"|"
+    r"(?:pore|por|later|letter|tomorrow|ekhon|akhon|now).{0,25}(?:submit|জমা|joma)"
+    r"|"
+    r"(?:submit|জমা|joma).{0,25}(?:pore|por|later|letter|tomorrow|ekhon|akhon|now|পরে|পর)"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def wants_expense_submit_timing_question(message: str) -> bool:
+    """User asks whether/when they must submit (draft still open — not a status lookup)."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if wants_post_submit_edit_question(raw):
+        return False
+    low = raw.lower()
+    if not re.search(r"\bsubmit\b", low) and not re.search(r"(জমা|joma)", raw, re.I | re.UNICODE):
+        return False
+    if _SUBMIT_TIMING_QUESTION_RE.search(raw):
+        return True
+    if re.search(r"\b(?:can|could|may)\b", low) and re.search(
+        r"\b(?:later|letter|now|pore|por|tomorrow|must|need)\b", low
+    ):
+        return True
+    return bool(
+        re.search(r"\bsubmit\b\s*\?", low)
+        and re.search(r"\b(?:can|could|later|letter|now|pore|when)\b", low)
+    )
+
+
+def wants_expense_draft_persistence_question(message: str) -> bool:
+    """User asks if the in-session draft will be kept for later."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    return bool(
+        re.search(r"\b(?:save|saved|keep|kept|retain|persist|thakbe|thakbe)\b", low)
+        and re.search(r"\b(?:draft|session|later|pore|tomorrow|chat)\b", low)
+    ) or bool(
+        re.search(r"(draft|খসড়া|ড্রাফট).{0,25}(save|thakbe|থাকবে|রাখবে)", raw, re.I | re.UNICODE)
+    )
+
+
 def wants_post_submit_edit_question(message: str) -> bool:
     """User asks whether they can edit after CRM submit (policy/meta, not a draft edit)."""
     raw = (message or "").strip()
@@ -100,6 +152,10 @@ def wants_expense_meta_question(message: str) -> bool:
     if is_expense_total_check_query(message):
         return False
     if wants_post_submit_edit_question(message):
+        return True
+    if wants_expense_submit_timing_question(message):
+        return True
+    if wants_expense_draft_persistence_question(message):
         return True
     low = raw.lower()
     if wants_expense_history_query(message):
@@ -283,6 +339,30 @@ def record_expense_corrected(
     )
 
 
+def record_pending_expense_discarded(
+    workflow_state: dict[str, Any],
+    *,
+    entry: dict[str, Any],
+    items: list[dict[str, Any]],
+    incurred_date_iso: str = "",
+    stage: str = "collecting",
+) -> dict[str, Any]:
+    amt = float(entry.get("amount") or 0)
+    cat = str(entry.get("category") or "").strip()
+    detail = f"{cat} " if cat else ""
+    summary = f"Removed incomplete pending line: {detail}{amt:g} Tk (user confirmed)."
+    total = sum(float(x.get("amount") or 0) for x in items)
+    return record_bot_action(
+        workflow_state,
+        action_type="expense_pending_discarded",
+        summary=summary,
+        items=[dict(entry)],
+        total=total,
+        stage=stage,
+        incurred_date_iso=incurred_date_iso,
+    )
+
+
 def record_expense_lines_added(
     workflow_state: dict[str, Any],
     *,
@@ -343,6 +423,126 @@ def read_last_bot_action(workflow_state: dict[str, Any] | None) -> dict[str, Any
     return dict(action) if isinstance(action, dict) else {}
 
 
+def _format_submit_timing_answer(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    stage: str,
+    *,
+    lang: str | None = None,
+) -> str:
+    """Explain that draft submit can wait until the user finishes the wizard."""
+    pending = block.get("pending_line") if isinstance(block.get("pending_line"), dict) else {}
+    pending_amt = float(pending.get("amount") or 0)
+    pending_step = str(block.get("pending_step") or "").strip().lower()
+    last_sub = wf.get("expense_last_submission") or {}
+    ref = str(last_sub.get("reference_id") or "")
+
+    if not block.get("active"):
+        if ref:
+            if lang == "en":
+                return (
+                    f"Your last expense (`{ref}`) is already **submitted**. "
+                    "You can start a **new** expense anytime and submit when ready."
+                )
+            return (
+                f"আপনার শেষ expense (`{ref}`) **submit** হয়ে গেছে। "
+                "নতুন খরচ যেকোনো সময় শুরু করে পরে **joma daw** করতে পারবেন।"
+            )
+        if lang == "en":
+            return (
+                "Yes — you can log expenses anytime and **submit later** in this chat session. "
+                "Example: **lunch 200**, then **done** or **joma daw** when ready."
+            )
+        return (
+            "হ্যাঁ — আপনি যেকোনো সময় expense লিখে **পরে submit** করতে পারবেন (এই session-এ)।\n"
+            "যেমন: **lunch 200**, তারপর প্রস্তুত হলে **done** বা **joma daw**।"
+        )
+
+    if pending_step == "category" and pending_amt > 0:
+        if lang == "en":
+            return (
+                f"Yes — you can **submit later**. I saved **{pending_amt:g} Tk** in this session.\n"
+                "First reply with a **category** (e.g. lunch, snack, bus), "
+                "then add any other lines and say **done** or **joma daw** when ready."
+            )
+        if lang == "banglish":
+            return (
+                f"হ্যাঁ — **পরে submit** করতে পারবেন। **{pending_amt:g} Tk** এই session-এ save আছে।\n"
+                "আগে **category** বলুন (যেমন lunch, snack, bus), "
+                "তারপর **done** / **joma daw** দিয়ে submit করুন।"
+            )
+        return (
+            f"হ্যাঁ — **পরে submit** করতে পারবেন। **{pending_amt:g} Tk** এই session-এ সংরক্ষিত আছে।\n"
+            "আগে **category** বলুন (যেমন lunch, snack, bus), "
+            "তারপর **done** বা **joma daw** দিয়ে জমা দিন।"
+        )
+
+    if stage == "submit_confirm":
+        if lang == "en":
+            return (
+                "You're at the **final submit** step now. Reply **yes** / **joma daw** to send to CRM, "
+                "or **no** to go back and review. If you leave mid-session, the draft stays saved here."
+            )
+        return (
+            "এখন **চূড়ান্ত submit** ধাপে আছেন। CRM-এ পাঠাতে **yes** / **joma daw** দিন, "
+            "আবার দেখতে **no** বলুন। Session ছাড়লেও draft এখানে থাকবে।"
+        )
+
+    if stage == "review":
+        if lang == "en":
+            return (
+                "Yes — submit when you're ready. Review the summary, then say **yes** or **joma daw**. "
+                "No rush; the draft stays in this session."
+            )
+        return (
+            "হ্যাঁ — প্রস্তুত হলে submit করুন। Summary দেখে **yes** বা **joma daw** বলুন। "
+            "তাড়াহুড়ো নেই — draft এই session-এ থাকবে।"
+        )
+
+    total = sum(float(x.get("amount") or 0) for x in items) + (
+        pending_amt if pending_amt and not items else 0
+    )
+    if lang == "en":
+        return (
+            f"Yes — you can **submit later**. Draft is saved in this session"
+            f"{f' (**{total:g} Tk**)' if total else ''}.\n"
+            "Finish your lines (category, routes if needed), then **done** or **joma daw**."
+        )
+    return (
+        f"হ্যাঁ — **পরে submit** করতে পারবেন। Draft এই session-এ save আছে"
+        f"{f' (**{total:g} Tk**)' if total else ''}।\n"
+        "লাইন শেষ করে **done** বা **joma daw** বলুন।"
+    )
+
+
+def _format_draft_persistence_answer(
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    lang: str | None = None,
+) -> str:
+    if not block.get("active"):
+        if lang == "en":
+            return (
+                "There's no open expense draft right now. "
+                "When you add lines, they stay in this chat session until you submit or cancel."
+            )
+        return (
+            "এখন কোনো open expense draft নেই। "
+            "লাইন add করলে submit বা cancel না করা পর্যন্ত এই session-এ থাকবে।"
+        )
+    if lang == "en":
+        return (
+            "Yes — your expense **draft is saved** in this chat session until you submit or cancel. "
+            f"Current stage: **{block.get('stage') or 'collecting'}**."
+        )
+    return (
+        "হ্যাঁ — expense **draft এই session-এ save** থাকবে, যতক্ষণ না submit বা cancel করেন।\n"
+        f"বর্তমান stage: **{block.get('stage') or 'collecting'}**।"
+    )
+
+
 def _format_items_brief(items: list[dict[str, Any]]) -> str:
     parts = []
     for row in items[:6]:
@@ -367,6 +567,40 @@ def format_meta_question_answer(
     items = draft_line_rows_for_block(block)
     stage = str(block.get("stage") or "")
     low = (message or "").lower()
+
+    if wants_expense_submit_timing_question(message):
+        return _format_submit_timing_answer(wf, block, items, stage, lang=lang)
+
+    if wants_expense_draft_persistence_question(message):
+        return _format_draft_persistence_answer(block, items, lang=lang)
+
+    raw = (message or "").strip()
+    if re.search(r"\b(kothai|where|koi|kothay|kothao|missing)\b", low) or re.search(
+        r"(age\s+toh|ager\s+to|আগে\s+তো|আগের)", raw, re.I | re.UNICODE
+    ):
+        from chat.services.expense.session_ledger import line_incompleteness_notes
+
+        all_rows = items
+        if all_rows:
+            lines_out: list[str] = []
+            for row in all_rows:
+                cat = str(row.get("category") or "").strip() or "—"
+                amt = float(row.get("amount") or 0)
+                notes = line_incompleteness_notes(row)
+                note_txt = f" — {'; '.join(notes)}" if notes else ""
+                lines_out.append(f"- {cat} · **{amt:g} Tk**{note_txt}")
+            total = sum(float(r.get("amount") or 0) for r in all_rows)
+            if lang == "en":
+                return (
+                    "Nothing was removed — your **full draft** in this session:\n"
+                    + "\n".join(lines_out)
+                    + f"\n\nDraft total: **{total:g} Tk** · stage **{stage or 'collecting'}**."
+                )
+            return (
+                "কিছু **মুছে যায়নি** — session-এ আপনার **পুরো draft**:\n"
+                + "\n".join(lines_out)
+                + f"\n\nমোট draft: **{total:g} Tk** · stage **{stage or 'collecting'}**।"
+            )
 
     if wants_post_submit_edit_question(message):
         last_sub = wf.get("expense_last_submission") or {}
@@ -482,6 +716,23 @@ def format_meta_question_answer(
             else:
                 head += f"\n\nআপনার **নতুন draft** (submit হয়নি): **{pending:g} Tk**।"
         return head
+
+    if atype == "expense_pending_discarded":
+        amt = float(action.get("total") or 0)
+        discarded = list(action_items)
+        if discarded:
+            row = discarded[0]
+            amt = float(row.get("amount") or amt)
+        stage_hint = stage or str(action.get("stage") or "")
+        if lang == "en":
+            return (
+                f"I **removed** an incomplete pending line (**{amt:g} Tk**) from your draft "
+                f"(you confirmed). Stage: **{stage_hint}**."
+            )
+        return (
+            f"আপনার confirm-এ incomplete pending line (**{amt:g} Tk**) draft থেকে **সরিয়ে** দিয়েছি।\n"
+            f"Stage: **{stage_hint}**।"
+        )
 
     if atype in ("expense_corrected", "expense_line_added") or action_items:
         total = float(action.get("total") or sum(float(x.get("amount") or 0) for x in action_items))

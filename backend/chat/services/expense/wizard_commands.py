@@ -43,8 +43,10 @@ _REMOVE_TYPO_CAT_RE = re.compile(
 _SUBMIT_QUESTION_RE = re.compile(
     r"(?:"
     r"\b(?:can|could|may)\s+(?:i|we)\b.{0,40}\bsubmit\b|"
+    r"\b(?:do|should)\s+(?:i|we)\s+(?:need\s+to|have\s+to)\s+submit\b|"
+    r"\b(?:must|need|have\s+to|required)\b.{0,25}\bsubmit\b|"
     r"\b(?:after|before|already|once)\s+submit\b|"
-    r"\bsubmit\b\s*\?|"
+    r"\bsubmit\b.{0,20}\?|"
     r"\b(?:edit|change|update|correct|fix)\b.{0,40}\bsubmit\b|"
     r"\bsubmit\b.{0,40}\b(?:edit|change|update|correct|fix)\b|"
     r"submit\s+(?:hoise|hoyeche|kora\s+hoise|done)\s*ki|"

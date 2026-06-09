@@ -234,6 +234,8 @@ def _wizard_deterministic_fallback(
     lang = detect_user_language(message)
     if general_out_of_scope:
         return build_out_of_scope_message(message, lang=lang)
+    if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
+        return None
     if is_expense_in_progress(workflow_state):
         from chat.services.expense.wizard_commands import expense_wizard_help_hint
 
@@ -241,6 +243,33 @@ def _wizard_deterministic_fallback(
     from chat.services.workflow_priority import leave_wizard_help_hint
 
     return leave_wizard_help_hint(lang)
+
+
+def _expense_chitchat_workflow_hint(
+    workflow_state: dict[str, Any] | None, *, user_message: str = ""
+) -> str | None:
+    """Soft LLM hint when user greets during an active/paused expense draft."""
+    wf = workflow_state or {}
+    if not is_expense_in_progress(wf):
+        return None
+    lang = detect_user_language(user_message)
+    if is_expense_paused(wf):
+        return _expense_paused_workflow_hint(lang)
+    block = read_expense_block(wf)
+    stage = str(block.get("stage") or "collecting")
+    if lang == "en":
+        return (
+            "The user has an active expense draft (not submitted). "
+            f"Current stage: {stage}. Reply naturally to their greeting — "
+            "do NOT list expense commands or say 'draft is saved'. "
+            "At most one short optional line that they can continue the expense when ready."
+        )
+    return (
+        "User er expense draft active ache (submit hoyni). "
+        f"Stage: {stage}. Greeting e naturally reply din — "
+        "expense command list ba 'draft save ache' bolen na. "
+        "Dorkar hole ek line e continue korte parben bole soft hint din."
+    )
 
 
 def _intent_from_wizard_interrupt(
@@ -2738,15 +2767,55 @@ class ChatOrchestrator:
                 and is_expense_in_progress(getattr(session, "workflow_state", None) or {})
                 and not (_is_confirmation_yes(message) or _is_confirmation_no(message))
             ):
-                fallback = _wizard_deterministic_fallback(
-                    message,
-                    getattr(session, "workflow_state", None) or {},
-                    general_out_of_scope=general_out_of_scope,
+                from chat.services.policy_intent_helpers import (
+                    is_general_knowledge_out_of_scope as _gk_oos_exp,
                 )
-                if fallback:
-                    msg = fallback
-                    rstatus = "success"
-                    response_finalized = True
+
+                wf_exp_chat = getattr(session, "workflow_state", None) or {}
+                if general_out_of_scope or _gk_oos_exp(message):
+                    fallback = _wizard_deterministic_fallback(
+                        message,
+                        wf_exp_chat,
+                        general_out_of_scope=True,
+                    )
+                    if fallback:
+                        msg = fallback
+                        rstatus = "success"
+                        response_finalized = True
+                elif (
+                    hr_query_decision.query_kind == QUERY_CHITCHAT
+                    or _looks_like_chitchat(message, strict=True)
+                    or _is_fresh_start_greeting(message)
+                ):
+                    reply = conversational_reply(
+                        message=message,
+                        context_lines=context_lines,
+                        trace_id=trace_id,
+                        workflow_hint=_expense_chitchat_workflow_hint(
+                            wf_exp_chat, user_message=message
+                        ),
+                    )
+                    if reply:
+                        msg = reply
+                        if is_expense_paused(wf_exp_chat):
+                            foot = _expense_paused_side_footer(
+                                wf_exp_chat, user_message=message
+                            )
+                            if foot and foot not in msg:
+                                msg = msg.rstrip() + foot
+                        rstatus = "success"
+                        used_conversational = True
+                        response_finalized = True
+                if not response_finalized:
+                    fallback = _wizard_deterministic_fallback(
+                        message,
+                        wf_exp_chat,
+                        general_out_of_scope=general_out_of_scope,
+                    )
+                    if fallback:
+                        msg = fallback
+                        rstatus = "success"
+                        response_finalized = True
 
             if (
                 msg

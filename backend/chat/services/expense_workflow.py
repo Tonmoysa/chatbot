@@ -351,14 +351,74 @@ def wants_resume_or_show_expense(message: str) -> bool:
     )
 
 
+def _format_resume_draft_overview(
+    block: dict[str, Any], *, lang: str
+) -> str:
+    from chat.services.expense.session_ledger import (
+        draft_line_rows_for_block,
+        line_incompleteness_notes,
+    )
+
+    rows = draft_line_rows_for_block(block)
+    if not rows:
+        return ""
+
+    lines_out: list[str] = []
+    first_incomplete_idx: int | None = None
+    for idx, row in enumerate(rows, start=1):
+        cat = str(row.get("category") or "").strip() or "—"
+        amt = float(row.get("amount") or 0)
+        notes = line_incompleteness_notes(row)
+        note_txt = f" — {'; '.join(notes)}" if notes else ""
+        lines_out.append(f"{idx}. **{cat}** · **{amt:g} Tk**{note_txt}")
+        if first_incomplete_idx is None and notes:
+            first_incomplete_idx = idx
+
+    total = sum(float(r.get("amount") or 0) for r in rows)
+    if lang == "en":
+        head = f"**Draft so far** ({len(rows)} line(s) · **{total:g} Tk**):"
+        first_hint = ""
+        if first_incomplete_idx == 1:
+            first_hint = (
+                "\n\nYour **first** line still needs details — answer below."
+            )
+        elif first_incomplete_idx:
+            first_hint = (
+                f"\n\nLine **#{first_incomplete_idx}** still needs details — answer below."
+            )
+    elif lang == "banglish":
+        head = f"**Draft ekhon** ({len(rows)} line · **{total:g} Tk**):"
+        first_hint = ""
+        if first_incomplete_idx == 1:
+            first_hint = "\n\n**Prothom** line e abar category/route lagbe — niche uttor din."
+        elif first_incomplete_idx:
+            first_hint = (
+                f"\n\n**Line #{first_incomplete_idx}** e abar category/route lagbe."
+            )
+    else:
+        head = f"**এখন পর্যন্ত draft** ({len(rows)} লাইন · **{total:g} Tk**):"
+        first_hint = ""
+        if first_incomplete_idx == 1:
+            first_hint = (
+                "\n\n**প্রথম** খরচে এখনো category/route লাগবে — নিচে উত্তর দিন।"
+            )
+        elif first_incomplete_idx:
+            first_hint = (
+                f"\n\n**লাইন #{first_incomplete_idx}**-এ এখনো category/route লাগবে।"
+            )
+
+    return head + "\n" + "\n".join(lines_out) + first_hint + "\n\n"
+
+
 def format_expense_resume_message(
     workflow_state: dict[str, Any], *, user_message: str = ""
 ) -> str | None:
-    """Intro + the exact pending expense prompt (category / route / review)."""
+    """Intro + draft overview + the exact pending expense prompt (category / route / review)."""
     resume = expense_pending_prompt(workflow_state)
     if not resume:
         return None
-    lang = lang_from_block(_block(workflow_state))
+    block = _block(workflow_state)
+    lang = lang_from_block(block)
     if user_message:
         lang = resolve_reply_language(user_message, lang)
     if lang == "en":
@@ -376,7 +436,8 @@ def format_expense_resume_message(
             "আপনার খরচের আবেদন এখনো **জমা হয়নি**। "
             "যেখানে থেমেছিলেন:\n\n"
         )
-    return intro + resume
+    overview = _format_resume_draft_overview(block, lang=lang)
+    return intro + overview + resume
 
 
 def _restore_menu_choices(
@@ -849,6 +910,48 @@ def _extract_lines_from_message(
     )
 
 
+_FILLER_CLAUSE_RE = re.compile(
+    r"^(?:okay|ok|yes|yep|yeah|hmm|hm|thik|theek|fine|cool|ha|hmm+|"
+    r"হ্যাঁ|ঠিক|আচ্ছা|ওকে)\s*\.?$",
+    re.I | re.UNICODE,
+)
+
+
+def _is_filler_clause(clause: str) -> bool:
+    return bool(_FILLER_CLAUSE_RE.match((clause or "").strip()))
+
+
+def _meaningful_clauses(message: str) -> list[str]:
+    return [c for c in _split_clauses(message) if not _is_filler_clause(c)]
+
+
+def _looks_like_new_categorized_claim_during_category_pending(
+    message: str, pending: dict[str, Any]
+) -> bool:
+    """
+    Fresh amount+category line while an older amount waits for category.
+
+    Example: pending 200 Tk (no category) + ``lunch 100`` → new line, not slot answer.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    ext = extract_expense_items(text)
+    if len(ext.items) != 1 or ext.malformed:
+        return False
+    item = ext.items[0]
+    if not str(item.category or "").strip():
+        return False
+    try:
+        pending_amt = round(float(pending.get("amount") or 0), 2)
+        new_amt = round(float(item.amount or 0), 2)
+    except (TypeError, ValueError):
+        return False
+    if new_amt <= 0:
+        return False
+    return abs(pending_amt - new_amt) >= 0.01
+
+
 def _should_reset_pending_for_message(
     message: str, *, pending_step: str = ""
 ) -> bool:
@@ -862,7 +965,18 @@ def _should_reset_pending_for_message(
     if (pending_step or "").strip().lower() == "clarify":
         return False
     text = (message or "").strip()
-    if len(_split_clauses(text)) > 1:
+    step = (pending_step or "").strip().lower()
+    clauses = _meaningful_clauses(text)
+    if step == "category":
+        # "okay..lunch 100" must not wipe an older pending amount.
+        if len(clauses) <= 1:
+            if len(list(_AMOUNT_RE.finditer(text))) < 2:
+                ext = extract_expense_items(text)
+                if len(ext.items) + len(ext.malformed) <= 1:
+                    return False
+    elif len(clauses) > 1:
+        return True
+    elif len(_split_clauses(text)) > 1:
         return True
     if len(list(_AMOUNT_RE.finditer(text))) >= 2:
         return True
@@ -870,6 +984,63 @@ def _should_reset_pending_for_message(
     if len(ext.items) + len(ext.malformed) > 1:
         return True
     return False
+
+
+def _ingest_new_claim_preserving_pending_category(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    pending: dict[str, Any],
+    message: str,
+    *,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    trace_id: str = "",
+    pipeline_result: ExpenseExtractionResult | None = None,
+) -> dict[str, Any]:
+    """Add a categorized line while keeping the older uncategorized pending amount."""
+    from chat.services.expense.session_action_memory import record_expense_lines_added
+
+    lang = lang_from_block(block)
+    ext = _extract_lines_from_message(message, pipeline_result=pipeline_result)
+    before_count = len(items)
+    items, blocked = _ingest_extracted_lines(
+        block,
+        items,
+        ext,
+        inc_iso=inc_iso,
+        message=message,
+        wf=wf,
+    )
+    if blocked:
+        return _pack_ingest_interrupt(wf, block, items, blocked, inc_iso=inc_iso)
+
+    # Keep the older uncategorized amount as the active pending slot.
+    if pending.get("amount") and not str(pending.get("category") or "").strip():
+        block["pending_line"] = dict(pending)
+        block["pending_step"] = "category"
+        set_expense_stage(block, STAGE_COLLECTING)
+
+    if len(items) > before_count:
+        wf = record_expense_lines_added(
+            wf,
+            new_items=items[before_count:],
+            all_items=items,
+            incurred_date_iso=inc_iso,
+            stage=str(block.get("stage") or STAGE_COLLECTING),
+        )
+
+    pending_amt = float(pending.get("amount") or 0)
+    q, facts = _ask_category_prompt(block, items, pending_amt, lang=lang)
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=q,
+        inc_iso=inc_iso,
+        message_facts=facts,
+    )
 
 
 def _pending_from_clause(clause: str) -> dict[str, Any] | None:
@@ -1160,12 +1331,24 @@ def _ingest_extracted_lines(
         if clarify:
             return out, clarify
 
-        block["pending_line"] = pending_entries[0]
-        block["pending_queue"] = pending_entries[1:]
+        existing_pending = _pending_entries_list(block)
+        merged_pending = list(existing_pending)
+        seen_amounts = {
+            round(float(e.get("amount") or 0), 2)
+            for e in merged_pending
+            if e.get("amount")
+        }
+        for entry in pending_entries:
+            amt_key = round(float(entry.get("amount") or 0), 2)
+            if amt_key in seen_amounts:
+                continue
+            merged_pending.append(dict(entry))
+            seen_amounts.add(amt_key)
+        _store_pending_entries(block, merged_pending)
         block["pending_step"] = "category"
         set_expense_stage(block, STAGE_COLLECTING)
         return out, _ask_category_prompt(
-            block, out, float(pending_entries[0]["amount"]), lang=lang
+            block, out, float(merged_pending[0]["amount"]), lang=lang
         )[0]
 
     return dedupe_expense_items(out), None
@@ -1668,6 +1851,21 @@ def _handle_pending_line(
     amt = float(pending.get("amount") or 0)
     lang = lang_from_block(block)
 
+    from chat.services.expense.pending_discard import try_handle_pending_discard_turn
+
+    discard_pack = try_handle_pending_discard_turn(
+        wf,
+        block,
+        items,
+        message,
+        inc_iso=inc_iso,
+        lang=lang,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+    )
+    if discard_pack:
+        return discard_pack
+
     if _wants_finish_collecting(message, trace_id=trace_id):
         done_incomplete = _respond_done_while_incomplete(
             wf, block, items, inc_iso=inc_iso, lang=lang
@@ -1800,6 +1998,18 @@ def _handle_pending_line(
         )
 
     if step == "category":
+        if _looks_like_new_categorized_claim_during_category_pending(message, pending):
+            return _ingest_new_claim_preserving_pending_category(
+                wf,
+                block,
+                items,
+                pending,
+                message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                trace_id=trace_id,
+            )
         if wants_resume_or_show_expense(message):
             resume_msg = format_expense_resume_message(
                 {"expense_request": block}, user_message=message
@@ -2078,12 +2288,26 @@ def process_expense_turn(
     )
     block["incurred_date_iso"] = inc_iso
 
+    from chat.services.expense.pending_discard import try_handle_pending_discard_turn
     from chat.services.expense.session_action_memory import (
         is_vague_expense_add,
         record_expense_lines_added,
         record_vague_add_prompt,
         vague_add_clarification,
     )
+
+    discard_pack = try_handle_pending_discard_turn(
+        wf,
+        block,
+        items,
+        message,
+        inc_iso=inc_iso,
+        lang=lang,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+    )
+    if discard_pack:
+        return discard_pack
 
     if stage == STAGE_COLLECTING and is_vague_expense_add(message):
         wf = record_vague_add_prompt(wf)
@@ -2429,6 +2653,24 @@ def process_expense_turn(
 
     pending = block.get("pending_line")
     if isinstance(pending, dict) and pending.get("amount"):
+        if (
+            str(block.get("pending_step") or "") == "category"
+            and _looks_like_new_categorized_claim_during_category_pending(
+                message, pending
+            )
+        ):
+            return _ingest_new_claim_preserving_pending_category(
+                wf,
+                block,
+                items,
+                dict(pending),
+                message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                trace_id=trace_id,
+                pipeline_result=pipeline_result,
+            )
         if _should_reset_pending_for_message(
             message, pending_step=str(block.get("pending_step") or "")
         ):

@@ -188,7 +188,19 @@ def build_user_message(
                 "needs_input",
             )
         if crm_payload.get("detail"):
-            # Avoid leaking low-quality backend phrasing like "Unknown request"
+            if crm_payload.get("expense_wizard_active"):
+                stage = str(crm_payload.get("expense_wizard_stage") or "")
+                if stage == "submit_confirm":
+                    return (
+                        "Your expense draft is at the **final submit** step — "
+                        "reply **yes** / **joma daw** to submit, or **no** to review again.",
+                        "needs_input",
+                    )
+                return (
+                    "Your expense draft is still open in this session — "
+                    "finish the details, then **done** or **joma daw** when you want to submit.",
+                    "needs_input",
+                )
             return ("I couldn't find that request. Please re-check the reference ID.", "needs_input")
         return ("Please provide a request reference to look up status.", "needs_input")
 

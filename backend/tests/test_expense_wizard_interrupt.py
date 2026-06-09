@@ -253,6 +253,46 @@ def test_compound_expense_metroral_typo_no_category_reask():
 
 
 @pytest.mark.django_db
+def test_hi_at_expense_review_is_natural_not_command_list(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.orchestrator.conversational_reply",
+        lambda **kwargs: "Hello! How can I help you today?",
+    )
+    orch = ChatOrchestrator()
+    emp = "exp-hi-review"
+    r1 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="lunch 50 taka",
+        session_id=None,
+        employee_id=emp,
+        trace_id="hi-rev-1",
+    )
+    sid = r1["_session_id"]
+    orch.run_chat(
+        company_id=COMPANY_ID,
+        message="শেষ",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="hi-rev-done",
+    )
+    r2 = orch.run_chat(
+        company_id=COMPANY_ID,
+        message="hi",
+        session_id=sid,
+        employee_id=emp,
+        trace_id="hi-rev-2",
+    )
+    msg = r2["response"]["message"] or ""
+    assert "Hello" in msg or "help" in msg.lower()
+    assert "expense form in progress" not in msg.lower()
+    assert "joma daw" not in msg.lower()
+
+
+@pytest.mark.django_db
 def test_greeting_during_expense_does_not_clear_draft():
     orch = ChatOrchestrator()
     emp = "exp-greet-keep"
@@ -282,6 +322,8 @@ def test_greeting_during_expense_does_not_clear_draft():
     assert msg.strip()
     assert "draft" not in msg.lower()
     assert "still saved" not in msg.lower()
+    assert "expense form in progress" not in msg.lower()
+    assert "lunch 100, bus 50" not in msg.lower()
 
 
 @pytest.mark.django_db
