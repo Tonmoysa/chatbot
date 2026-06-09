@@ -11,6 +11,36 @@ from django.core.cache import cache
 
 logger = logging.getLogger("hr_chatbot")
 
+_JSON_HTTP_FAILURES: dict[str, int] = {}
+_JSON_CIRCUIT_THRESHOLD = 3
+
+
+def clear_llm_trace_state(trace_id: str = "") -> None:
+    """Reset per-trace JSON LLM failure counters (call once per chat turn)."""
+    if not trace_id:
+        _JSON_HTTP_FAILURES.clear()
+        return
+    _JSON_HTTP_FAILURES.pop(trace_id.strip(), None)
+
+
+def _http_error_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        body_txt = ""
+        try:
+            body_txt = (exc.response.text or "")[:400]
+        except Exception:
+            pass
+        return f"HTTP {exc.response.status_code} {body_txt}".strip()
+    return type(exc).__name__
+
+
+def _json_circuit_open(trace_id: str) -> bool:
+    return _JSON_HTTP_FAILURES.get(trace_id, 0) >= _JSON_CIRCUIT_THRESHOLD
+
+
+def _record_json_http_failure(trace_id: str) -> None:
+    _JSON_HTTP_FAILURES[trace_id] = _JSON_HTTP_FAILURES.get(trace_id, 0) + 1
+
 
 def _strip_json_fence(text: str) -> str:
     t = text.strip()
@@ -64,13 +94,26 @@ class LLMClient:
     ) -> dict[str, Any] | None:
         if not self.is_configured():
             return None
+        if _json_circuit_open(trace_id):
+            logger.warning("llm_json_circuit_open trace_id=%s", trace_id)
+            return None
         for attempt in range(2):
-            raw = self._complete(system_prompt, user_prompt, trace_id, attempt)
+            use_json_format = attempt == 0
+            raw = self._complete(
+                system_prompt,
+                user_prompt,
+                trace_id,
+                attempt,
+                json_format=use_json_format,
+            )
             parsed = self._parse_json_object(raw)
             if parsed is not None:
                 return parsed
             logger.warning(
-                "llm_invalid_json trace_id=%s attempt=%s", trace_id, attempt + 1
+                "llm_invalid_json trace_id=%s attempt=%s json_format=%s",
+                trace_id,
+                attempt + 1,
+                use_json_format,
             )
         return None
 
@@ -119,12 +162,18 @@ class LLMClient:
             logger.warning(
                 "llm_http_error trace_id=%s err=%s mode=text",
                 trace_id,
-                type(exc).__name__,
+                _http_error_detail(exc),
             )
             return None
 
     def _complete(
-        self, system_prompt: str, user_prompt: str, trace_id: str, attempt: int
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        trace_id: str,
+        attempt: int,
+        *,
+        json_format: bool = True,
     ) -> str | None:
         url = f"{self.base}/chat/completions"
         headers = {
@@ -132,19 +181,20 @@ class LLMClient:
             "Content-Type": "application/json",
         }
         extra = ""
-        if attempt == 1:
+        if attempt == 1 or not json_format:
             extra = (
                 "\nReturn a single JSON object only. No markdown. No explanation."
             )
-        body = {
+        body: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt + extra},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.1,
-            "response_format": {"type": "json_object"},
         }
+        if json_format:
+            body["response_format"] = {"type": "json_object"}
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 r = client.post(url, headers=headers, json=body)
@@ -157,7 +207,14 @@ class LLMClient:
                 .strip()
             )
         except Exception as exc:
-            logger.warning("llm_http_error trace_id=%s err=%s", trace_id, type(exc).__name__)
+            if json_format:
+                _record_json_http_failure(trace_id)
+            logger.warning(
+                "llm_http_error trace_id=%s err=%s json_format=%s",
+                trace_id,
+                _http_error_detail(exc),
+                json_format,
+            )
             return None
 
     def embed_texts(

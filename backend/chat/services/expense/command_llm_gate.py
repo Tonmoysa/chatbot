@@ -11,7 +11,7 @@ from chat.services.expense.expense_confirm import (
     looks_like_expense_correction,
 )
 from chat.services.expense.wizard_commands import (
-    wants_expense_done_command,
+    wants_expense_done_command_rules_only,
     wants_expense_submit_command,
 )
 
@@ -33,7 +33,7 @@ def correction_llm_should_use(
         return False
     if is_confirmation_yes(text) or is_confirmation_no(text):
         return False
-    if wants_expense_submit_command(text) or wants_expense_done_command(text):
+    if wants_expense_submit_command(text) or wants_expense_done_command_rules_only(text):
         return False
     if looks_like_compound_expense_claim(text):
         return False

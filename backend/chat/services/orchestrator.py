@@ -563,6 +563,24 @@ def _detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+submit_status",
         }
+    from chat.services.expense.session_action_memory import (
+        looks_like_submitted_expense_correction_attempt,
+        wants_expense_meta_question,
+        wants_post_submit_edit_question,
+    )
+
+    if wants_post_submit_edit_question(message) or wants_expense_meta_question(message):
+        return {
+            "intent": INTENT_EXPENSE_STATUS,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+meta",
+        }
+    if looks_like_submitted_expense_correction_attempt(workflow_state, message):
+        return {
+            "intent": INTENT_EXPENSE_STATUS,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+post_submit_edit_blocked",
+        }
     if _is_confirmation_yes(message) or _is_confirmation_no(message):
         return {
             "intent": INTENT_EXPENSE_CLAIM,
@@ -591,14 +609,6 @@ def _detect_intent_during_expense_workflow(
             "intent": INTENT_EXPENSE_DAY_SUMMARY,
             "confidence": 0.99,
             "source": "expense_workflow_gate+day_summary",
-        }
-    from chat.services.expense.session_action_memory import wants_expense_meta_question
-
-    if wants_expense_meta_question(message):
-        return {
-            "intent": INTENT_EXPENSE_STATUS,
-            "confidence": 0.99,
-            "source": "expense_workflow_gate+meta",
         }
     if _is_policy_interrupt_message(message):
         return {
@@ -820,6 +830,12 @@ class ChatOrchestrator:
         document_text: str | None = None,
         idempotency_key: str = "",
     ) -> dict[str, Any]:
+        from chat.services.expense.done_intent_llm import clear_done_intent_cache
+        from chat.services.llm_client import clear_llm_trace_state
+
+        clear_done_intent_cache(trace_id)
+        clear_llm_trace_state(trace_id)
+
         session = self.memory.get_or_create_session(
             company_id=company_id,
             employee_id=employee_id,
@@ -1333,7 +1349,11 @@ class ChatOrchestrator:
                 INTENT_EXPENSE_STATUS,
                 INTENT_REQUEST_STATUS,
             ):
-                pass
+                if intent == INTENT_EXPENSE_DAY_SUMMARY and is_expense_paused(wf_state):
+                    wf_state = _persist_workflow_state(
+                        session, resume_expense_session(wf_state)
+                    )
+                    log_step(trace_id, "expense_wizard_resumed_for_summary", {})
             elif intent == INTENT_HR_POLICY:
                 if not is_expense_paused(wf_state):
                     session.workflow_state = pause_expense_session(wf_state)
@@ -1434,13 +1454,25 @@ class ChatOrchestrator:
             wants_expense_submit_command,
         )
 
+        from chat.services.expense.session_action_memory import (
+            looks_like_submitted_expense_correction_attempt as _submitted_edit_block,
+            wants_expense_meta_question as _wants_expense_meta_lock,
+            wants_post_submit_edit_question as _wants_post_submit_edit,
+        )
+
         expense_wizard_command_turn = wants_expense_submit_command(
             message
         ) or is_expense_wizard_command(message)
+        expense_meta_turn = (
+            _wants_expense_meta_lock(message)
+            or _wants_post_submit_edit(message)
+            or _submitted_edit_block(wf_gate, message)
+        )
 
         if (
             wizard_dismissed_reason is None
             and is_expense_in_progress(wf_gate)
+            and not expense_meta_turn
             and (
                 expense_wizard_command_turn
                 or intent
@@ -1848,14 +1880,24 @@ class ChatOrchestrator:
                 stage_def = str(exp_block.get("stage") or "")
                 if stage_def in ("review", "submit_confirm"):
                     expense_turn_message = "yes"
-            if wants_expense_summary(message):
+            from chat.services.expense.expense_confirm import looks_like_expense_correction
+            from chat.services.expense_workflow import _wants_finish_collecting_rules_only
+
+            if wants_expense_summary(message) and not looks_like_expense_correction(
+                message
+            ):
+                if is_expense_paused(wf_exp):
+                    wf_exp = resume_expense_session(wf_exp)
                 exp_block = wf_exp.get("expense_request") or {}
                 exp_items = list(exp_block.get("items") or [])
                 pending = exp_block.get("pending_line")
                 has_pending = isinstance(pending, dict) and pending.get("amount")
-                if exp_items and not has_pending:
+                if (
+                    exp_items
+                    and not has_pending
+                    and _wants_finish_collecting_rules_only(message)
+                ):
                     expense_turn_message = "শেষ"
-
             exp_pack = process_expense_turn(
                 workflow_state=wf_exp,
                 message=expense_turn_message,
@@ -1992,6 +2034,8 @@ class ChatOrchestrator:
                     )
                     from chat.services.expense.session_action_memory import (
                         format_meta_question_answer,
+                        format_submitted_expense_edit_blocked_answer,
+                        looks_like_submitted_expense_correction_attempt,
                         record_expense_total_check,
                         wants_expense_meta_question,
                     )
@@ -2024,6 +2068,16 @@ class ChatOrchestrator:
                             )
                             session.workflow_state = wf_chk
                             session.save(update_fields=["workflow_state", "updated_at"])
+                    elif looks_like_submitted_expense_correction_attempt(
+                        getattr(session, "workflow_state", None) or {},
+                        message,
+                    ):
+                        crm_payload["expense_meta_answer"] = (
+                            format_submitted_expense_edit_blocked_answer(
+                                getattr(session, "workflow_state", None) or {},
+                                lang=detect_user_language(message),
+                            )
+                        )
                     elif wants_expense_meta_question(message):
                         meta = format_meta_question_answer(
                             getattr(session, "workflow_state", None) or {},
@@ -2700,8 +2754,6 @@ class ChatOrchestrator:
                 and is_expense_in_progress(getattr(session, "workflow_state", None) or {})
                 and not (_is_confirmation_yes(message) or _is_confirmation_no(message))
             ):
-                from chat.services.expense_workflow import wants_resume_or_show_expense
-
                 if wants_resume_or_show_expense(message):
                     msg = _append_expense_workflow_resume(
                         msg, getattr(session, "workflow_state", None) or {}

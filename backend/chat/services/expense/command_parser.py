@@ -9,6 +9,7 @@ from chat.services.expense.command_schema import (
 )
 from chat.services.expense.expense_confirm import (
     _ADD_RE,
+    _AMOUNT_INSTEAD_RE,
     _CAT_AMT_BAAD_RE,
     _CAT_ER_EXPENSE_AMOUNT_RE,
     _CAT_HOBE_RE,
@@ -210,6 +211,20 @@ def parse_correction_plan(message: str) -> CorrectionCommandPlan:
     if m_hobe and not plan.has_any_correction():
         plan.set_category_only = _normalize_remove_cat(m_hobe.group("cat"))
 
+    for m in _AMOUNT_INSTEAD_RE.finditer(low):
+        raw_new = m.group("new_amt") or m.group("new_amt2")
+        raw_old = m.group("old_amt") or m.group("old_amt2")
+        if not raw_new:
+            continue
+        try:
+            new_amt = float(raw_new.replace(",", "."))
+            old_amt = float(raw_old.replace(",", ".")) if raw_old else 0.0
+        except (TypeError, ValueError):
+            continue
+        pair = (new_amt, old_amt)
+        if pair not in plan.amount_replacements:
+            plan.amount_replacements.append(pair)
+
     return plan
 
 
@@ -276,6 +291,8 @@ def parse_wizard_flow_plan(
 ) -> WizardFlowCommandPlan:
     """Parse finish/submit navigation intents during collecting."""
     return WizardFlowCommandPlan(
-        finish_collecting=wants_expense_done_command(message, trace_id=trace_id),
+        finish_collecting=wants_expense_done_command(
+            message, trace_id=trace_id, use_llm=True
+        ),
         submit_draft=wants_expense_submit_command(message),
     )

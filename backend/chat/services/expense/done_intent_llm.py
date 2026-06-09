@@ -9,6 +9,8 @@ from chat.services.llm_client import LLMClient
 
 logger = logging.getLogger("hr_chatbot")
 
+_done_intent_cache: dict[tuple[str, str], bool] = {}
+
 _DONE_INTENT_LLM_SYSTEM = """You detect whether the user wants to FINISH entering expense lines and move on.
 
 They are in an expense wizard (collecting or clarify). Return ONLY JSON:
@@ -54,6 +56,16 @@ def llm_json_to_done_intent(raw: dict[str, Any] | None) -> bool:
     return conf >= 0.55
 
 
+def clear_done_intent_cache(trace_id: str = "") -> None:
+    """Drop cached done-intent results (call once per chat turn)."""
+    if not trace_id:
+        _done_intent_cache.clear()
+        return
+    tid = trace_id.strip()
+    for key in [k for k in _done_intent_cache if k[0] == tid]:
+        _done_intent_cache.pop(key, None)
+
+
 def parse_finish_collecting_llm(
     message: str,
     trace_id: str = "",
@@ -65,18 +77,25 @@ def parse_finish_collecting_llm(
     text = (message or "").strip()
     if not text:
         return False
+    tid = trace_id or "expense-done-intent"
+    cache_key = (tid, text.lower())
+    if cache_key in _done_intent_cache:
+        return _done_intent_cache[cache_key]
     client = LLMClient()
     try:
         data = client.chat_json(
             system_prompt=_DONE_INTENT_LLM_SYSTEM,
             user_prompt=text,
-            trace_id=trace_id or "expense-done-intent",
+            trace_id=tid,
         )
     except Exception as exc:
         logger.warning(
             "done_intent_llm_failed trace_id=%s err=%s",
-            trace_id or "expense-done-intent",
+            tid,
             type(exc).__name__,
         )
+        _done_intent_cache[cache_key] = False
         return False
-    return llm_json_to_done_intent(data)
+    result = llm_json_to_done_intent(data)
+    _done_intent_cache[cache_key] = result
+    return result

@@ -276,12 +276,15 @@ def parse_turn_rules(
     if not text:
         return TurnDecision()
 
+    from chat.services.expense.wizard_commands import wants_expense_done_command_rules_only
+
     if stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
-        if wants_expense_submit_command(text) or wants_expense_done_command(text):
+        done_cmd = wants_expense_done_command_rules_only(text)
+        if wants_expense_submit_command(text) or done_cmd:
             return TurnDecision(
                 turn_type=TURN_NAVIGATE,
                 confidence=1.0,
-                finish_collecting=wants_expense_done_command(text),
+                finish_collecting=done_cmd,
                 submit_draft=wants_expense_submit_command(text),
                 source="rules",
             )
@@ -290,11 +293,12 @@ def parse_turn_rules(
         if is_confirmation_no(text):
             return TurnDecision(turn_type=TURN_DENY, confidence=1.0, source="rules")
 
-    if wants_expense_submit_command(text) or wants_expense_done_command(text):
+    done_cmd = wants_expense_done_command_rules_only(text)
+    if wants_expense_submit_command(text) or done_cmd:
         return TurnDecision(
             turn_type=TURN_NAVIGATE,
             confidence=1.0,
-            finish_collecting=wants_expense_done_command(text),
+            finish_collecting=done_cmd,
             submit_draft=wants_expense_submit_command(text),
             source="rules",
         )

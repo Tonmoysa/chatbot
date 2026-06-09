@@ -47,7 +47,7 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
     )
     from chat.services.expense.wizard_commands import (
         is_expense_wizard_command,
-        wants_expense_done_command,
+        wants_expense_done_command_rules_only,
         wants_expense_submit_command,
     )
     from chat.services.expense_workflow import (
@@ -61,7 +61,7 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
         return False
     if is_expense_draft_status_question(text):
         return True
-    if wants_expense_submit_command(text) or wants_expense_done_command(text):
+    if wants_expense_submit_command(text) or wants_expense_done_command_rules_only(text):
         return True
     from chat.services.expense.clarify_praise import looks_like_wizard_praise_message
 
@@ -86,7 +86,5 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
     if parse_category_token(text) or parse_amount_only(text) is not None:
         return True
     if _looks_like_route_answer(text):
-        return True
-    if re.search(r"\d", text):
         return True
     return False

@@ -172,13 +172,13 @@ def rules_classify_hr_query(
             looks_like_expense_correction,
         )
         from chat.services.expense.wizard_commands import (
-            wants_expense_done_command,
+            wants_expense_done_command_rules_only,
             wants_expense_submit_command,
         )
 
         if (
             wants_expense_submit_command(raw)
-            or wants_expense_done_command(raw)
+            or wants_expense_done_command_rules_only(raw)
             or is_confirmation_yes(raw)
             or is_confirmation_no(raw)
             or looks_like_expense_correction(raw)

@@ -15,6 +15,81 @@ KEY_BOT_ACTION_LOG = "bot_action_log"
 _MAX_ACTION_LOG = 8
 
 
+def looks_like_submitted_expense_correction_attempt(
+    workflow_state: dict[str, Any] | None,
+    message: str,
+) -> bool:
+    """User tries to edit amounts/lines but only a submitted batch exists (no active draft)."""
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+
+    wf = workflow_state or {}
+    block = read_expense_block(wf)
+    if block.get("active") and list(block.get("items") or []):
+        return False
+    last_sub = wf.get("expense_last_submission") or {}
+    action = read_last_bot_action(wf)
+    has_submitted = bool(str(last_sub.get("reference_id") or action.get("reference_id") or ""))
+    if not has_submitted and action.get("action_type") != "expense_submitted":
+        return False
+    return looks_like_expense_correction(message)
+
+
+def format_submitted_expense_edit_blocked_answer(
+    workflow_state: dict[str, Any] | None,
+    *,
+    lang: str | None = None,
+) -> str:
+    """Explain that submitted expenses cannot be edited in chat."""
+    wf = workflow_state or {}
+    action = read_last_bot_action(wf)
+    last_sub = wf.get("expense_last_submission") or {}
+    ref = str(last_sub.get("reference_id") or action.get("reference_id") or "")
+    if lang == "en":
+        if ref:
+            return (
+                f"Expense `{ref}` is already **submitted** — it cannot be edited in chat. "
+                "Contact CRM/Finance for post-submit changes."
+            )
+        return (
+            "Your expense is already **submitted** — it cannot be edited in chat. "
+            "Contact CRM/Finance for post-submit changes."
+        )
+    if ref:
+        return (
+            f"Expense `{ref}` **submit** হয়ে গেছে — chat-এ আর **edit করা যায় না**।\n"
+            "পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+        )
+    return (
+        "Expense **submit** হয়ে গেছে — chat-এ আর **edit করা যায় না**।\n"
+        "পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+    )
+
+
+def wants_post_submit_edit_question(message: str) -> bool:
+    """User asks whether they can edit after CRM submit (policy/meta, not a draft edit)."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if not (
+        re.search(r"\b(edit|change|update|correct|fix|modify)\b", low)
+        or re.search(r"(এডিট|সংশোধন|পরিবর্তন|ঠিক\s*কর)", raw, re.I | re.UNICODE)
+    ):
+        return False
+    if re.search(r"\b(?:before|age|prothom|first)\b", low) and re.search(
+        r"\bsubmit\b", low
+    ):
+        return False
+    return bool(
+        re.search(r"\bafter\s+submit\b", low)
+        or re.search(r"\bsubmitted\b", low)
+        or re.search(r"submit\s*(?:korar|korer|er)\s*por", low)
+        or re.search(r"submit\s*(?:korar|korer|er)\s*pare", low)
+        or re.search(r"জমা.{0,20}(?:পর|পরে)", raw, re.I | re.UNICODE)
+        or re.search(r"\bsubmit\b", low)
+    )
+
+
 def wants_expense_meta_question(message: str) -> bool:
     """User asks about the bot's last expense action (not a new claim line)."""
     raw = (message or "").strip()
@@ -24,6 +99,8 @@ def wants_expense_meta_question(message: str) -> bool:
 
     if is_expense_total_check_query(message):
         return False
+    if wants_post_submit_edit_question(message):
+        return True
     low = raw.lower()
     if wants_expense_history_query(message):
         return False
@@ -290,6 +367,29 @@ def format_meta_question_answer(
     items = draft_line_rows_for_block(block)
     stage = str(block.get("stage") or "")
     low = (message or "").lower()
+
+    if wants_post_submit_edit_question(message):
+        last_sub = wf.get("expense_last_submission") or {}
+        ref = str(last_sub.get("reference_id") or action.get("reference_id") or "")
+        if lang == "en":
+            if ref:
+                return (
+                    f"No — once expense `{ref}` is **submitted**, it cannot be edited in chat. "
+                    "Contact CRM/Finance for any post-submit changes."
+                )
+            return (
+                "No — **submitted** expenses cannot be edited in chat. "
+                "Contact CRM/Finance for post-submit changes."
+            )
+        if ref:
+            return (
+                f"না — expense `{ref}` একবার **submit** হয়ে গেলে chat-এ আর **edit করা যায় না**।\n"
+                "Submit-এর পর পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+            )
+        return (
+            "না — expense **submit** হয়ে গেলে chat-এ আর **edit করা যায় না**।\n"
+            "পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+        )
 
     submit_probe = bool(
         re.search(r"submit", low) and re.search(r"\b(ki|hoise|hoyeche|done|yet)\b", low)

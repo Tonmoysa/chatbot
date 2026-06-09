@@ -179,13 +179,28 @@ _FINISH_COLLECT_RE = re.compile(
 )
 
 
+def _wants_finish_collecting_rules_only(message: str) -> bool:
+    """Rules-only done-collecting — safe for intent/routing hot paths (no LLM)."""
+    from chat.services.expense.done_collecting import wants_expense_done_phrase
+    from chat.services.expense.wizard_commands import (
+        wants_expense_done_command_rules,
+        wants_expense_submit_command,
+    )
+
+    if wants_expense_submit_command(message):
+        return True
+    return wants_expense_done_command_rules(message) or wants_expense_done_phrase(message)
+
+
 def _wants_finish_collecting(message: str, *, trace_id: str = "") -> bool:
     from chat.services.expense.done_collecting import detect_finish_collecting_intent
     from chat.services.expense.wizard_commands import wants_expense_submit_command
 
     if wants_expense_submit_command(message):
         return True
-    return detect_finish_collecting_intent(message, trace_id=trace_id)
+    if _wants_finish_collecting_rules_only(message):
+        return True
+    return detect_finish_collecting_intent(message, trace_id=trace_id, use_llm=True)
 
 
 def _respond_done_while_incomplete(
@@ -566,7 +581,7 @@ def wants_expense_summary(message: str) -> bool:
             return False
     except Exception:
         pass
-    if _wants_finish_collecting(message):
+    if _wants_finish_collecting_rules_only(message):
         low_fc = (message or "").lower()
         if message_mentions_expense_spend(message):
             return True

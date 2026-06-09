@@ -43,6 +43,16 @@ def _looks_like_conversational_wrap_up(message: str) -> bool:
     )
 
 
+_AMOUNT_INSTEAD_HINT_RE = re.compile(
+    r"(?:"
+    r"(?:use|make|set)\s+\d+(?:[.,]\d{1,2})?\s+instead\s+of\s+\d+"
+    r"|"
+    r"\d+(?:[.,]\d{1,2})?\s+instead\s+of\s+\d+"
+    r")",
+    re.I,
+)
+
+
 _BARE_CONFIRM_RE = re.compile(
     r"^(?:"
     r"yes|yep|yeah|y|ok|okay|confirm|ha|hmm?\s*yes|thik\s*ache|thik|"
@@ -60,6 +70,8 @@ def done_intent_llm_should_use(message: str, *, wizard_stage: str = "") -> bool:
     if wizard_stage in ("review", "submit_confirm"):
         return False
     if _BARE_CONFIRM_RE.match(text):
+        return False
+    if _AMOUNT_INSTEAD_HINT_RE.search(text):
         return False
     try:
         from chat.services.expense.wizard_commands import wants_expense_submit_command

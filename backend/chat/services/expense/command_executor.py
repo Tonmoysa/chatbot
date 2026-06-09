@@ -155,6 +155,19 @@ def execute_correction_plan(
         if _set_category_amount(out, cat, new_amt):
             changed = True
 
+    for new_amt, old_amt in plan.amount_replacements:
+        applied = False
+        if old_amt > 0:
+            for row in out:
+                if round(float(row.get("amount") or 0), 2) == round(old_amt, 2):
+                    row["amount"] = new_amt
+                    changed = True
+                    applied = True
+                    break
+        if not applied and len(out) == 1:
+            out[0]["amount"] = new_amt
+            changed = True
+
     for cat, new_amt in plan.cat_er_amounts:
         if _set_category_amount(out, cat, new_amt):
             changed = True

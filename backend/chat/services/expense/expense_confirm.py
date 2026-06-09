@@ -211,6 +211,16 @@ _REPLACE_SETAKE_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+# "use 400 instead of 4000" / "400 instead of 4000" — amount-only swap on draft lines.
+_AMOUNT_INSTEAD_RE = re.compile(
+    r"(?:"
+    r"(?:use|make|set)\s+(?P<new_amt>\d+(?:[.,]\d{1,2})?)\s+instead\s+of\s+(?P<old_amt>\d+(?:[.,]\d{1,2})?)"
+    r"|"
+    r"(?P<new_amt2>\d+(?:[.,]\d{1,2})?)\s+instead\s+of\s+(?P<old_amt2>\d+(?:[.,]\d{1,2})?)"
+    r")",
+    re.I,
+)
+
 _CATEGORY_REPLACE_PATTERNS = (
     _REPLACE_RE,
     _REPLACE_KORE_DAW_RE,
@@ -305,6 +315,7 @@ def looks_like_expense_correction(message: str) -> bool:
         or _REPLACE_TA_CAT_RE.search(low)
         or _REPLACE_KE_KORO_RE.search(low)
         or _REPLACE_SETAKE_RE.search(low)
+        or _AMOUNT_INSTEAD_RE.search(low)
     ):
         return True
     if re.search(

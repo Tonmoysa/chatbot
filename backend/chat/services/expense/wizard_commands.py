@@ -39,11 +39,28 @@ _REMOVE_TYPO_CAT_RE = re.compile(
     re.I,
 )
 
+# Incidental "submit" in questions — not a wizard submit command.
+_SUBMIT_QUESTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:can|could|may)\s+(?:i|we)\b.{0,40}\bsubmit\b|"
+    r"\b(?:after|before|already|once)\s+submit\b|"
+    r"\bsubmit\b\s*\?|"
+    r"\b(?:edit|change|update|correct|fix)\b.{0,40}\bsubmit\b|"
+    r"\bsubmit\b.{0,40}\b(?:edit|change|update|correct|fix)\b|"
+    r"submit\s+(?:hoise|hoyeche|kora\s+hoise|done)\s*ki|"
+    r"submitted\s+yet|"
+    r"submit\s+kora\s+hoise\s*ki"
+    r")",
+    re.I | re.UNICODE,
+)
+
 
 def wants_expense_submit_command(message: str) -> bool:
     """User wants to submit or finish the draft (joma daw, submit koro, …)."""
     t = (message or "").strip()
     if not t:
+        return False
+    if _SUBMIT_QUESTION_RE.search(t):
         return False
     try:
         from chat.services.leave_confirm import (
@@ -69,7 +86,40 @@ def wants_expense_submit_command(message: str) -> bool:
             r"\b(hoyeche|hoyese|hoise|hoyechilo|complete|status|ki)\b", low
         ):
             return False
-    return bool(_SUBMIT_CMD_RE.search(t))
+    if not _SUBMIT_CMD_RE.search(t):
+        return False
+    if re.fullmatch(
+        r"(?:yes\s+)?(?:submit(?:\s+(?:it|this|now|please|koro|kor|debo|daw|dao))?|"
+        r"sumit|submmit|submite|"
+        r"(?:joma|জমা)\s*(?:daw|dao|de|diye|deb[eo]|koro|kor|kore\s*daw|kore\s*debo)|"
+        r"(?:joma|জমা)\s*(?:koro|kor))"
+        r"\s*\.?$",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"\b(?:submit|sumit|submmit|submite)\s+"
+        r"(?:it|this|now|please|koro|kor|debo|daw|dao)\b",
+        t,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"(?:joma|জমা)\s*(?:daw|dao|de|diye|deb[eo]|koro|kor|kore\s*daw|kore\s*debo)",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(r"(?:joma|জমা)\s*(?:koro|kor)", t, re.I | re.UNICODE):
+        return True
+    if re.search(
+        r"(?:হ্যাঁ|হ্যা|yes|yep|yeah)\s+submit\b",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
+    return False
 
 
 def wants_expense_done_command_rules(message: str) -> bool:
@@ -82,13 +132,20 @@ def wants_expense_done_command_rules(message: str) -> bool:
     return bool(re.search(r"\b(শেষ|আর\s*নেই|no\s+more)\b", t, re.I))
 
 
+def wants_expense_done_command_rules_only(message: str) -> bool:
+    """Rules-only done-collecting — safe for routing / intent / turn-parser hot paths."""
+    from chat.services.expense.done_collecting import wants_expense_done_phrase
+
+    return wants_expense_done_command_rules(message) or wants_expense_done_phrase(message)
+
+
 def wants_expense_done_command(
     message: str,
     *,
     trace_id: str = "",
-    use_llm: bool = True,
+    use_llm: bool = False,
 ) -> bool:
-    """User signals collecting is complete (rules + optional LLM)."""
+    """User signals collecting is complete (rules first; LLM only when use_llm=True)."""
     from chat.services.expense.done_collecting import detect_finish_collecting_intent
 
     return detect_finish_collecting_intent(
@@ -113,7 +170,9 @@ def parse_remove_category_command(message: str) -> str | None:
 
 def is_expense_wizard_command(message: str) -> bool:
     """True when message is a known expense wizard command (not free chit-chat)."""
-    if wants_expense_submit_command(message) or wants_expense_done_command(message):
+    if wants_expense_submit_command(message) or wants_expense_done_command_rules_only(
+        message
+    ):
         return True
     if parse_remove_category_command(message):
         return True
