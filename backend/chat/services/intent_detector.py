@@ -53,6 +53,14 @@ def _strong_hr_policy(message: str) -> bool:
 
 def _strong_expense_claim(message: str) -> bool:
     """Banglish / informal cost lines; do not match expense *status* or *summary* queries."""
+    # BN voice dumps: preprocess converts একশ/ষাট → digits before recap heuristics run.
+    try:
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+        if message_contains_expense_claim_lines(message):
+            return True
+    except Exception:
+        pass
     from chat.services.expense_workflow import wants_resume_or_show_expense
 
     if (
@@ -61,16 +69,6 @@ def _strong_expense_claim(message: str) -> bool:
         or wants_resume_or_show_expense(message)
     ):
         return False
-    # Structured category+amount lines (e.g. "lunch 100, train 60 uttora to mirpur")
-    # should be treated as an expense claim even if the user doesn't say "expense/cost".
-    try:
-        from chat.services.expense_extraction import extract_expense_items
-
-        ext = extract_expense_items(message or "")
-        if ext.items:
-            return True
-    except Exception:
-        pass
     low = (message or "").lower()
     if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
         r"\b(status|track|where)\b", low
@@ -372,6 +370,7 @@ _CANCEL_FORM_BN_RE = re.compile(
 _WIZARD_CONFIRM_SHORT_RE = re.compile(
     r"^(?:"
     r"yes|yep|yeah|yup|ok|okay|sure|fine|alright|"
+    r"ha|hae|haan|han|hmm|hmmm|ji|j|hoy|"
     r"no|nope|"
     r"হ্যাঁ|হ্যা|ঠিক\s*আছে|ঠিক|জমা\s*দাও|জমা\s*দিন|না|"
     r"thik\s*ache|thik|hmm?\s*yes|submit\s*koro|শেষ"
@@ -588,6 +587,16 @@ class IntentDetector:
                         INTENT_EXPENSE_CLAIM,
                         INTENT_UNKNOWN,
                     ):
+                        from chat.services.expense_extraction import (
+                            message_contains_expense_claim_lines,
+                        )
+
+                        if message_contains_expense_claim_lines(message):
+                            return {
+                                "intent": INTENT_EXPENSE_CLAIM,
+                                "confidence": 0.99,
+                                "source": "rules_override_claim_lines",
+                            }
                         return {
                             "intent": INTENT_EXPENSE_DAY_SUMMARY,
                             "confidence": 0.99,

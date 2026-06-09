@@ -65,6 +65,10 @@
 
 - **Existing leave workflows continue working**: **PASS** (`tests/test_decision_engine.py`, `tests/test_leave_wizard_side_question.py`, `tests/test_leave_wizard_policy_interrupt.py`)
 - **Existing expense workflows continue working**: **PASS** (`tests/test_decision_engine.py`, `tests/test_expense_workflow.py`, `tests/test_expense_wizard_interrupt.py`)
+- **P0/P1 expense clarify + corrections**: **PASS** (`tests/test_expense_p0_p1_regression.py`)
+- **P2/P3 LLM context + leave copy + interrupt sync**: **PASS** (`tests/test_expense_p2_p3.py`)
+- **Workflow state transitions**: **PASS** (`tests/test_workflow_state_transitions.py`, see `docs/WORKFLOW_STATE_MACHINES.md`)
+- **E2E leave→expense→policy→back→edit**: **PASS** (`tests/test_workflow_e2e_chain.py`)
 - **CRM integrations continue working**: **PASS** (mock CRM + API tests; see `tests/test_api_chat.py`, `tests/test_decision_engine.py`)
 - **Policy responses continue working**: **PASS** (`tests/test_kb_orchestrator.py`, `tests/test_policy_complaint.py`)
 - **RAG responses continue working**: **PASS** (`tests/test_kb_orchestrator.py`)

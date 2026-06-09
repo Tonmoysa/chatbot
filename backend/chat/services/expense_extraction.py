@@ -96,6 +96,9 @@ _BN_NUMBER_WORDS: dict[str, int] = {
     "পাঁচশো": 500,
     "পাঁচশ": 500,
     "পঞ্চাশ": 50,
+    "ষাট": 60,
+    "নব্বই": 90,
+    "আশি": 80,
     "চল্লিশ": 40,
     "ত্রিশ": 30,
     "বিশ": 20,
@@ -105,6 +108,35 @@ _BN_NUMBER_WORDS: dict[str, int] = {
     "তিন": 3,
     "চার": 4,
     "পাঁচ": 5,
+}
+
+# Compound Bengali amounts before single-word replacement (একশ বিশ → 120).
+_BN_COMPOUND_NUMBER_RE = re.compile(
+    r"(?P<hundreds>একশো|একশ|দুইশো|দুইশ|তিনশো|তিনশ|চারশো|চারশ|পাঁচশো|পাঁচশ)"
+    r"\s*(?P<tens>বিশ|ত্রিশ|চল্লিশ|পঞ্চাশ|ষাট|সত্তর|আশি|নব্বই)",
+    re.I,
+)
+_BN_HUNDREDS_MAP = {
+    "একশো": 100,
+    "একশ": 100,
+    "দুইশো": 200,
+    "দুইশ": 200,
+    "তিনশো": 300,
+    "তিনশ": 300,
+    "চারশো": 400,
+    "চারশ": 400,
+    "পাঁচশো": 500,
+    "পাঁচশ": 500,
+}
+_BN_TENS_MAP = {
+    "বিশ": 20,
+    "ত্রিশ": 30,
+    "চল্লিশ": 40,
+    "পঞ্চাশ": 50,
+    "ষাট": 60,
+    "সত্তর": 70,
+    "আশি": 80,
+    "নব্বই": 90,
 }
 
 _AMOUNT_RE = re.compile(
@@ -126,6 +158,8 @@ _BN_PLACE_ROMAN: dict[str, str] = {
     "মিরপুর": "mirpur",
     "মতিঝিল": "motijheel",
     "মতিজিল": "motijheel",
+    "কমলাপুর": "kamalapur",
+    "বিমানবন্দর": "airport",
     "উত্তরা": "uttora",
     "বাড্ডা": "badda",
     "গুলশান": "gulshan",
@@ -133,7 +167,32 @@ _BN_PLACE_ROMAN: dict[str, str] = {
     "ধানমন্ডি": "dhanmondi",
     "ফার্মগেট": "farmgate",
     "শাহবাগ": "shahbagh",
+    "কারওয়ান বাজার": "karwan bazar",
+    "কারওয়ানবাজার": "karwan bazar",
+    "যাত্রাবাড়ী": "jatrabari",
+    "যাত্রাবাড়ি": "jatrabari",
 }
+
+# Bengali voice fillers — use str.replace (\\b fails on Bengali script in Python regex).
+_BN_VOICE_FILLER = (
+    "গিয়েছি",
+    "গিয়েছি",
+    "giyechi",
+    "পৌঁছে",
+    "পৌছে",
+    "pouche",
+    "করেছি",
+    "কিনেছি",
+    "সকালে",
+    "sokale",
+    "আজকে",
+    "ajke",
+    "aajke",
+    "হয়েছে",
+    "হয়েছে",
+    "hoyeche",
+    "hocche",
+)
 
 _BIKE_HINT_RE = re.compile(
     r"(?:\b(bike|baik|baike|bicycle)\b|বাইক)",
@@ -153,6 +212,22 @@ def preprocess_expense_message(message: str) -> str:
         return text
     text = text.translate(_BN_DIGIT_MAP)
     text = re.sub(r"\s+টু\s+", " to ", text, flags=re.I)
+    text = re.sub(
+        r"^(?:আজকে\s+)?(?:খরচ\s+)?(?:হয়েছে|হয়েছে|hoyeche|hocche)\s+",
+        "",
+        text,
+        flags=re.I,
+    )
+    for filler in _BN_VOICE_FILLER:
+        text = text.replace(filler, " ")
+
+    def _compound_bn_amount(m: re.Match[str]) -> str:
+        h = _BN_HUNDREDS_MAP.get(m.group("hundreds"), 0)
+        t = _BN_TENS_MAP.get(m.group("tens"), 0)
+        return str(h + t) if h and t else m.group(0)
+
+    text = _BN_COMPOUND_NUMBER_RE.sub(_compound_bn_amount, text)
+
     for word, val in sorted(_BN_NUMBER_WORDS.items(), key=lambda x: -len(x[0])):
         text = re.sub(
             rf"(?<![\w\u0980-\u09FF]){re.escape(word)}(?![\w\u0980-\u09FF])",
@@ -166,7 +241,15 @@ def preprocess_expense_message(message: str) -> str:
     text = text.replace("বাসে", " bus ")
     text = text.replace("লাঞ্ছ", " lunch ")
     text = text.replace("লাঞ্চ", " lunch ")
-    for bn, en in _BN_PLACE_ROMAN.items():
+    text = text.replace("নাস্তা", " snack ")
+    text = re.sub(r"চা\s+snack", " snack ", text, flags=re.I)
+    # \\b does not work on Bengali words — replace longest metro compounds first.
+    text = text.replace("মেট্রোরেলে", " metro rail ")
+    text = text.replace("মেট্রোরেল", " metro rail ")
+    text = re.sub(r"মেট্রো(?!র)", " metro ", text)
+    text = text.replace("ট্রেনে", " train ")
+    text = re.sub(r"metro\s+রেলে", " metro rail ", text, flags=re.I)
+    for bn, en in sorted(_BN_PLACE_ROMAN.items(), key=lambda x: -len(x[0])):
         text = text.replace(bn, f" {en} ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -176,7 +259,7 @@ def _romanize_known_place(label: str) -> str:
     s = strip_location_punctuation((label or "").strip())
     if not s:
         return s
-    for bn, en in _BN_PLACE_ROMAN.items():
+    for bn, en in sorted(_BN_PLACE_ROMAN.items(), key=lambda x: -len(x[0])):
         if bn in s:
             s = s.replace(bn, en)
     return strip_location_punctuation(s)
@@ -374,7 +457,8 @@ _TRAVEL_ROUTE_CAT_AMT_RE = re.compile(
 _ROUTE_JUNK_WORDS_RE = re.compile(
     r"\b(?:ajke|aajke|amar|ami|my|expense|expenses|hoyeche|hocche|hoyese|cost|kharch|"
     r"খরচ|হয়েছে|হয়েছে|hoyeche|taka|টাকা|tk|then|abar|tarpor|তারপর|first|note|"
-    r"kor|korechi|kore|lagche|laglo|khoroch)\b",
+    r"kor|korechi|kore|lagche|laglo|khoroch|sokale|সকালে|giyechi|গিয়েছি|গিয়েছি|"
+    r"pouche|পৌঁছে|পৌছে)\b",
     re.I,
 )
 
@@ -774,7 +858,8 @@ def _span_overlaps(covered: list[tuple[int, int]], start: int, end: int) -> bool
 def _clean_location_label(raw: str) -> str:
     s = (raw or "").strip()
     s = re.sub(
-        r"^(?:first\s+cost|cost|খরচ|khoroch|hoyeche|hocche|হয়েছে|হয়েছে|amar|ami|my)\s+",
+        r"^(?:first\s+cost|cost|খরচ|khoroch|hoyeche|hocche|হয়েছে|হয়েছে|amar|ami|my|"
+        r"ajke|aajke|আজকে|সকালে|sokale|giyechi|গিয়েছি|গিয়েছি)\s+",
         "",
         s,
         flags=re.I,
@@ -1107,8 +1192,48 @@ def _extract_from_clause(clause: str) -> list[ExpenseLineItem]:
             _attach_trailing_route(clause, found)
             return found
 
+    if not found and not re.search(rf"\b{_CATEGORY_TOKEN}\b", clause, re.I):
+        alias_item = _extract_alias_category_line(clause, covered)
+        if alias_item:
+            return [alias_item]
+        pair = _pick_best_simple_to_pair(clause)
+        if pair:
+            frm_raw, to_raw = pair
+            tail = clause[clause.lower().rfind(to_raw.lower()) + len(to_raw) :]
+            amt_m = _AMOUNT_RE.search(tail) or _AMOUNT_RE.search(clause)
+            val = _parse_amount_match(amt_m) if amt_m else None
+            if val and val > 0:
+                if not re.search(
+                    r"(?:taka|tk|টাকা|cost|kharch|hoyeche|hoyese|hocche)",
+                    clause,
+                    re.I,
+                ):
+                    return found
+                return [
+                    ExpenseLineItem(
+                        category="",
+                        amount=val,
+                        from_location=pair[0],
+                        to_location=pair[1],
+                        notes=clause,
+                    )
+                ]
+
     # Amount without category — do not invent "Other"; workflow will ask category.
     return found
+
+
+def message_contains_expense_claim_lines(message: str) -> bool:
+    """
+    True when the user lists new expense lines (BN / Banglish / EN).
+
+    Uses preprocess + rules extraction — catches Bengali number words (একশ, ষাট)
+    that digit-only regex would miss.
+    """
+    try:
+        return bool(extract_expense_items(message or "").items)
+    except Exception:
+        return False
 
 
 def extract_expense_items(message: str) -> ExtractionResult:
@@ -1165,36 +1290,32 @@ def extract_expense_items(message: str) -> ExtractionResult:
     return ExtractionResult(items=unique, malformed=malformed)
 
 
+def _is_spurious_train_line(item: ExpenseLineItem, message: str) -> bool:
+    """True when a Train line is likely metro/STT noise rather than a real train fare."""
+    blob = f"{item.notes} {message}"
+    return not re.search(r"\btrain\b|ট্রেন", blob, re.I)
+
+
 def _collapse_metro_train_duplicates(
     items: list[ExpenseLineItem], message: str
 ) -> list[ExpenseLineItem]:
     """
     Drop spurious Train lines when Metro Rail was parsed from the same message.
     Common when users say metroral/metro rail (STT) without mentioning train.
+    Keeps explicit train fares and kamalapur-station legs.
     """
     if not items:
         return items
-    raw = message or ""
-    low = raw.lower()
-    has_metro_item = any(it.category == "Metro Rail" for it in items)
-    if not has_metro_item:
+    if not any(it.category == "Metro Rail" for it in items):
         return items
-    has_metro_mention = bool(
-        re.search(
-            r"metro(?:\s*rail|rail|ral|rel)?|metroral|metrorail|\brail\b|মেট্রো",
-            low,
-            re.I,
-        )
-    )
-    if not has_metro_mention:
+    if not re.search(r"metro|মেট্রো", message or "", re.I):
         return items
-    explicit_train = bool(
-        re.search(r"(?<![a-z])train(?![a-z])|ট্রেন", low, re.I)
-        and not re.search(r"metrorail|metroral|metro\s*rail", low, re.I)
-    )
-    if explicit_train:
-        return items
-    return [it for it in items if it.category != "Train"]
+    out: list[ExpenseLineItem] = []
+    for it in items:
+        if it.category == "Train" and _is_spurious_train_line(it, message):
+            continue
+        out.append(it)
+    return out
 
 
 def merge_items(

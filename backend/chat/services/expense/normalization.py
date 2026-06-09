@@ -86,7 +86,15 @@ def normalize_amount(value: Any) -> float | None:
 
 
 def normalize_location(value: Any) -> str:
-    return strip_location_punctuation(str(value or ""))
+    raw = strip_location_punctuation(str(value or ""))
+    if not raw:
+        return ""
+    try:
+        from chat.services.expense_extraction import _strip_route_endpoint
+
+        return _strip_route_endpoint(raw)
+    except Exception:
+        return raw
 
 
 def resolve_llm_expense_category(

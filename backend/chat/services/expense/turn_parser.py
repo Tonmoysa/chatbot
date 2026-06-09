@@ -25,6 +25,7 @@ from chat.services.expense.turn_schema import (
     TURN_FILL_SLOT,
     TURN_NAVIGATE,
     TURN_NONE,
+    TURN_PRAISE,
     TURN_UNCLEAR,
     TurnDecision,
 )
@@ -115,40 +116,18 @@ def draft_context_lines(
     pending_step: str = "",
     pending_line: dict[str, Any] | None = None,
     block: dict[str, Any] | None = None,
+    last_question: str = "",
 ) -> str:
-    lines: list[str] = []
-    if stage:
-        lines.append(f"Stage: {stage}")
-    if pending_step:
-        lines.append(f"Pending step: {pending_step}")
-    if pending_line and pending_line.get("amount"):
-        cat = pending_line.get("category") or "?"
-        lines.append(
-            f"Pending line: {cat} {pending_line.get('amount')} Tk"
-        )
-    if not items:
-        lines.append("Draft lines: (empty)")
-    else:
-        lines.append("Draft lines:")
-        for row in items:
-            cat = str(row.get("category") or "?")
-            amt = row.get("amount", "?")
-            route = ""
-            fr, to = row.get("from_location"), row.get("to_location")
-            if fr or to:
-                route = f" ({fr or '?'} → {to or '?'})"
-            lines.append(f"  - {cat}: {amt} Tk{route}")
-    if block:
-        queue = block.get("pending_queue") or []
-        if queue:
-            lines.append("Queued lines:")
-            for row in queue:
-                if not isinstance(row, dict):
-                    continue
-                lines.append(
-                    f"  - {row.get('category') or '?'}: {row.get('amount')} Tk (queued)"
-                )
-    return "\n".join(lines)
+    from chat.services.expense.llm_context import build_wizard_llm_context
+
+    return build_wizard_llm_context(
+        items,
+        stage=stage,
+        pending_step=pending_step,
+        pending_line=pending_line,
+        block=block,
+        last_question=last_question,
+    )
 
 
 def _should_supersede_pending_slot(message: str, *, pending_step: str = "") -> bool:
@@ -243,6 +222,7 @@ def parse_turn_llm(
     pending_step: str = "",
     pending_line: dict[str, Any] | None = None,
     block: dict[str, Any] | None = None,
+    last_question: str = "",
     trace_id: str = "",
     llm: LLMClient | None = None,
 ) -> TurnDecision | None:
@@ -254,7 +234,7 @@ def parse_turn_llm(
         return None
 
     user_prompt = (
-        f"{draft_context_lines(items, stage=stage, pending_step=pending_step, pending_line=pending_line, block=block)}\n\n"
+        f"{draft_context_lines(items, stage=stage, pending_step=pending_step, pending_line=pending_line, block=block, last_question=last_question)}\n\n"
         f"User message:\n{text}\n\n"
         "Return JSON only."
     )
@@ -297,6 +277,14 @@ def parse_turn_rules(
         return TurnDecision()
 
     if stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
+        if wants_expense_submit_command(text) or wants_expense_done_command(text):
+            return TurnDecision(
+                turn_type=TURN_NAVIGATE,
+                confidence=1.0,
+                finish_collecting=wants_expense_done_command(text),
+                submit_draft=wants_expense_submit_command(text),
+                source="rules",
+            )
         if is_confirmation_yes(text):
             return TurnDecision(turn_type=TURN_CONFIRM, confidence=1.0, source="rules")
         if is_confirmation_no(text):
@@ -310,6 +298,16 @@ def parse_turn_rules(
             submit_draft=wants_expense_submit_command(text),
             source="rules",
         )
+
+    if stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
+        from chat.services.expense.clarify_praise import looks_like_wizard_praise_message
+
+        if looks_like_wizard_praise_message(text):
+            return TurnDecision(
+                turn_type=TURN_PRAISE,
+                confidence=0.95,
+                source="rules",
+            )
 
     if pending_step == "clarify":
         return TurnDecision(
@@ -417,6 +415,7 @@ def resolve_expense_turn(
     pending_line: dict[str, Any] | None = None,
     has_pending_line: bool = False,
     block: dict[str, Any] | None = None,
+    last_question: str = "",
     trace_id: str = "",
     use_llm: bool = True,
 ) -> TurnDecision:
@@ -460,6 +459,7 @@ def resolve_expense_turn(
         TURN_NAVIGATE,
         TURN_CLARIFY_REPLY,
         TURN_FILL_SLOT,
+        TURN_PRAISE,
     ):
         return rules
 
@@ -487,6 +487,7 @@ def resolve_expense_turn(
             pending_step=pending_step,
             pending_line=pending_line,
             block=block,
+            last_question=last_question,
             trace_id=trace_id,
         )
         if llm_decision and llm_decision.turn_type == TURN_EDIT_DRAFT:

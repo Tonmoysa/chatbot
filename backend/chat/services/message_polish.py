@@ -370,6 +370,8 @@ def polish_outbound_message(
                 in (
                     "expense_validation_block",
                     "expense_clarify",
+                    "expense_clarify_praise_review",
+                    "expense_review_praise",
                     "expense_submit_confirm",
                 )
             ):

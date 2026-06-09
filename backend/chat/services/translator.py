@@ -116,7 +116,7 @@ _WEAK_REPLY_RE = re.compile(
     r"yes|no|yep|yeah|y|n|ok|okay|submit|summary|summery|clear|confirm|cancel|stop|done|"
     r"thanks|thank\s*you|"
     r"হ্যাঁ|না|ঠিক|শেষ|জমা|সারাংশ|"
-    r"ha|na"
+    r"ha|hae|han|na"
     r")(?:[.!?]*)$",
     re.I | re.UNICODE,
 )

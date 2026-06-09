@@ -5,6 +5,7 @@ import datetime as dt
 import pytest
 
 from chat.constants import (
+    INTENT_EXPENSE_CLAIM,
     INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
     INTENT_LEAVE_REQUEST,
@@ -60,6 +61,35 @@ def test_wizard_confirm_yes_not_chitchat() -> None:
     ctx = HrQueryContext(expense_active=True, expense_stage="submit_confirm")
     d = rules_classify_hr_query("yes", context=ctx)
     assert d.query_kind != "chitchat"
+
+
+def test_rules_submit_praise_stays_expense_claim() -> None:
+    ctx = HrQueryContext(expense_active=True, expense_stage="review")
+    msg = "awesome perfect ...submit koro"
+    d = rules_classify_hr_query(msg, context=ctx)
+    assert d.query_kind == "expense_claim"
+    assert d.maps_to_intent == INTENT_EXPENSE_CLAIM
+
+
+def test_apply_does_not_override_submit_to_status() -> None:
+    from chat.services.hr_query_classifier import HrQueryDecision, QUERY_EXPENSE_STATUS
+
+    msg = "awesome perfect ...submit koro"
+    llm_decision = HrQueryDecision(
+        query_kind=QUERY_EXPENSE_STATUS,
+        confidence=0.95,
+        source="llm",
+        in_hr_scope=True,
+        maps_to_intent=INTENT_EXPENSE_STATUS,
+    )
+    intent, result = apply_hr_query_to_intent(
+        INTENT_EXPENSE_CLAIM,
+        {"intent": INTENT_EXPENSE_CLAIM, "confidence": 0.99, "source": "gate"},
+        llm_decision,
+        message=msg,
+    )
+    assert intent == INTENT_EXPENSE_CLAIM
+    assert "hr_query" not in result.get("source", "")
 
 
 def test_apply_upgrades_unknown_intent() -> None:

@@ -72,14 +72,28 @@ def wants_expense_submit_command(message: str) -> bool:
     return bool(_SUBMIT_CMD_RE.search(t))
 
 
-def wants_expense_done_command(message: str) -> bool:
-    """User signals collecting is complete (done, bas, no more, …)."""
+def wants_expense_done_command_rules(message: str) -> bool:
+    """Fast rule path for finish-collecting (exact / common phrases)."""
     t = (message or "").strip()
     if not t:
         return False
     if _DONE_CMD_RE.match(t):
         return True
     return bool(re.search(r"\b(শেষ|আর\s*নেই|no\s+more)\b", t, re.I))
+
+
+def wants_expense_done_command(
+    message: str,
+    *,
+    trace_id: str = "",
+    use_llm: bool = True,
+) -> bool:
+    """User signals collecting is complete (rules + optional LLM)."""
+    from chat.services.expense.done_collecting import detect_finish_collecting_intent
+
+    return detect_finish_collecting_intent(
+        message, trace_id=trace_id, use_llm=use_llm
+    )
 
 
 def parse_remove_category_command(message: str) -> str | None:

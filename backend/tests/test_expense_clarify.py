@@ -53,7 +53,7 @@ def test_apply_category_typo_confirm_yes():
         }
     ]
     issues = collect_clarification_issues([], pending)
-    _, pending, unresolved = apply_clarification_reply("yes", [], issues, pending)
+    _, pending, unresolved, _, _ = apply_clarification_reply("yes", [], issues, pending)
     assert pending[0]["category"] == "Metro Rail"
     assert unresolved == []
 
@@ -95,7 +95,7 @@ def test_apply_clarification_reply_comma_separated():
     ]
     pending = [{"amount": 20, "category": ""}]
     issues = collect_clarification_issues(items, pending)
-    items, pending, unresolved = apply_clarification_reply(
+    items, pending, unresolved, _, _ = apply_clarification_reply(
         "mirpur, snack", items, issues, pending
     )
     assert items[0]["to_location"] == "mirpur"

@@ -288,3 +288,48 @@ def collect_start_prompt(lang: ReplyLang) -> str:
     if lang == "banglish":
         return "Ajker kharcha likhun (e.g. lunch 100, bus 50 office to badda)."
     return "আজকের খরচের বিস্তারিত লিখুন (যেমন: lunch 100, bus 50)।"
+
+
+def empty_collect_prompt(lang: ReplyLang | None) -> str:
+    reply = normalize_reply_lang(lang)
+    if reply == "en":
+        return (
+            "Tell me today's costs — I'll ask category if you give amount only.\n"
+            "Or together: `lunch 100, bus 50 office to badda`"
+        )
+    if reply == "banglish":
+        return (
+            "Ajker cost bolun — amount dile category pore jiggesh korbo.\n"
+            "Ba ek sathe: `lunch 100, bus 50 office to badda`"
+        )
+    return (
+        "আজকের খরচ বলুন — amount দিলে পরে ধরন (lunch/bus/…) জিজ্ঞেস করব।\n"
+        "অথবা একসাথে: `lunch 100, bus 50 office to badda`"
+    )
+
+
+def malformed_collect_prompt(lang: ReplyLang | None) -> str:
+    reply = normalize_reply_lang(lang)
+    if reply == "en":
+        return (
+            "Some lines were unclear — please include category and amount.\n"
+            "Example: lunch 100, bus 50 office to home"
+        )
+    if reply == "banglish":
+        return (
+            "Kichu line bujhte parini — category ar amount clear likhun.\n"
+            "Example: lunch 100, bus 50 office to home"
+        )
+    return (
+        "কিছু লাইন বুঝতে পারিনি। category ও amount স্পষ্ট করে লিখুন।\n"
+        "উদাহরণ: lunch 100, bus 50 office to home"
+    )
+
+
+def category_only_amount_prompt(lang: ReplyLang | None) -> str:
+    reply = normalize_reply_lang(lang)
+    if reply == "en":
+        return "How much was it? (e.g. 100 taka)"
+    if reply == "banglish":
+        return "Koto taka? (e.g. 100 taka)"
+    return "কত টাকা খরচ হয়েছে? (যেমন: 100 taka)"

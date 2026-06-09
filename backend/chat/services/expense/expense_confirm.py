@@ -66,6 +66,35 @@ _REMOVE_VERB_CAT_RE = re.compile(
     re.I,
 )
 
+_REMOVE_VERB_CAT_AMT_RE = re.compile(
+    rf"\b(?:remove|delete)\s+(?P<cat>{_CATEGORY_TOKEN}|rtain|rtrain|tran|trin)\s+"
+    r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?",
+    re.I,
+)
+
+_CAT_HOBE_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN}|rtain|rtrain|tran|trin)\s+"
+    r"(?:hobe|habe|hoy|হবে|হয়)\b",
+    re.I,
+)
+
+# "ekhon je lunch ta ache eta 155 hobe" / "je lunch ache seta 150 hobe"
+_CONTEXTUAL_CAT_AMOUNT_HOBE_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN}|bos|bas)"
+    r"(?:\s+ta)?(?:\s+(?:ache|ase|aache|ach[e]?))?"
+    r".{0,48}?"
+    rf"(?P<amt>\d+(?:[.,]\d{{1,2}})?)\s*(?:টাকা|taka|tk)?\s*"
+    r"(?:hobe|habe|hoy|হবে|হয়)\b",
+    re.I | re.UNICODE,
+)
+
+_CAT_AMT_BAAD_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN}|rtain|rtrain|tran|trin)\s+"
+    r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*"
+    r"(?:baad|bad|বাদ|remove|delete)",
+    re.I,
+)
+
 _REMOVE_ONE_RE = re.compile(
     r"(?:ekta|একটা|one|ek)\s+"
     rf"(?P<cat>{_CATEGORY_TOKEN})\s+"
@@ -202,6 +231,24 @@ def _normalize_correction_message(message: str) -> str:
     return _CORRECTION_TYPO_RE.sub("bus", text)
 
 
+def parse_category_slot_answer(message: str) -> str | None:
+    """Single-category assignment without amount, e.g. ``metro rail hobe``."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    m = _CAT_HOBE_RE.search(text)
+    if m:
+        raw = m.group("cat")
+        if raw in ("rtain", "rtrain", "tran", "trin"):
+            return normalize_category("train")
+        return normalize_category(raw)
+    if re.search(r"\d", text):
+        return None
+    from chat.services.expense_extraction import parse_category_token
+
+    return parse_category_token(text)
+
+
 def _is_fresh_multi_category_expense_claim(message: str) -> bool:
     """
     Fresh multi-line ingest such as ``lunch 100, bus 200, rail 400``.
@@ -270,6 +317,7 @@ def looks_like_expense_correction(message: str) -> bool:
         _UPDATE_AMOUNT_RE.search(low)
         or _SET_AMOUNT_RE.search(low)
         or _CAT_ER_EXPENSE_AMOUNT_RE.search(low)
+        or _CONTEXTUAL_CAT_AMOUNT_HOBE_RE.search(low)
     ):
         return True
     if _TRANSFER_RE.search(low) or _PARTIAL_DEDUCT_RE.search(low):
@@ -277,13 +325,17 @@ def looks_like_expense_correction(message: str) -> bool:
     if (
         _REMOVE_RE.search(low)
         or _REMOVE_VERB_CAT_RE.search(low)
+        or _REMOVE_VERB_CAT_AMT_RE.search(low)
+        or _CAT_AMT_BAAD_RE.search(low)
         or _REMOVE_ONE_RE.search(low)
         or _REMOVE_LOOSE_RE.search(low)
     ):
         return True
+    if _CAT_HOBE_RE.search(low):
+        return True
     if _ADD_RE.search(low):
         return True
-    if re.search(r"\b(bus|lunch|train|snack|dinner|breakfast|bike|cab)\b", low, re.I):
+    if re.search(r"\b(bus|lunch|train|snack|dinner|breakfast|bike|cab|metro|rail|rickshaw|cng)\b", low, re.I):
         if re.search(r"(?:na|না)", low, re.I) and re.search(r"\d", low):
             return True
         if re.search(r"(?:hobe|হবে|update|change)\b", low, re.I) and re.search(r"\d", low):
@@ -301,9 +353,37 @@ def is_confirmation_yes(message: str) -> bool:
     t = (message or "").strip()
     if wants_defer_expense_for_leave_submit(t):
         return False
+    try:
+        from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+        if wants_expense_submit_command(t):
+            return False
+    except Exception:
+        pass
     if _CONFIRM_RE.match(t):
         return True
-    return bool(re.search(r"\b(confirm|submit|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
+    return bool(re.search(r"\b(confirm|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
+
+
+def is_submit_confirm_yes(message: str) -> bool:
+    """Final CRM gate: yes / ha / submit / joma daw / UI yes chip."""
+    from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+
+    t = (message or "").strip()
+    if not t or is_confirmation_no(t):
+        return False
+    if wants_defer_expense_for_leave_submit(t):
+        return False
+    try:
+        from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+        if wants_expense_submit_command(t):
+            return True
+    except Exception:
+        pass
+    if _CONFIRM_RE.match(t):
+        return True
+    return bool(re.search(r"\b(confirm|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
 
 
 def is_confirmation_no(message: str) -> bool:
@@ -357,6 +437,14 @@ def looks_like_compound_expense_claim(message: str) -> bool:
     """Multi-line / multi-category expense utterance (re-ingest risk)."""
     if looks_like_expense_correction(message):
         return False
+    try:
+        from chat.services.expense_extraction import extract_expense_items
+
+        ext = extract_expense_items(message or "")
+        if len(ext.items) >= 2:
+            return True
+    except Exception:
+        pass
     low = (message or "").lower()
     # "bus 50 hobe and bike 150 hobe" — correction, not a fresh compound claim.
     if re.search(r"\b(hobe|hoy|update|change)\b", low, re.I) and not re.search(
@@ -577,6 +665,21 @@ def build_correction_failure_notice(
     low = message or ""
     if wants_travel_group_remove(low) and not _travel_lines_present(items):
         return travel_group_not_found_notice(items, lang=lang)
+    from chat.services.expense.command_parser import parse_correction_plan
+
+    plan = parse_correction_plan(message)
+    for cat in plan.remove_verb_first:
+        matches = [
+            row
+            for row in items
+            if str(row.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            from chat.services.expense.confusion_handler import (
+                build_remove_disambiguation_prompt,
+            )
+
+            return build_remove_disambiguation_prompt(cat, matches, lang=lang)
     for pattern in _CATEGORY_REPLACE_PATTERNS:
         m = pattern.search(low)
         if not m or "from_cat" not in m.groupdict():

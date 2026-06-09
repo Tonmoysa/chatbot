@@ -16,6 +16,7 @@ class CorrectionCommandPlan:
     remove_one: list[str] = field(default_factory=list)
     remove_loose: list[str] = field(default_factory=list)
     remove_verb_first: list[str] = field(default_factory=list)
+    remove_by_amount: list[tuple[str, float]] = field(default_factory=list)
     remove_category_suffix: list[str] = field(default_factory=list)
     update_amounts: list[tuple[str, float]] = field(default_factory=list)
     set_amounts: list[tuple[str, float]] = field(default_factory=list)
@@ -25,6 +26,7 @@ class CorrectionCommandPlan:
     has_remove_one_pattern: bool = False
     has_transfer_pattern: bool = False
     has_partial_deduct_pattern: bool = False
+    set_category_only: str = ""
 
     def has_any_correction(self) -> bool:
         return bool(
@@ -35,11 +37,13 @@ class CorrectionCommandPlan:
             or self.remove_one
             or self.remove_loose
             or self.remove_verb_first
+            or self.remove_by_amount
             or self.remove_category_suffix
             or self.update_amounts
             or self.set_amounts
             or self.cat_er_amounts
             or self.add_amounts
+            or bool(self.set_category_only)
         )
 
 

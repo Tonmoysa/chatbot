@@ -20,6 +20,8 @@ ExpenseMessageType = Literal[
     "expense_wizard_prompt",
     "expense_validation_block",
     "expense_clarify",
+    "expense_clarify_praise_review",
+    "expense_review_praise",
     "expense_submit_confirm",
     "expense_submit_success",
 ]
@@ -106,6 +108,67 @@ def build_summary_envelope(
             "warnings": list(warnings or []),
         },
     }
+
+
+def build_review_praise_envelope(
+    *,
+    template: str,
+    lang: ReplyLang,
+    item_count: int = 0,
+    total: float = 0.0,
+    incurred_date_iso: str = "",
+) -> dict[str, Any]:
+    """Review-screen praise + submit ask (no expense line list)."""
+    return {
+        "message_type": "expense_review_praise",
+        "lang": lang,
+        "polishable_part": (template or "").strip(),
+        "template_fallback": (template or "").strip(),
+        "facts": {
+            "praise_ack": True,
+            "review_stage": True,
+            "item_count": int(item_count),
+            "total": float(total),
+            "date": incurred_date_iso or None,
+            "ask_submit": True,
+        },
+    }
+
+
+def build_clarify_praise_review_envelope(
+    *,
+    praise_template: str,
+    summary_template: str,
+    items: list[dict[str, Any]],
+    incurred_date_iso: str,
+    warnings: list[str] | None,
+    lang: ReplyLang,
+) -> dict[str, Any]:
+    """Praise ack (LLM-polished) + fixed expense review summary."""
+    envelope = build_summary_envelope(
+        items,
+        incurred_date_iso=incurred_date_iso,
+        warnings=warnings,
+        lang=lang,
+    )
+    envelope["message_type"] = "expense_clarify_praise_review"
+    envelope["polishable_part"] = (praise_template or "").strip()
+    envelope["fixed_part"] = (summary_template or "").strip()
+    envelope["template_fallback"] = (praise_template or "").strip()
+    envelope["facts"]["praise_ack"] = True
+    return envelope
+
+
+def clarify_praise_facts_preserved(envelope: dict[str, Any], polished: str) -> bool:
+    """Praise ack only — language lock; expense lines live in fixed_part."""
+    from chat.services.expense.clarify_polish import clarify_polish_language_ok
+
+    text = (polished or "").strip()
+    template = str(envelope.get("template_fallback") or "")
+    target_lang = str(envelope.get("lang") or "bn")
+    if not text or len(text) < 8:
+        return False
+    return clarify_polish_language_ok(target_lang, text, template=template)
 
 
 def build_session_ledger_envelope(
@@ -285,24 +348,74 @@ def validation_block_facts_preserved(envelope: dict[str, Any], polished: str) ->
     return bool(text.strip())
 
 
+def _amounts_in_polish_text(text: str) -> set[float]:
+    import re
+
+    found: set[float] = set()
+    for m in re.finditer(
+        r"(?<!\d)([\d০-৯]{1,6})(?:[.,](\d{1,2}))?(?!\d)",
+        text or "",
+        flags=re.I,
+    ):
+        whole = str(m.group(1) or "").translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789"))
+        frac = str(m.group(2) or "").translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789"))
+        try:
+            val = round(float(f"{whole}.{frac}" if frac else whole), 2)
+        except ValueError:
+            continue
+        if 1 <= val <= 500_000:
+            found.add(val)
+    return found
+
+
+def _amount_mentioned_in_text(amount: float, text: str) -> bool:
+    token = f"{float(amount):g}"
+    if token in text:
+        return True
+    if float(amount).is_integer() and str(int(amount)) in text:
+        return True
+    return False
+
+
 def clarify_facts_preserved(envelope: dict[str, Any], polished: str) -> bool:
+    from chat.services.expense.clarify_polish import clarify_polish_language_ok
     from chat.services.message_polish_llm import facts_preserved
 
     text = polished or ""
-    for row in (envelope.get("facts") or {}).get("issues") or []:
+    template = str(envelope.get("template_fallback") or "")
+    target_lang = str(envelope.get("lang") or "bn")
+    if not clarify_polish_language_ok(target_lang, text, template=template):
+        return False
+
+    issues = list((envelope.get("facts") or {}).get("issues") or [])
+    issue_amounts = {
+        round(float(row.get("amount") or 0), 2)
+        for row in issues
+        if row.get("amount") is not None
+    }
+    template_amounts = _amounts_in_polish_text(template)
+    polished_amounts = _amounts_in_polish_text(text)
+    # Reject polish that adds questions for amounts outside the open issues list.
+    if issue_amounts:
+        for amt in polished_amounts:
+            if amt in template_amounts:
+                continue
+            if amt >= 10 and amt not in issue_amounts:
+                return False
+        for amt in issue_amounts:
+            if not _amount_mentioned_in_text(amt, text):
+                return False
+
+    for row in issues:
         cat = str(row.get("category") or "")
         if cat and cat.lower() not in text.lower():
             return False
-        if row.get("amount") is not None:
-            if f"{float(row['amount']):g}" not in text:
-                return False
         original = str(row.get("original") or "").strip()
         if original and original.lower() not in text.lower():
             return False
         suggestion = str(row.get("suggestion") or "").strip()
         if suggestion and suggestion.lower() not in text.lower():
             return False
-    template = str(envelope.get("template_fallback") or "")
     if template:
         return facts_preserved(template, text)
     return bool(text.strip())
@@ -503,6 +616,9 @@ def build_clarify_envelope(
     *,
     template: str,
     lang: ReplyLang,
+    prompt_variant: str = "initial",
+    resolved_count: int = 0,
+    total_issues: int = 0,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for issue in issues:
@@ -524,12 +640,20 @@ def build_clarify_envelope(
         if raw.get("field"):
             row["field"] = str(raw.get("field"))
         rows.append(row)
+    open_count = len(rows)
+    total = total_issues or open_count
     return {
         "message_type": "expense_clarify",
         "lang": lang,
         "polishable_part": template.strip(),
         "template_fallback": template.strip(),
-        "facts": {"issues": rows},
+        "facts": {
+            "issues": rows,
+            "prompt_variant": prompt_variant,
+            "resolved_count": resolved_count,
+            "total_issues": total,
+            "open_count": open_count,
+        },
     }
 
 
@@ -612,6 +736,18 @@ def message_meta_from_block(
     stage = str(block.get("stage") or "")
     if stage == "submit_confirm":
         return build_submit_confirm_envelope(question, lang=lang)
+
+    if str(block.get("pending_step") or "") == "clarify":
+        from chat.services.expense.clarify import deserialize_clarification_issues
+
+        issues = deserialize_clarification_issues(block.get("clarification_issues"))
+        if issues:
+            return build_clarify_envelope(
+                issues,
+                template=question,
+                lang=lang,
+                prompt_variant="initial",
+            )
 
     pending = block.get("pending_line") if isinstance(block.get("pending_line"), dict) else None
 

@@ -40,7 +40,7 @@ def test_expense_submit_confirm_actions():
     }
     actions = build_ui_actions(wf)
     assert actions[0]["id"] == "expense_submit_yes"
-    assert actions[0]["message"] == "yes submit"
+    assert actions[0]["message"] == "yes"
 
 
 def test_expense_collecting_actions_when_items_present():

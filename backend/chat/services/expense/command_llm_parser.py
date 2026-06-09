@@ -172,6 +172,11 @@ def parse_correction_plan_llm(
     trace_id: str = "",
     *,
     llm: LLMClient | None = None,
+    stage: str = "",
+    pending_step: str = "",
+    pending_line: dict[str, Any] | None = None,
+    block: dict[str, Any] | None = None,
+    last_question: str = "",
 ) -> CorrectionCommandPlan | None:
     """Call LLM to parse a correction plan; None if unavailable or invalid."""
     text = (message or "").strip()
@@ -181,8 +186,10 @@ def parse_correction_plan_llm(
     if not client.is_configured():
         return None
 
+    from chat.services.expense.llm_context import build_wizard_llm_context
+
     user_prompt = (
-        f"Current draft:\n{_draft_context_lines(items)}\n\n"
+        f"{build_wizard_llm_context(items, stage=stage, pending_step=pending_step, pending_line=pending_line, block=block, last_question=last_question)}\n\n"
         f"User correction message:\n{text}\n\n"
         "Return JSON only."
     )

@@ -165,6 +165,30 @@ def rules_classify_hr_query(
     if not raw:
         return HrQueryDecision()
 
+    if ctx.expense_active:
+        from chat.services.expense.expense_confirm import (
+            is_confirmation_no,
+            is_confirmation_yes,
+            looks_like_expense_correction,
+        )
+        from chat.services.expense.wizard_commands import (
+            wants_expense_done_command,
+            wants_expense_submit_command,
+        )
+
+        if (
+            wants_expense_submit_command(raw)
+            or wants_expense_done_command(raw)
+            or is_confirmation_yes(raw)
+            or is_confirmation_no(raw)
+            or looks_like_expense_correction(raw)
+        ):
+            return _finish_decision(
+                QUERY_EXPENSE_CLAIM,
+                confidence=CONFIDENCE_RULES,
+                source="rules_expense_wizard_command",
+            )
+
     from chat.services.expense.expense_total_dispute import is_expense_total_check_query
     from chat.services.expense.session_action_memory import wants_expense_meta_question
     from chat.services.expense.session_ledger import (
@@ -220,6 +244,16 @@ def rules_classify_hr_query(
             QUERY_EXPENSE_META, confidence=CONFIDENCE_RULES, source="rules_expense_meta"
         )
 
+    try:
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+    except Exception:
+        message_contains_expense_claim_lines = None  # type: ignore[assignment]
+
+    if message_contains_expense_claim_lines and message_contains_expense_claim_lines(raw):
+        return _finish_decision(
+            QUERY_EXPENSE_CLAIM, confidence=CONFIDENCE_RULES, source="rules_expense_claim_lines"
+        )
+
     if is_expense_total_check_query(raw):
         return _finish_decision(
             QUERY_EXPENSE_STATUS,
@@ -231,6 +265,8 @@ def rules_classify_hr_query(
         _strong_expense_day_summary(raw)
         or wants_session_expense_ledger_query(raw)
         or wants_expense_spend_recap_query(raw)
+    ) and not (
+        message_contains_expense_claim_lines and message_contains_expense_claim_lines(raw)
     ):
         date_ref = DATE_NONE
         if re.search(
@@ -521,6 +557,17 @@ def apply_hr_query_to_intent(
     # HR policy intent stays with the intent detector / RAG-on-unknown path.
     if decision.maps_to_intent == INTENT_HR_POLICY:
         return intent, intent_result
+    from chat.services.expense.wizard_commands import (
+        is_expense_wizard_command,
+        wants_expense_submit_command,
+    )
+
+    if intent == INTENT_EXPENSE_CLAIM and (
+        wants_expense_submit_command(message)
+        or is_expense_wizard_command(message)
+    ):
+        return intent, intent_result
+
     weak = intent == INTENT_UNKNOWN or float(intent_result.get("confidence") or 0) < 0.75
     override_claim = (
         intent == INTENT_EXPENSE_CLAIM

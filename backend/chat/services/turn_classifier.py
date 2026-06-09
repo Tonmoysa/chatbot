@@ -108,6 +108,7 @@ def classify_workflow_turn(
     leave_active: bool,
     expense_active: bool,
     pending_leave_step: str | None = None,
+    pending_expense_step: str = "",
     leave_review_pending: bool = False,
     expense_review_pending: bool = False,
     balance_probe: bool = False,
@@ -125,8 +126,17 @@ def classify_workflow_turn(
     if expense_active and wants_resume_or_show_expense(message):
         return TURN_SLOT_ANSWER
 
+    if expense_active and str(pending_expense_step or "").strip().lower() == "clarify":
+        from chat.services.expense.clarify import looks_like_clarify_reply_signal
+
+        if looks_like_clarify_reply_signal(message):
+            return TURN_SLOT_ANSWER
+
     if expense_active and looks_like_expense_correction(message):
         return TURN_CORRECTION
+
+    if expense_active and looks_like_expense_wizard_continuation(message):
+        return TURN_SLOT_ANSWER
 
     if (
         is_confirmation_yes(message)
@@ -154,18 +164,19 @@ def classify_workflow_turn(
     if expense_active or leave_active:
         from chat.services.wizard_interrupt_classifier import (
             WizardInterruptContext,
+            classify_active_wizard_interrupt,
             interrupt_is_workflow_switch,
-            rules_wizard_interrupt,
         )
 
-        intr_ctx = WizardInterruptContext(
-            expense_active=expense_active,
+        intr = classify_active_wizard_interrupt(
+            message,
             leave_active=leave_active,
+            expense_active=expense_active,
             leave_review_pending=leave_review_pending,
             expense_review_pending=expense_review_pending,
             pending_leave_step=pending_leave_step or "",
+            use_llm=False,
         )
-        intr = rules_wizard_interrupt(message, context=intr_ctx)
         if interrupt_is_workflow_switch(intr) and intr.maps_to_turn:
             return intr.maps_to_turn
         if intr.maps_to_turn == TURN_POLICY_QUERY:

@@ -15,6 +15,7 @@ TURN_CLARIFY_REPLY = "clarify_reply"
 TURN_NAVIGATE = "navigate"
 TURN_CONFIRM = "confirm"
 TURN_DENY = "deny"
+TURN_PRAISE = "praise"
 TURN_UNCLEAR = "unclear"
 
 CONFIDENCE_LLM_FALLBACK = 0.72

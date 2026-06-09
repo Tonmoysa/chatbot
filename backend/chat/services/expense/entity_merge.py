@@ -126,6 +126,74 @@ def _travel_line_needs_route(item: ExpenseLineItem) -> bool:
     )
 
 
+def explicit_category_mentions(msg: str) -> set[str]:
+    """
+    Canonical categories explicitly mentioned in user text.
+    Used to block LLM from inventing transport (e.g. Bus) when not stated.
+    """
+    if not msg:
+        return set()
+    low = (msg or "").lower()
+    cats: set[str] = set()
+    if re.search(r"\b(bus|bos|বাস|বাসে)\b", low):
+        cats.add("Bus")
+    if re.search(r"\b(bike|baik|baike|bicycle)\b", low) or re.search(
+        r"\b(বাইক|বাইকে)\b", msg, re.I
+    ):
+        cats.add("Bike")
+    if re.search(r"\b(rickshaw|riksha|রিকশা|রিকশায়|রিক্সা)\b", msg, re.I):
+        cats.add("Rickshaw")
+    if re.search(r"\b(train|ট্রেন)\b", msg, re.I):
+        cats.add("Train")
+    if re.search(r"\b(cng|সিএনজি|auto)\b", msg, re.I):
+        cats.add("CNG")
+    if re.search(
+        r"\b(metro|মেট্রো|metro\s*rail|metrorail|metroral)\b", low, re.I
+    ) or re.search(r"\b(মেট্রো)\b", msg, re.I):
+        cats.add("Metro Rail")
+    elif re.search(r"\brail\b", low) and not re.search(
+        r"\b(railway|train)\b", low, re.I
+    ):
+        cats.add("Metro Rail")
+    if re.search(r"\b(lunch|lanch|luch|lunc|খাওয়া|খাবার|লাঞ্ছ|লাঞ্চ)\b", msg, re.I):
+        cats.add("Lunch")
+    if re.search(r"\b(snack|snacks|স্ন্যাক)\b", msg, re.I):
+        cats.add("Snack")
+    return cats
+
+
+def _parser_has_uncategorized_route(
+    items: list[ExpenseLineItem],
+) -> list[tuple[float, str, str]]:
+    """Amount + route pairs waiting for category (parser output)."""
+    pending: list[tuple[float, str, str]] = []
+    for it in items:
+        if it.category or not it.amount:
+            continue
+        frm = str(it.from_location or "").strip()
+        to = str(it.to_location or "").strip()
+        if frm and to:
+            pending.append((round(float(it.amount), 2), frm.lower(), to.lower()))
+    return pending
+
+
+def _llm_line_matches_uncategorized_route(
+    llm_item: ExpenseLineItem,
+    uncategorized_routes: list[tuple[float, str, str]],
+) -> bool:
+    if not uncategorized_routes:
+        return False
+    amt = round(float(llm_item.amount or 0), 2)
+    frm = str(llm_item.from_location or "").strip().lower()
+    to = str(llm_item.to_location or "").strip().lower()
+    for u_amt, u_frm, u_to in uncategorized_routes:
+        if amt != u_amt:
+            continue
+        if (frm == u_frm and to == u_to) or (frm == u_to and to == u_frm):
+            return True
+    return False
+
+
 def parser_needs_llm_gap_fill(
     parser: ExtractionResult,
     llm_entities: dict[str, Any] | None = None,
@@ -243,6 +311,8 @@ def fill_parser_gaps_with_llm(
 
     merged_items = [replace(item) for item in parser.items]
     used_llm: set[int] = set()
+    explicit = explicit_category_mentions(message)
+    uncategorized_routes = _parser_has_uncategorized_route(merged_items)
 
     for idx, item in enumerate(merged_items):
         needs_route = _travel_line_needs_route(item)
@@ -268,8 +338,16 @@ def fill_parser_gaps_with_llm(
                 llm_item.category, message=message, notes=llm_item.notes
             )
         ):
-            item.category = llm_item.category
-            sources[f"line_{idx}_category"] = "llm_gap_fill"
+            llm_cat = normalize_category_label(llm_item.category)
+            if (
+                is_travel_category(llm_cat)
+                and llm_cat not in explicit
+                and uncategorized_routes
+            ):
+                pass
+            else:
+                item.category = llm_item.category
+                sources[f"line_{idx}_category"] = "llm_gap_fill"
 
     for llm_idx, llm_item in enumerate(llm_items):
         if llm_idx in used_llm:
@@ -280,6 +358,12 @@ def fill_parser_gaps_with_llm(
             llm_item.category, message=message, notes=llm_item.notes
         ):
             continue
+        llm_cat = normalize_category_label(llm_item.category)
+        if is_travel_category(llm_cat) and llm_cat not in explicit:
+            if _llm_line_matches_uncategorized_route(llm_item, uncategorized_routes):
+                continue
+            if uncategorized_routes:
+                continue
         duplicate = any(
             normalize_category_label(it.category)
             == normalize_category_label(llm_item.category)
@@ -287,6 +371,18 @@ def fill_parser_gaps_with_llm(
             for it in merged_items
         )
         if duplicate:
+            continue
+        llm_cat = normalize_category_label(llm_item.category)
+        if any(
+            it.category
+            and _amounts_close(it.amount, llm_item.amount)
+            and normalize_category_label(it.category) != llm_cat
+            for it in merged_items
+        ):
+            continue
+        if llm_cat in ("Lunch", "Snack") and (
+            llm_item.from_location and llm_item.to_location
+        ):
             continue
         merged_items.append(llm_item)
         new_idx = len(merged_items) - 1
@@ -312,41 +408,6 @@ def merge_parser_and_llm(
 
     Parser line items win when present. LLM lines are used only when parser is empty.
     """
-    def _explicit_category_mentions(msg: str) -> set[str]:
-        """
-        Extract canonical categories explicitly mentioned in user text.
-        Used to decide when regex/parser category is likely wrong.
-        """
-        if not msg:
-            return set()
-        low = (msg or "").lower()
-        cats: set[str] = set()
-        # Travel categories.
-        if re.search(r"\b(bus|bos|বাস|বাসে)\b", low):
-            cats.add("Bus")
-        if re.search(r"\b(bike|baik|baike|bicycle|bike)\b", low) or re.search(
-            r"\b(বাইক|বাইকে)\b", msg, re.I
-        ):
-            cats.add("Bike")
-        if re.search(r"\b(rickshaw|riksha|riksha|রিকশা|রিকশায়|রিক্সা)\b", msg, re.I):
-            cats.add("Rickshaw")
-        if re.search(r"\b(train|ট্রেন)\b", msg, re.I):
-            cats.add("Train")
-        if re.search(r"\b(cng|সিএনজি|auto)\b", msg, re.I):
-            cats.add("CNG")
-        if re.search(r"\b(metro|মেট্রো|metro rail|metrorail|metroral|rail)\b", low) or re.search(
-            r"\b(মেট্রো)\b", msg, re.I
-        ):
-            cats.add("Metro Rail")
-        # Food categories.
-        if re.search(r"\b(lunch|lanch|luch|lunc|খাওয়া|খাবার|লাঞ্ছ|লাঞ্চ)\b", msg, re.I):
-            cats.add("Lunch")
-        if re.search(r"\b(snack|snacks|s্ন্যাক|স্ন্যাক)\b", msg, re.I) or re.search(
-            r"\b(স্ন্যাক)\b", msg, re.I
-        ):
-            cats.add("Snack")
-        return cats
-
     sources: dict[str, str] = {"items": "parser"}
     if parser.items:
         # Default: keep parser items (fast path, deterministic).
@@ -355,7 +416,7 @@ def merge_parser_and_llm(
                 sources[f"line_{idx}_category"] = "parser"
 
         # Reconcile category conflicts when user text explicitly mentions another category.
-        explicit = _explicit_category_mentions(message)
+        explicit = explicit_category_mentions(message)
         parser_cats = {normalize_category_label(it.category) for it in parser.items if it.category}
         # Only trigger when we have explicit evidence and parser misses some of it.
         if explicit and any(c in explicit for c in parser_cats) and not explicit.issubset(parser_cats):

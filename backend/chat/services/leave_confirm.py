@@ -108,65 +108,25 @@ _FIELD_ALIASES: tuple[tuple[str, str], ...] = (
 
 def build_leave_review_summary(draft: dict[str, Any]) -> str:
 
-    select_leave = format_select_leave_label(draft)
+    from chat.services.leave_copy import build_review_summary_body, lang_from_draft
 
-    scope = str(draft.get("day_scope") or "—")
-
-    start = str(draft.get("start_date") or "—")
-
-    end = str(draft.get("end_date") or start)
-
-    reason = str(draft.get("reason") or "—")
-
-    scope_label = "পুরো দিন" if scope == "full" else "হাফ দিন" if scope == "half" else scope
-
-    lines = [
-
-        "**ছুটি আবেদন — পর্যালোচনা**",
-
-        f"• Select Leave: {select_leave}",
-
-        f"• Leave Type: {scope_label}",
-
-        f"• তারিখ: {start}" + (f" → {end}" if end != start else ""),
-
-        f"• কারণ: {reason}",
-
-    ]
-
-    from chat.services.leave_draft_utils import (
-        has_real_supporting_document,
-        supporting_document_needed,
+    return build_review_summary_body(
+        draft,
+        lang=lang_from_draft(draft),
+        select_leave_label=format_select_leave_label(draft),
     )
-
-    if supporting_document_needed(draft):
-        if has_real_supporting_document(draft):
-            lines.append("• সংযুক্তি: আছে")
-        elif draft.get("supporting_document_waived"):
-            lines.append("• সংযুক্তি: এখন নেই — ম্যানেজার রিভিউ নেবেন")
-
-    return "\n".join(lines)
-
 
 
 
 
 def build_confirmation_prompt(draft: dict[str, Any]) -> str:
 
-    return (
+    from chat.services.leave_copy import build_confirmation_prompt_body, lang_from_draft
 
-        build_leave_review_summary(draft)
-
-        + "\n\n"
-
-        "জমা দেবেন?\n"
-
-        "• **yes** — জমা দিন\n"
-
-        "• **edit** — কোনো তথ্য বদলান (তারিখ, paid/unpaid, পুরো/হাফ দিন, কারণ)\n"
-
-        "• **cancel** — বাতিল"
-
+    return build_confirmation_prompt_body(
+        draft,
+        lang=lang_from_draft(draft),
+        select_leave_label=format_select_leave_label(draft),
     )
 
 

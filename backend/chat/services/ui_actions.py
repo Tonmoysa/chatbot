@@ -73,7 +73,7 @@ def _expense_actions(workflow_state: dict[str, Any]) -> list[dict[str, str]]:
                 "expense_submit_yes",
                 label="Submit",
                 label_bn="জমা দিন",
-                message="yes submit",
+                message="yes",
                 kind="primary",
             ),
             _chip(

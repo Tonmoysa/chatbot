@@ -21,15 +21,13 @@ def correction_llm_should_use(
     items: list[dict[str, Any]] | None = None,
     *,
     review_stage: bool = False,
+    collecting_stage: bool = False,
 ) -> bool:
     """
-    Use LLM command parse only when rules may miss and message is a real correction.
+    Use LLM command parse when rules may miss and message is a real correction.
 
-    Review stage only — collecting uses structured line extraction instead.
+    Review and collecting (draft edit) stages — not fresh compound claims.
     """
-    del items
-    if not review_stage:
-        return False
     text = (message or "").strip()
     if not text:
         return False
@@ -39,4 +37,6 @@ def correction_llm_should_use(
         return False
     if looks_like_compound_expense_claim(text):
         return False
-    return looks_like_expense_correction(text)
+    if review_stage or collecting_stage:
+        return looks_like_expense_correction(text)
+    return False

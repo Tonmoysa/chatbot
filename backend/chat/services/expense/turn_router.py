@@ -29,10 +29,11 @@ from chat.services.expense.turn_schema import (
     TURN_EDIT_DRAFT,
     TURN_FILL_SLOT,
     TURN_NAVIGATE,
+    TURN_PRAISE,
     TURN_UNCLEAR,
     TurnRouteResult,
 )
-from chat.services.expense.slots import STAGE_COLLECTING, STAGE_REVIEW
+from chat.services.expense.slots import STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM
 from chat.services.expense_validation import validate_expense_items
 
 
@@ -49,6 +50,7 @@ def route_expense_wizard_turn(
     pipeline_result: Any = None,
     trace_id: str = "",
     lang: str | None = None,
+    last_question: str = "",
 ) -> TurnRouteResult:
     """
     Return handled=True when this turn is fully processed by the unified router.
@@ -59,8 +61,25 @@ def route_expense_wizard_turn(
     )
     has_pending = bool(pending_line and pending_line.get("amount"))
 
-    if stage not in (STAGE_COLLECTING, STAGE_REVIEW):
+    if stage not in (STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
         return TurnRouteResult(handled=False)
+
+    if stage == STAGE_SUBMIT_CONFIRM:
+        from chat.services.expense_workflow import handle_submit_confirm_turn
+
+        return TurnRouteResult(
+            handled=True,
+            pack=handle_submit_confirm_turn(
+                wf,
+                block,
+                items,
+                message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                lang=lang,
+            ),
+        )
 
     if stage == STAGE_COLLECTING and not items and not pending_step:
         return TurnRouteResult(handled=False)
@@ -73,6 +92,7 @@ def route_expense_wizard_turn(
         pending_line=pending_line,
         has_pending_line=has_pending,
         block=block,
+        last_question=last_question,
         trace_id=trace_id,
     )
 
@@ -88,6 +108,8 @@ def route_expense_wizard_turn(
             inc_iso=inc_iso,
             day_logged_total=day_logged_total,
             daily_cap=daily_cap,
+            trace_id=trace_id,
+            last_question=last_question,
         )
 
     if decision.turn_type == TURN_CLARIFY_REPLY:
@@ -99,9 +121,24 @@ def route_expense_wizard_turn(
             inc_iso=inc_iso,
             day_logged_total=day_logged_total,
             daily_cap=daily_cap,
+            trace_id=trace_id,
+            last_question=last_question,
         )
 
     if decision.turn_type == TURN_NAVIGATE:
+        if stage == STAGE_REVIEW and decision.submit_draft:
+            return _route_review_confirm(
+                wf=wf,
+                block=block,
+                items=items,
+                message=message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                lang=lang,
+                trace_id=trace_id,
+                last_question=last_question,
+            )
         return _route_navigate(
             wf=wf,
             block=block,
@@ -119,10 +156,13 @@ def route_expense_wizard_turn(
                 wf=wf,
                 block=block,
                 items=items,
+                message=message,
                 inc_iso=inc_iso,
                 day_logged_total=day_logged_total,
                 daily_cap=daily_cap,
                 lang=lang,
+                trace_id=trace_id,
+                last_question=last_question,
             )
         return TurnRouteResult(handled=False)
 
@@ -156,6 +196,21 @@ def route_expense_wizard_turn(
             lang=lang,
         )
 
+    if decision.turn_type == TURN_PRAISE and stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
+        return _route_praise(
+            wf=wf,
+            block=block,
+            items=items,
+            message=message,
+            stage=stage,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            lang=lang,
+            trace_id=trace_id,
+            last_question=last_question,
+        )
+
     if decision.turn_type == TURN_EDIT_DRAFT:
         return _route_edit_draft(
             wf=wf,
@@ -170,6 +225,10 @@ def route_expense_wizard_turn(
             decision_source=decision.source,
             uncertain_note=decision.uncertain_note,
             lang=lang,
+            trace_id=trace_id,
+            last_question=last_question,
+            pending_step=pending_step,
+            pending_line=pending_line,
         )
 
     if decision.turn_type == TURN_UNCLEAR:
@@ -196,6 +255,8 @@ def _route_fill_slot(
     inc_iso: str,
     day_logged_total: float,
     daily_cap: float,
+    trace_id: str = "",
+    last_question: str = "",
 ) -> TurnRouteResult:
     from chat.services.expense_workflow import _handle_pending_line, _pack
 
@@ -212,6 +273,8 @@ def _route_fill_slot(
         inc_iso=inc_iso,
         day_logged_total=day_logged_total,
         daily_cap=daily_cap,
+        trace_id=trace_id,
+        last_question=last_question,
     )
     return TurnRouteResult(handled=True, pack=pack)
 
@@ -228,23 +291,20 @@ def _route_navigate(
     lang: str | None,
 ) -> TurnRouteResult:
     from chat.services.expense_workflow import (
-        _has_pending_expense_line,
         _pack,
-        _pending_finish_block_message,
+        _respond_done_while_incomplete,
         _try_advance_to_review,
     )
 
-    if _has_pending_expense_line(block):
-        return TurnRouteResult(
-            handled=True,
-            pack=_pack(
-                wf,
-                block,
-                items=items,
-                question=_pending_finish_block_message(block, lang=lang or "banglish"),
-                inc_iso=inc_iso,
-            ),
-        )
+    done_incomplete = _respond_done_while_incomplete(
+        wf,
+        block,
+        items,
+        inc_iso=inc_iso,
+        lang=lang or "banglish",
+    )
+    if done_incomplete:
+        return TurnRouteResult(handled=True, pack=done_incomplete)
 
     adv = _try_advance_to_review(
         wf,
@@ -277,6 +337,7 @@ def _route_add_lines(
         _ask_more_lines_prompt,
         _ingest_extracted_lines,
         _pack,
+        _pack_ingest_interrupt,
         _try_advance_to_review,
         _unallocated_total_prompt,
         format_expense_summary,
@@ -335,16 +396,14 @@ def _route_add_lines(
         return TurnRouteResult(handled=False)
 
     before_count = len(items)
-    items, blocked_q = _ingest_extracted_lines(block, items, ext, inc_iso=inc_iso)
-    if blocked_q:
+    items, blocked = _ingest_extracted_lines(
+        block, items, ext, inc_iso=inc_iso, message=message, wf=wf
+    )
+    if blocked:
         return TurnRouteResult(
             handled=True,
-            pack=_pack(
-                wf,
-                block,
-                items=items,
-                question=blocked_q,
-                inc_iso=inc_iso,
+            pack=_pack_ingest_interrupt(
+                wf, block, items, blocked, inc_iso=inc_iso
             ),
         )
 
@@ -398,7 +457,12 @@ def _route_edit_draft(
     decision_source: str,
     uncertain_note: str,
     lang: str | None,
+    trace_id: str = "",
+    last_question: str = "",
+    pending_step: str = "",
+    pending_line: dict[str, Any] | None = None,
 ) -> TurnRouteResult:
+    from chat.services.expense.command_executor import apply_message_corrections
     from chat.services.expense.expense_fsm import set_expense_stage
     from chat.services.expense.session_action_memory import record_expense_corrected
     from chat.services.expense_workflow import (
@@ -418,9 +482,28 @@ def _route_edit_draft(
             lang=lang,
         )
 
-    result = execute_correction_plan(items, decision_plan, block=block)
-    items = dedupe_expense_items(result.items)
-    corrected = result.changed
+    if decision_plan.has_any_correction():
+        result = execute_correction_plan(items, decision_plan, block=block)
+        items = dedupe_expense_items(result.items)
+        corrected = result.changed
+        parse_source = decision_source
+    else:
+        corr = apply_message_corrections(
+            items,
+            message,
+            extract_lines=None,
+            trace_id=trace_id,
+            use_llm=True,
+            review_stage=(stage == STAGE_REVIEW),
+            block=block,
+            last_question=last_question,
+            stage=stage,
+            pending_step=pending_step,
+            pending_line=pending_line,
+        )
+        items = dedupe_expense_items(corr.items)
+        corrected = corr.changed
+        parse_source = corr.parse_source
 
     if not corrected:
         fail = build_correction_failure_notice(message, items, lang=lang)
@@ -581,6 +664,55 @@ def _route_edit_draft(
     )
 
 
+def _route_praise(
+    *,
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    stage: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    lang: str | None,
+    trace_id: str = "",
+    last_question: str = "",
+) -> TurnRouteResult:
+    from chat.services.expense_workflow import _build_review_praise_response, _pack
+
+    val = validate_expense_items(
+        items,
+        incurred_date_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        message=message,
+    )
+    q, facts = _build_review_praise_response(
+        message=message,
+        items=items,
+        inc_iso=inc_iso,
+        warnings=val.warnings,
+        line_flags=val.line_flags,
+        lang=lang,
+        trace_id=trace_id,
+        last_question=last_question,
+        wizard_stage=stage,
+        submit_command=False,
+    )
+    return TurnRouteResult(
+        handled=True,
+        pack=_pack(
+            wf,
+            block,
+            items=items,
+            question=q,
+            warnings=val.warnings,
+            inc_iso=inc_iso,
+            message_facts=facts,
+        ),
+    )
+
+
 def _route_unclear(
     *,
     wf: dict[str, Any],
@@ -631,15 +763,21 @@ def _route_review_confirm(
     wf: dict[str, Any],
     block: dict[str, Any],
     items: list[dict[str, Any]],
+    message: str,
     inc_iso: str,
     day_logged_total: float,
     daily_cap: float,
     lang: str | None,
+    trace_id: str = "",
+    last_question: str = "",
 ) -> TurnRouteResult:
     from chat.services.expense.expense_fsm import set_expense_stage
     from chat.services.expense.slots import STAGE_SUBMIT_CONFIRM
     from chat.services.expense_incurred_date import expense_submit_date_block_reason
-    from chat.services.expense_workflow import _pack, format_submit_confirm_prompt
+    from chat.services.expense_workflow import (
+        _build_submit_confirm_response,
+        _pack,
+    )
     from datetime import date
 
     val = validate_expense_items(
@@ -680,15 +818,22 @@ def _route_review_confirm(
             ),
         )
     set_expense_stage(block, STAGE_SUBMIT_CONFIRM)
+    submit_q, submit_facts = _build_submit_confirm_response(
+        message,
+        lang=lang,
+        trace_id=trace_id,
+        last_question=last_question,
+    )
     return TurnRouteResult(
         handled=True,
         pack=_pack(
             wf,
             block,
             items=items,
-            question=format_submit_confirm_prompt(lang),
+            question=submit_q,
             warnings=val.warnings,
             inc_iso=inc_iso,
+            message_facts=submit_facts,
         ),
     )
 

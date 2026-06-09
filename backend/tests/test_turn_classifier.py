@@ -30,7 +30,18 @@ def test_hi_during_leave_is_chitchat():
         pending_leave_step="leave_payment_category",
     )
     assert turn == TURN_CHITCHAT
-    assert not is_workflow_continuation_turn(turn)
+
+
+def test_ha_during_expense_clarify_is_slot_answer():
+    turn = classify_workflow_turn(
+        "ha",
+        leave_active=False,
+        expense_active=True,
+        pending_expense_step="clarify",
+    )
+    assert turn == TURN_SLOT_ANSWER
+    assert turn != TURN_CHITCHAT
+    assert is_workflow_continuation_turn(turn)
 
 
 def test_expense_correction_turn():

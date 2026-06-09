@@ -118,6 +118,7 @@ class WizardInterruptContext:
     has_suspended_leave: bool = False
     has_suspended_expense: bool = False
     pending_leave_step: str = ""
+    expense_pending_step: str = ""
     expense_item_summary: str = ""
     leave_draft_summary: str = ""
 
@@ -305,6 +306,8 @@ def _context_block(context: WizardInterruptContext) -> str:
             lines.append("Expense is at review/confirm.")
         if context.expense_item_summary:
             lines.append(f"Expense draft: {context.expense_item_summary}")
+        if context.expense_pending_step:
+            lines.append(f"Pending expense step: {context.expense_pending_step}")
     if context.leave_active:
         lines.append("Active workflow: leave")
         if context.leave_review_pending:
@@ -398,6 +401,64 @@ def classify_wizard_interrupt(
     return rules if rules.interrupt_type != INTERRUPT_UNCLEAR else (llm_decision or rules)
 
 
+def classify_active_wizard_interrupt(
+    message: str,
+    *,
+    workflow_state: dict[str, Any] | None = None,
+    leave_active: bool = False,
+    expense_active: bool = False,
+    leave_review_pending: bool = False,
+    expense_review_pending: bool = False,
+    pending_leave_step: str = "",
+    trace_id: str = "",
+    use_llm: bool = True,
+) -> WizardInterruptDecision:
+    """
+    Single entry for wizard interrupt classification (P3).
+
+    Builds rich context from workflow_state and runs rules + optional LLM.
+    """
+    wf = workflow_state or {}
+    context = WizardInterruptContext(
+        expense_active=expense_active,
+        leave_active=leave_active,
+        leave_review_pending=leave_review_pending,
+        expense_review_pending=expense_review_pending,
+        pending_leave_step=pending_leave_step or "",
+    )
+    if expense_active:
+        exp_ctx = build_expense_interrupt_context(wf)
+        context = WizardInterruptContext(
+            expense_active=True,
+            expense_stage=exp_ctx.expense_stage,
+            expense_review_pending=exp_ctx.expense_review_pending,
+            expense_item_summary=exp_ctx.expense_item_summary,
+            expense_pending_step=exp_ctx.expense_pending_step,
+            leave_active=leave_active,
+            leave_review_pending=leave_review_pending,
+            pending_leave_step=pending_leave_step or "",
+            has_suspended_leave=exp_ctx.has_suspended_leave,
+            has_suspended_expense=exp_ctx.has_suspended_expense,
+        )
+    elif leave_active:
+        leave_ctx = build_leave_interrupt_context(
+            wf,
+            pending_leave_step=pending_leave_step or "",
+            leave_review_pending=leave_review_pending,
+        )
+        context = leave_ctx
+        context.leave_active = True
+        context.leave_review_pending = leave_review_pending
+        context.pending_leave_step = pending_leave_step or ""
+
+    return classify_wizard_interrupt(
+        message,
+        context=context,
+        trace_id=trace_id,
+        use_llm=use_llm,
+    )
+
+
 def interrupt_is_workflow_switch(decision: WizardInterruptDecision) -> bool:
     return decision.interrupt_type in (
         INTERRUPT_NEW_LEAVE,
@@ -429,6 +490,7 @@ def build_expense_interrupt_context(
         expense_review_pending=bool(block.get("active") and is_expense_review(block)),
         has_suspended_leave=has_suspended_leave(wf),
         expense_item_summary=", ".join(summary_parts) if summary_parts else "(empty)",
+        expense_pending_step=str(block.get("pending_step") or ""),
     )
 
 

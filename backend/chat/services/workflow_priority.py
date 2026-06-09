@@ -105,6 +105,25 @@ def should_clear_misrouted_leave(
     return False
 
 
+def expense_side_answer_during_leave(message: str) -> bool:
+    """True when user is answering expense clarify/category, not continuing leave."""
+    text = (message or "").strip()
+    if not text:
+        return False
+    try:
+        from chat.services.expense.clarify import parse_clarification_partial_confirm
+        from chat.services.expense.expense_confirm import parse_category_slot_answer
+        from chat.services.expense_extraction import parse_category_token
+
+        if parse_category_slot_answer(text) or parse_category_token(text):
+            return True
+        if parse_clarification_partial_confirm(text, 5) is not None:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def leave_wizard_help_hint(lang: str | None = None) -> str:
     """Deterministic hint during active leave draft (no conversational LLM)."""
     if lang == "bn":

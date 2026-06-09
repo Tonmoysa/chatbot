@@ -112,7 +112,30 @@ def execute_correction_plan(
                 changed = True
                 break
 
+    for cat, rm_amt in plan.remove_by_amount:
+        target_amt = round(float(rm_amt), 2)
+        before = len(out)
+        out = [
+            r
+            for r in out
+            if not (
+                str(r.get("category") or "").lower() == cat.lower()
+                and round(float(r.get("amount") or 0), 2) == target_amt
+            )
+        ]
+        if len(out) < before:
+            changed = True
+
     for cat in plan.remove_verb_first:
+        if any(c.lower() == cat.lower() for c, _ in plan.remove_by_amount):
+            continue
+        matches = [
+            r
+            for r in out
+            if str(r.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            continue
         before = len(out)
         out = [r for r in out if str(r.get("category") or "").lower() != cat.lower()]
         if len(out) < before:
@@ -148,6 +171,18 @@ def execute_correction_plan(
             out.append(ExpenseLineItem(category=cat, amount=new_amt).to_dict())
             changed = True
 
+    if plan.set_category_only:
+        from chat.services.expense.reconcile import apply_category_hobe_correction
+
+        pending = None
+        if block and isinstance(block.get("pending_line"), dict):
+            pending = block.get("pending_line")
+        out, slot_changed = apply_category_hobe_correction(
+            out, plan.set_category_only, pending=pending
+        )
+        if slot_changed:
+            changed = True
+
     if changed:
         out = _prune_zero_lines(dedupe_expense_items(out))
     return CommandExecuteResult(items=out, changed=changed)
@@ -161,8 +196,13 @@ def apply_message_corrections(
     trace_id: str = "",
     use_llm: bool = True,
     review_stage: bool = False,
+    block: dict[str, Any] | None = None,
+    last_question: str = "",
+    stage: str = "",
+    pending_step: str = "",
+    pending_line: dict[str, Any] | None = None,
 ) -> CommandExecuteResult:
-    """Parse + execute corrections; rules first, LLM gap-fill at review, then extract."""
+    """Parse + execute corrections; rules first, LLM gap-fill, then extract."""
     from chat.services.expense.command_llm_gate import correction_llm_should_use
     from chat.services.expense.command_llm_parser import parse_correction_plan_llm
     from chat.services.expense.command_parser import (
@@ -171,14 +211,21 @@ def apply_message_corrections(
     )
 
     review = review_stage or extract_lines is None
+    collecting = bool(block and not review and items)
     parse_result = resolve_correction_plan(
         message,
         items,
         trace_id=trace_id,
         use_llm=use_llm,
         review_stage=review,
+        collecting_stage=collecting,
+        stage=stage,
+        pending_step=pending_step,
+        pending_line=pending_line,
+        block=block,
+        last_question=last_question,
     )
-    result = execute_correction_plan(items, parse_result.plan)
+    result = execute_correction_plan(items, parse_result.plan, block=block)
     if result.changed:
         return CommandExecuteResult(
             items=result.items,
@@ -187,21 +234,36 @@ def apply_message_corrections(
         )
 
     rules_plan = parse_correction_plan(message)
-    if (
-        use_llm
-        and review
-        and rules_plan.has_any_correction()
-        and correction_llm_should_use(message, items, review_stage=True)
-    ):
-        llm_plan = parse_correction_plan_llm(message, items, trace_id)
-        if llm_plan and llm_plan.has_any_correction():
-            llm_result = execute_correction_plan(items, llm_plan)
-            if llm_result.changed:
-                return CommandExecuteResult(
-                    items=llm_result.items,
-                    changed=True,
-                    parse_source="llm",
-                )
+    llm_kwargs = dict(
+        stage=stage,
+        pending_step=pending_step,
+        pending_line=pending_line,
+        block=block,
+        last_question=last_question,
+    )
+    if use_llm and rules_plan.has_any_correction():
+        if review and correction_llm_should_use(message, items, review_stage=True):
+            llm_plan = parse_correction_plan_llm(message, items, trace_id, **llm_kwargs)
+            if llm_plan and llm_plan.has_any_correction():
+                llm_result = execute_correction_plan(items, llm_plan, block=block)
+                if llm_result.changed:
+                    return CommandExecuteResult(
+                        items=llm_result.items,
+                        changed=True,
+                        parse_source="llm",
+                    )
+        elif collecting and correction_llm_should_use(
+            message, items, collecting_stage=True
+        ):
+            llm_plan = parse_correction_plan_llm(message, items, trace_id, **llm_kwargs)
+            if llm_plan and llm_plan.has_any_correction():
+                llm_result = execute_correction_plan(items, llm_plan, block=block)
+                if llm_result.changed:
+                    return CommandExecuteResult(
+                        items=llm_result.items,
+                        changed=True,
+                        parse_source="llm",
+                    )
 
     if extract_lines is None:
         return CommandExecuteResult(

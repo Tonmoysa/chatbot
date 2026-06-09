@@ -63,11 +63,19 @@ def looks_like_expense_wizard_continuation(message: str) -> bool:
         return True
     if wants_expense_submit_command(text) or wants_expense_done_command(text):
         return True
+    from chat.services.expense.clarify_praise import looks_like_wizard_praise_message
+
+    if looks_like_wizard_praise_message(text):
+        return True
     if is_expense_wizard_command(text):
         return True
     if wants_resume_or_show_expense(text):
         return True
     if wants_expense_summary(text):
+        return True
+    from chat.services.expense.clarify import looks_like_clarify_reply_signal
+
+    if looks_like_clarify_reply_signal(text):
         return True
     if is_confirmation_yes(text) or is_confirmation_no(text):
         return True

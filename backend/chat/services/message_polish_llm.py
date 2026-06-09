@@ -23,6 +23,8 @@ MessagePolishType = Literal[
     "expense_wizard_prompt",
     "expense_validation_block",
     "expense_clarify",
+    "expense_clarify_praise_review",
+    "expense_review_praise",
     "expense_submit_confirm",
     "expense_submit_success",
     "leave_wizard",
@@ -68,6 +70,28 @@ RULES
 - Preserve **bold** on amounts, categories, and dates when using markdown.
 - Do NOT invent lines, do NOT mention CRM submit, do NOT add follow-up questions.
 - Output ONLY the acknowledgment portion (no "any more lines?" question)."""
+
+_EXPENSE_CLARIFY_PRAISE_ACK_SYSTEM = """You write a short warm acknowledgment when the user praised the expense bot during expense clarify or review.
+
+RULES
+- Same language as REPLY_LANGUAGE — match the user's Bangla / Banglish / English style.
+- Respond naturally to what they said (thanks, awesome, very good observation, typo catch praise).
+- Reference the review context when appropriate — they are looking at their expense list.
+- 1–2 sentences max, warm HR colleague tone — not robotic, not overly long.
+- Do NOT list expense lines, amounts, or categories (the review summary follows separately).
+- Do NOT ask unrelated questions; a gentle "skim the list below" nudge is OK on review.
+- Output ONLY the acknowledgment text."""
+
+_EXPENSE_REVIEW_PRAISE_SYSTEM = """You write a short professional reply when the user praised the bot during expense REVIEW.
+
+RULES
+- Same language as REPLY_LANGUAGE — match the user's Bangla / Banglish / English style.
+- Warmly acknowledge what they said (thanks, okay thank you, good job, etc.).
+- Gently ask whether to submit the expense to CRM now — one clear professional question.
+- FACTS JSON has item_count/total for context only — do NOT list line items or bullet amounts.
+- 2–3 sentences total max; colleague tone, not robotic.
+- Do NOT repeat the full expense review list.
+- Output ONLY the reply text."""
 
 _EXPENSE_SUMMARY_SYSTEM = """You rephrase an expense review summary before user confirmation.
 
@@ -128,10 +152,21 @@ _EXPENSE_CLARIFY_SYSTEM = """You rephrase a batched expense clarification prompt
 
 RULES
 - Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
-- FACTS JSON lists every issue — category, amount, typo original/suggestion must appear.
-- Numbered list format is fine; keep every issue visible.
+- FACTS.issues is the ONLY list of open questions — rephrase those items only.
+- IGNORE expense lines from the user's original voice dump that are NOT listed in FACTS.issues.
+- Already-detected lines (with category in the message) must NOT appear as new questions.
+- FACTS JSON lists every open issue — amount, typo original/suggestion must appear.
+- NEVER switch REPLY_LANGUAGE to English when it is bn or banglish.
+- If REPLY_LANGUAGE is bn or banglish, output MUST include Bengali script OR natural Banglish — not English-only.
+- prompt_variant guides tone:
+  - initial: friendly intro that review is almost ready, list what needs confirming
+  - followup: thank user for partial answers; only ask what is still open
+  - disambiguation: user gave one answer for multiple items — ask which numbered item they mean (warm, not scolding)
+  - done_incomplete: user said they are done but items remain — warm wrap-up then list open issues only
+- Numbered list format is fine; keep every issue visible; same count as FACTS.issues.
 - Preserve **bold** on amounts, categories, locations, and suggestions.
-- Keep the one-message reply instruction at the end.
+- Keep the one-message reply instruction at the end (vary wording slightly each time).
+- Warm HR colleague tone — natural Bangla/Banglish mix when REPLY_LANGUAGE is banglish.
 - Do NOT add or remove clarification items.
 - Output ONLY the clarification prompt."""
 
@@ -140,6 +175,7 @@ _EXPENSE_SUBMIT_CONFIRM_SYSTEM = """You rephrase the intro line before expense C
 RULES
 - Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
 - Same meaning: data looks good, ready to submit to CRM.
+- If the user combined praise with submit intent, thank them briefly and gently suggest one quick skim of the lines before final yes.
 - 1–2 warm professional sentences only — the yes/no options are appended separately.
 - Do NOT include yes/no bullets or CRM submit options.
 - Output ONLY the intro sentence(s)."""
@@ -322,6 +358,10 @@ def _system_prompt(message_type: MessagePolishType) -> str:
         return _EXPENSE_VALIDATION_BLOCK_SYSTEM
     if message_type == "expense_clarify":
         return _EXPENSE_CLARIFY_SYSTEM
+    if message_type == "expense_clarify_praise_review":
+        return _EXPENSE_CLARIFY_PRAISE_ACK_SYSTEM
+    if message_type == "expense_review_praise":
+        return _EXPENSE_REVIEW_PRAISE_SYSTEM
     if message_type == "expense_submit_confirm":
         return _EXPENSE_SUBMIT_CONFIRM_SYSTEM
     if message_type == "expense_submit_success":
@@ -434,6 +474,7 @@ def polish_expense_wizard_prompt(
 def _envelope_facts_guard_ok(envelope: dict[str, Any], polished: str) -> bool:
     from chat.services.expense_message_facts import (
         clarify_facts_preserved,
+        clarify_praise_facts_preserved,
         envelope_facts_preserved,
         submit_success_facts_preserved,
         validation_block_facts_preserved,
@@ -446,6 +487,8 @@ def _envelope_facts_guard_ok(envelope: dict[str, Any], polished: str) -> bool:
         return validation_block_facts_preserved(envelope, polished)
     if message_type == "expense_clarify":
         return clarify_facts_preserved(envelope, polished)
+    if message_type in ("expense_clarify_praise_review", "expense_review_praise"):
+        return clarify_praise_facts_preserved(envelope, polished)
     if message_type == "expense_submit_success":
         return submit_success_facts_preserved(envelope, polished)
     template = str(envelope.get("template_fallback") or "")
@@ -472,6 +515,8 @@ def polish_envelope_message(
     if message_type not in (
         "expense_validation_block",
         "expense_clarify",
+        "expense_clarify_praise_review",
+    "expense_review_praise",
         "expense_submit_confirm",
         "expense_submit_success",
     ):
@@ -483,13 +528,26 @@ def polish_envelope_message(
 
     lang = str(envelope.get("lang") or detect_user_language(user_message or template))
     facts_json = json.dumps(envelope.get("facts") or {}, ensure_ascii=False, indent=2)
+    facts_label = (
+        "FACTS (context only — do NOT list expense lines in output):\n"
+        if message_type in ("expense_clarify_praise_review", "expense_review_praise")
+        else "FACTS (preserve every amount, category, date, reference):\n"
+    )
+    if message_type == "expense_clarify":
+        user_block = (
+            "Context: user sent a multi-line expense claim. "
+            "Clarify ONLY the open items in FACTS.issues — "
+            "do not ask about lines already parsed with a category.\n"
+        )
+    else:
+        user_block = f"User said:\n{user_message or '(n/a)'}\n"
     try:
         out = client.chat_text(
             system_prompt=_system_prompt(message_type),  # type: ignore[arg-type]
             user_prompt=(
                 f"{_lang_line(lang)}\n\n"
-                f"User said:\n{user_message or '(n/a)'}\n\n"
-                f"FACTS (preserve every amount, category, date, reference):\n"
+                f"{user_block}\n"
+                f"{facts_label}"
                 f"{facts_json}\n\n"
                 f"REFERENCE display (same meaning, preserve all **bold** and numbers):\n"
                 f"{template}"
@@ -538,6 +596,8 @@ def _polish_body_from_envelope(
     if message_type in (
         "expense_validation_block",
         "expense_clarify",
+        "expense_clarify_praise_review",
+    "expense_review_praise",
         "expense_submit_confirm",
         "expense_submit_success",
     ):
@@ -580,7 +640,12 @@ def polish_expense_message_with_envelope(
         )
 
     fixed = str(envelope.get("fixed_part") or "").strip()
-    if body and fixed and str(envelope.get("message_type") or "") == "expense_submit_confirm":
+    msg_type = str(envelope.get("message_type") or "")
+    if body and fixed and msg_type in (
+        "expense_submit_confirm",
+        "expense_clarify_praise_review",
+    "expense_review_praise",
+    ):
         return body.rstrip() + "\n\n" + fixed
     if body and ask:
         return body.rstrip() + "\n\n" + ask

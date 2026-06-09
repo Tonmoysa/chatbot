@@ -83,6 +83,7 @@ from chat.services.expense_workflow import (
     save_expense_last_submission,
     wants_expense_spend_recap_query,
     wants_expense_summary,
+    wants_resume_or_show_expense,
 )
 from chat.services.workflow_suspend import (
     clear_restore_leave_after_expense_submit,
@@ -1003,11 +1004,7 @@ class ChatOrchestrator:
                     session, switch_active_expense_to_suspended_leave(wf_state)
                 )
                 log_step(trace_id, "expense_paused_resume_leave_nav", {})
-            elif (
-                _wants_resume_expense(message)
-                or wants_expense_summary(message)
-                or looks_like_expense_wizard_continuation(message)
-            ):
+            elif wants_resume_or_show_expense(message):
                 wf_state = _persist_workflow_state(
                     session, resume_expense_session(wf_state)
                 )
@@ -1035,11 +1032,7 @@ class ChatOrchestrator:
             and not is_expense_in_progress(wf_state)
             and not is_leave_in_progress(wf_state)
             and not is_cancel_now
-            and (
-                _wants_resume_expense(message)
-                or wants_expense_summary(message)
-                or _strong_expense_claim(message)
-            )
+            and wants_resume_or_show_expense(message)
         ):
             wf_state = _persist_workflow_state(
                 session, restore_suspended_expense(wf_state)
@@ -1092,15 +1085,17 @@ class ChatOrchestrator:
             from chat.services.expense.expense_total_dispute import (
                 is_expense_total_check_query,
             )
+            from chat.services.expense_extraction import message_contains_expense_claim_lines
             from chat.services.expense.session_action_memory import (
                 wants_expense_meta_question as _wants_expense_meta,
             )
 
-            forced = (
-                INTENT_EXPENSE_STATUS
-                if is_expense_total_check_query(message) or _wants_expense_meta(message)
-                else INTENT_EXPENSE_DAY_SUMMARY
-            )
+            if message_contains_expense_claim_lines(message):
+                forced = INTENT_EXPENSE_CLAIM
+            elif is_expense_total_check_query(message) or _wants_expense_meta(message):
+                forced = INTENT_EXPENSE_STATUS
+            else:
+                forced = INTENT_EXPENSE_DAY_SUMMARY
             intent = forced
             intent_result = {
                 **intent_result,
@@ -1216,6 +1211,7 @@ class ChatOrchestrator:
                 pending_leave_step=(
                     pending_step(wf_state) if is_leave_in_progress(wf_state) else None
                 ),
+                pending_expense_step=str(exp_block.get("pending_step") or ""),
                 leave_review_pending=is_awaiting_leave_confirmation(wf_state),
                 expense_review_pending=bool(
                     exp_block.get("active") and is_expense_review(exp_block)
@@ -1356,12 +1352,41 @@ class ChatOrchestrator:
                 if not policy_complaint and (
                     workflow_turn == TURN_CHITCHAT or general_out_of_scope
                 ):
-                    if not is_expense_paused(wf_state) and not is_greeting_now:
-                        wf_state = _persist_workflow_state(
-                            session, pause_expense_session(wf_state)
+                    exp_clarify = (
+                        read_expense_block(wf_state)
+                        if is_expense_in_progress(wf_state)
+                        else {}
+                    )
+                    clarify_active = (
+                        str(exp_clarify.get("pending_step") or "").strip().lower()
+                        == "clarify"
+                    )
+                    if clarify_active:
+                        from chat.services.expense.clarify import (
+                            looks_like_clarify_reply_signal,
                         )
-                        log_step(trace_id, "expense_wizard_paused_for_side_question", {})
-                    expense_side_interrupt = True
+
+                        if looks_like_clarify_reply_signal(message):
+                            clarify_active = False
+                    if not clarify_active:
+                        from chat.services.expense.clarify_praise import (
+                            looks_like_wizard_praise_message,
+                        )
+
+                        if looks_like_wizard_praise_message(
+                            message
+                        ) or looks_like_expense_wizard_continuation(message):
+                            clarify_active = True
+                    if not is_expense_paused(wf_state) and not is_greeting_now:
+                        if not clarify_active:
+                            wf_state = _persist_workflow_state(
+                                session, pause_expense_session(wf_state)
+                            )
+                            log_step(
+                                trace_id, "expense_wizard_paused_for_side_question", {}
+                            )
+                    if not clarify_active:
+                        expense_side_interrupt = True
         else:
             # Skip follow-up inference when the user just dismissed the wizard
             # (greeting / cancel) — otherwise the recent assistant turn (which
@@ -1404,23 +1429,36 @@ class ChatOrchestrator:
                     "source": (intent_result.get("source") or "intent")
                     + "+leave_workflow_lock",
                 }
+        from chat.services.expense.wizard_commands import (
+            is_expense_wizard_command,
+            wants_expense_submit_command,
+        )
+
+        expense_wizard_command_turn = wants_expense_submit_command(
+            message
+        ) or is_expense_wizard_command(message)
+
         if (
             wizard_dismissed_reason is None
             and is_expense_in_progress(wf_gate)
-            and intent
-            not in (
-                INTENT_EXPENSE_DAY_SUMMARY,
-                INTENT_EXPENSE_STATUS,
-                INTENT_REQUEST_STATUS,
-                INTENT_LEAVE_BALANCE,
-                INTENT_HR_POLICY,
-                INTENT_LEAVE_REQUEST,
-                INTENT_WFH_REQUEST,
-                INTENT_ATTENDANCE_CORRECTION,
-                INTENT_APPROVAL_ESCALATION,
+            and (
+                expense_wizard_command_turn
+                or intent
+                not in (
+                    INTENT_EXPENSE_DAY_SUMMARY,
+                    INTENT_EXPENSE_STATUS,
+                    INTENT_REQUEST_STATUS,
+                    INTENT_LEAVE_BALANCE,
+                    INTENT_HR_POLICY,
+                    INTENT_LEAVE_REQUEST,
+                    INTENT_WFH_REQUEST,
+                    INTENT_ATTENDANCE_CORRECTION,
+                    INTENT_APPROVAL_ESCALATION,
+                )
             )
             and (
-                intent == INTENT_UNKNOWN
+                expense_wizard_command_turn
+                or intent == INTENT_UNKNOWN
                 or (
                     workflow_turn is not None
                     and is_workflow_continuation_turn(workflow_turn)
@@ -1442,16 +1480,28 @@ class ChatOrchestrator:
                 "intent": INTENT_EXPENSE_CLAIM,
                 "source": (intent_result.get("source") or "intent") + "+expense_workflow_lock",
             }
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+
         if (
             wizard_dismissed_reason is None
+            and not is_expense_in_progress(wf_gate)
+            and _strong_expense_claim(message)
+        ):
+            intent = INTENT_EXPENSE_CLAIM
+            intent_result = {
+                **intent_result,
+                "intent": INTENT_EXPENSE_CLAIM,
+                "source": (intent_result.get("source") or "intent") + "+expense_start_heuristic",
+            }
+        elif (
+            wizard_dismissed_reason is None
+            and not is_expense_in_progress(wf_gate)
             and (
                 wants_post_submit_expense_summary(message)
                 or _strong_expense_day_summary(message)
-                or (
-                    not is_expense_in_progress(wf_gate)
-                    and wants_expense_spend_recap_query(message)
-                )
+                or wants_expense_spend_recap_query(message)
             )
+            and not message_contains_expense_claim_lines(message)
         ):
             intent = INTENT_EXPENSE_DAY_SUMMARY
             intent_result = {
@@ -1462,14 +1512,13 @@ class ChatOrchestrator:
         elif (
             wizard_dismissed_reason is None
             and not is_expense_in_progress(wf_gate)
-            and intent == INTENT_UNKNOWN
-            and _strong_expense_claim(message)
+            and wants_expense_submit_command(message)
         ):
             intent = INTENT_EXPENSE_CLAIM
             intent_result = {
                 **intent_result,
                 "intent": INTENT_EXPENSE_CLAIM,
-                "source": (intent_result.get("source") or "intent") + "+expense_start_heuristic",
+                "source": (intent_result.get("source") or "intent") + "+expense_submit_heuristic",
             }
         elif wizard_dismissed_reason is None and _asks_recent_leave_submission(message):
             intent = INTENT_REQUEST_STATUS
