@@ -326,10 +326,10 @@ def test_compound_route_lunch_and_loose_amount(monkeypatch):
         for i in (er1.get("clarification_issues") or [])
         if i.get("kind") == "missing_category"
     }
-    assert 60.0 in issue_amounts
+    assert any(r["category"] == "Bus" and r["amount"] == 60 for r in r1["items"])
     assert 50.0 in issue_amounts
 
-    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="bus, snack")
+    r2 = process_expense_turn(workflow_state=r1["workflow_state"], message="snack")
     er2 = r2["workflow_state"].get("expense_request") or {}
     buses = [r for r in r2["items"] if r["category"] == "Bus"]
     snacks = [r for r in r2["items"] if r["category"] == "Snack"]

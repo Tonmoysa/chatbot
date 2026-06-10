@@ -710,6 +710,10 @@ class IntentDetector:
 
         if wants_cancel_leave_command(raw_message or text):
             return INTENT_LEAVE_REQUEST
+        from chat.services.leave_meta_queries import wants_leave_session_summary
+
+        if wants_leave_session_summary(raw_message or text):
+            return INTENT_LEAVE_REQUEST
         if re.search(
             r"\b(leave|pto|vacation|time off|sick day|day off|holiday)\b", text
         ):

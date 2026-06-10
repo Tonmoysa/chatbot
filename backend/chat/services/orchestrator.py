@@ -404,95 +404,18 @@ def _apply_pre_router_navigation(
     is_cancel_now: bool,
     trace_id: str,
 ) -> dict[str, Any]:
-    """Deterministic workflow-navigation phase that runs *before* the session router.
+    """Execute the router-owned pre-router navigation plan (rows N50–N55).
 
-    Resume / restore / switch operations are inherently stateful: the router
-    classifies the turn against the *current* workflow snapshot, so the snapshot
-    must already reflect any navigation the user just performed (e.g. "resume my
-    leave" while an expense wizard is active). Keeping every navigation mutation
-    in this single, auditable phase — instead of scattering them through the
-    handler — gives the router one consistent snapshot and a clean seam for any
-    future router-driven inversion.
-
-    This function is behaviour-preserving: it only consolidates the mutations
-    that previously lived inline in the chat handler.
+    Pattern matching + priority live in
+    ``session_turn_router.plan_pre_router_navigation`` — this seam only
+    persists each planned step and emits the observability log, so the
+    orchestrator stays execution-only (TURN_ROUTER_SPEC §2 rule).
     """
-    from chat.services.workflow_priority import (
-        expense_query_should_suspend_leave,
-        should_clear_misrouted_leave,
-    )
+    from chat.services.session_turn_router import plan_pre_router_navigation
 
-    # Resume paused leave on any continuation except another explicit policy lookup.
-    if is_leave_paused(wf_state) and not is_cancel_now:
-        policy_interrupt = _is_policy_interrupt_message(message)
-        if _wants_resume_leave(message) or not policy_interrupt:
-            wf_state = _persist_workflow_state(session, resume_leave_session(wf_state))
-            log_step(trace_id, "leave_wizard_auto_resumed", {})
-
-    if (
-        not is_cancel_now
-        and has_suspended_leave(wf_state)
-        and wants_resume_suspended_leave(message)
-        and is_expense_in_progress(wf_state)
-        and not is_leave_in_progress(wf_state)
-    ):
-        wf_state = _persist_workflow_state(
-            session, switch_active_expense_to_suspended_leave(wf_state)
-        )
-        log_step(trace_id, "expense_suspended_resume_leave_nav", {})
-
-    if is_expense_paused(wf_state) and not is_cancel_now:
-        if wants_resume_suspended_leave(message) and has_suspended_leave(wf_state):
-            wf_state = _persist_workflow_state(
-                session, switch_active_expense_to_suspended_leave(wf_state)
-            )
-            log_step(trace_id, "expense_paused_resume_leave_nav", {})
-        elif wants_resume_or_show_expense(message):
-            wf_state = _persist_workflow_state(
-                session, resume_expense_session(wf_state)
-            )
-            log_step(trace_id, "expense_wizard_auto_resumed", {})
-
-    # Restore a workflow parked while the user completed another task.
-    if (
-        has_suspended_leave(wf_state)
-        and not is_leave_in_progress(wf_state)
-        and not is_expense_in_progress(wf_state)
-        and not is_cancel_now
-        and (
-            wants_resume_suspended_leave(message)
-            or _is_leave_application_message(message)
-            or _answers_suspended_leave_step(message, wf_state)
-        )
-    ):
-        wf_state = _persist_workflow_state(
-            session, restore_suspended_leave(wf_state, force_active=True)
-        )
-        log_step(trace_id, "suspended_leave_restored", {})
-
-    if (
-        has_suspended_expense(wf_state)
-        and not is_expense_in_progress(wf_state)
-        and not is_leave_in_progress(wf_state)
-        and not is_cancel_now
-        and wants_resume_or_show_expense(message)
-    ):
-        wf_state = _persist_workflow_state(
-            session, restore_suspended_expense(wf_state)
-        )
-        log_step(trace_id, "suspended_expense_restored", {})
-
-    if is_leave_in_progress(wf_state):
-        if expense_query_should_suspend_leave(message):
-            wf_state = _persist_workflow_state(
-                session, suspend_leave_for_workflow_switch(wf_state)
-            )
-            log_step(trace_id, "leave_suspended_for_expense_query", {})
-        elif should_clear_misrouted_leave(message, wf_state):
-            wf_state = _persist_workflow_state(
-                session, clear_suspended_leave(deactivate_leave_session(wf_state))
-            )
-            log_step(trace_id, "misrouted_leave_cleared", {})
+    for step in plan_pre_router_navigation(message, wf_state, is_cancel=is_cancel_now):
+        wf_state = _persist_workflow_state(session, step.state)
+        log_step(trace_id, step.log_step, {"rule": step.rule})
 
     return wf_state
 
@@ -503,20 +426,6 @@ def _attach_ui_actions(
     resp = envelope.setdefault("response", {})
     resp["actions"] = build_ui_actions(workflow_state)
     return envelope
-
-
-def _answers_suspended_leave_step(
-    message: str, workflow_state: dict[str, Any]
-) -> bool:
-    from chat.services.workflow_suspend import KEY_SUSPENDED_LEAVE
-
-    sl = (workflow_state or {}).get(KEY_SUSPENDED_LEAVE) or {}
-    step = sl.get("step")
-    if not step:
-        return False
-    if _message_answers_wizard_step(message, step):
-        return True
-    return bool(_canonical_leave_wizard_token(message))
 
 
 def _rules_footer(*, mode: str, lang: str) -> str:
@@ -714,13 +623,49 @@ class ChatOrchestrator:
                 build_deferred_leave_return_prompt,
                 is_confirmation_yes,
             )
-            from chat.services.leave_fsm import mark_review_pending, read_leave_state
+            from chat.services.leave.normalization import normalize_leave_draft
+            from chat.services.leave_draft_utils import apply_leave_draft_defaults
+            from chat.services.leave_fsm import (
+                STATUS_ACTIVE,
+                apply_leave_state,
+                mark_review_pending,
+                read_leave_state,
+            )
+            from chat.services.leave_policies import get_company_leave_policy
+            from chat.services.leave_slots import generate_question, get_missing_slots
 
             if is_confirmation_yes(message):
                 return None
 
             st = read_leave_state(wf)
             draft = dict(st.get("draft") or {})
+            policy = get_company_leave_policy(
+                getattr(session, "company_id", None) or "default"
+            )
+            normalize_leave_draft(draft)
+            apply_leave_draft_defaults(draft, policy)
+            missing = get_missing_slots(draft, policy=policy)
+            if missing:
+                slot = missing[0]
+                wf = apply_leave_state(
+                    wf,
+                    draft=draft,
+                    step=slot,
+                    status=STATUS_ACTIVE,
+                    review_pending=False,
+                )
+                session.workflow_state = wf
+                session.save(update_fields=["workflow_state", "updated_at"])
+                msg = generate_question(
+                    slot, draft, remaining=len(missing), missing=missing
+                )
+                return {
+                    "intent": INTENT_LEAVE_REQUEST,
+                    "decision": {"outcome": "NEEDS_CLARIFICATION", "reason": msg},
+                    "response": {"message": msg, "status": "success", "request_id": ""},
+                    "status": "success",
+                    "_session_id": sid,
+                }
             wf = mark_review_pending(wf, draft)
             session.workflow_state = wf
             session.save(update_fields=["workflow_state", "updated_at"])
@@ -3117,14 +3062,22 @@ class ChatOrchestrator:
                     or _looks_like_chitchat(message, strict=True)
                     or _is_fresh_start_greeting(message)
                 ):
-                    reply = conversational_reply(
-                        message=message,
-                        context_lines=context_lines,
-                        trace_id=trace_id,
-                        workflow_hint=_expense_chitchat_workflow_hint(
-                            wf_exp_chat, user_message=message
-                        ),
-                    )
+                    reply = None
+                    try:
+                        reply = conversational_reply(
+                            message=message,
+                            context_lines=context_lines,
+                            trace_id=trace_id,
+                            workflow_hint=_expense_chitchat_workflow_hint(
+                                wf_exp_chat, user_message=message
+                            ),
+                        )
+                    except Exception:
+                        reply = _wizard_deterministic_fallback(
+                            message,
+                            wf_exp_chat,
+                            general_out_of_scope=general_out_of_scope,
+                        )
                     if reply:
                         msg = reply
                         if is_expense_paused(wf_exp_chat):
@@ -3632,10 +3585,6 @@ def _wants_resume_expense(message: str) -> bool:
     if wants_expense_summary(message):
         return True
     return False
-
-
-def _wants_resume_leave(message: str) -> bool:
-    return wants_resume_suspended_leave(message)
 
 
 def new_trace_id() -> str:

@@ -33,7 +33,7 @@ _NON_SICK_LEAVE_REASON_RE = re.compile(
     r"famil+y?(?:\s+problem|\s+program|\s+issue|\s+event)?|"
     r"famil\s+program|"
     r"family\s+program|family\s+problem|family\s+issue|family\s+event|"
-    r"ফ্যামিলি|পরিবার|"
+    r"ফ্যামিলি|পরিবার|পারিবারিক|"
     r"wedding|marriage|biye|বিয়ে|"
     r"travel|trip|tour|vacation|holiday|যাত্রা|"
     r"funeral|bereavement|শোক|"
@@ -152,26 +152,95 @@ def reason_indicates_non_sick_leave(reason: str) -> bool:
     return bool(_NON_SICK_LEAVE_REASON_RE.search(text))
 
 
+def invalidate_leave_type_for_reselect(draft: dict[str, Any]) -> None:
+    """Clear wizard leave type so the user must pick Sick / Annual / LWOP again (R03)."""
+    draft.pop("leave_type", None)
+    draft.pop("leave_payment_category", None)
+    draft.pop("_reason_implied", None)
+    draft.pop("_leave_bucket", None)
+    draft.pop("_leave_bucket_confidence", None)
+    draft["_leave_type_reselect_required"] = True
+    clear_supporting_document_if_unneeded(draft)
+
+
+def is_non_sick_wizard_leave(draft: dict[str, Any]) -> bool:
+    """Family/travel/etc. — user must pick annual vs leave without pay."""
+    reason = canonicalize_leave_reason(str(draft.get("reason") or ""))
+    if reason_indicates_non_sick_leave(reason):
+        return True
+    return effective_leave_bucket(draft) == "other"
+
+
+def should_auto_infer_wizard_leave_type(draft: dict[str, Any]) -> bool:
+    """Only sick leave may be inferred without asking Select Leave."""
+    if is_non_sick_wizard_leave(draft):
+        return False
+    from chat.services.leave.normalization import infer_leave_type_from_text, text_has_sick_signal
+
+    combined = " ".join(
+        x
+        for x in (
+            str(draft.get("reason") or ""),
+            str(draft.get("_last_user_message") or ""),
+        )
+        if x
+    ).strip()
+    if not combined:
+        return False
+    if text_has_sick_signal(combined):
+        return True
+    return infer_leave_type_from_text(combined) == "sick"
+
+
 def reconcile_leave_type_from_reason(draft: dict[str, Any]) -> None:
     """Keep leave_type aligned with the stated reason (sick vs family/casual)."""
+    from chat.services.leave.reason_bucket_classifier import clear_leave_bucket_cache
+
     reason = canonicalize_leave_reason(str(draft.get("reason") or ""))
     if not reason:
         return
     if reason != str(draft.get("reason") or "").strip():
         draft["reason"] = reason
     if reason_indicates_non_sick_leave(reason):
+        from chat.services.leave_slot_extraction import explicit_leave_type_from_message
+
+        last = str(draft.get("_last_user_message") or "")
+        explicit = explicit_leave_type_from_message(last)
         lt = str(draft.get("leave_type") or "").lower()
-        if lt in ("sick", "medical", "health", "casual"):
+        if explicit == "casual":
             draft["leave_type"] = "annual"
             sync_payment_from_leave_type(draft)
+        elif explicit:
+            draft["leave_type"] = "unpaid" if explicit == "unpaid" else explicit
+            sync_payment_from_leave_type(draft)
+        elif lt:
+            draft.pop("leave_type", None)
+            draft.pop("leave_payment_category", None)
         draft.pop("_reason_implied", None)
         clear_supporting_document_if_unneeded(draft)
+        clear_leave_bucket_cache(draft)
         return
-    from chat.services.leave.normalization import infer_leave_type_from_text
+    from chat.services.leave.normalization import infer_leave_type_from_text, text_has_sick_signal
 
+    if text_has_sick_signal(reason) and str(draft.get("leave_type") or "").lower() in (
+        "sick",
+        "medical",
+        "health",
+    ):
+        draft.pop("_leave_type_reselect_required", None)
+        return
     inferred = infer_leave_type_from_text(reason)
-    if inferred:
+    if inferred == "sick" and not draft.get("leave_type"):
         draft["leave_type"] = inferred
+        sync_payment_from_leave_type(draft)
+
+
+def sync_days_from_calendar_range(draft: dict[str, Any]) -> None:
+    """Align ``days`` with start/end when the user gives an explicit date range."""
+    span = calendar_span_days(draft)
+    if span >= 1:
+        draft["days"] = float(span)
+        apply_multi_day_scope_default(draft)
 
 
 def effective_leave_bucket(draft: dict[str, Any]) -> str:
@@ -300,16 +369,28 @@ def apply_leave_draft_defaults(draft: dict[str, Any], policy: Any) -> None:
     Enterprise defaults when the user omits category (paid/unpaid), duration, or leave type.
     Tenant policy may override default leave type code; per-type rules adjust paid/unpaid.
     """
-    from chat.services.leave_policies import ALL_LEAVE_TYPES
+    if not draft.get("leave_type") and should_auto_infer_wizard_leave_type(draft):
+        from chat.services.leave.normalization import infer_leave_type_from_text
 
-    if not draft.get("leave_type"):
-        dlt = str(
-            getattr(policy, "default_leave_type_if_unspecified", "casual") or "casual"
-        ).strip().lower()
-        if dlt not in ALL_LEAVE_TYPES:
-            dlt = "casual"
-        draft["leave_type"] = dlt
+        combined = " ".join(
+            x
+            for x in (
+                str(draft.get("reason") or ""),
+                str(draft.get("_last_user_message") or ""),
+            )
+            if x
+        )
+        inferred = infer_leave_type_from_text(combined)
+        if inferred == "casual":
+            inferred = "annual"
+        if inferred in WIZARD_LEAVE_TYPES:
+            draft["leave_type"] = inferred
+    lt = str(draft.get("leave_type") or "").strip().lower()
+    if lt == "casual":
+        draft["leave_type"] = "annual"
     sync_payment_from_leave_type(draft)
+    if not draft.get("day_scope"):
+        draft["day_scope"] = DAY_SCOPE_FULL
     if not draft.get("leave_payment_category"):
         tr = policy.type_rule(str(draft.get("leave_type") or ""))
         if tr and not tr.paid:

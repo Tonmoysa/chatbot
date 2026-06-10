@@ -335,3 +335,163 @@ def test_skip_llm_intent_on_correction():
     wf = _expense_wf([{"amount": 80.0, "category": "Bus"}])
     decision, _ = _route("বাস ভাড়া ৮০ টাকা না, ১২০ টাকা হবে।", wf)
     assert decision.skip_llm_intent()
+
+
+# --- Pre-router navigation rows N50–N55 (router-driven navigation) ---
+
+from chat.services.expense.expense_fsm import (  # noqa: E402
+    is_expense_in_progress,
+    is_expense_paused,
+)
+from chat.services.leave_fsm import (  # noqa: E402
+    is_leave_in_progress,
+    is_leave_paused,
+)
+from chat.services.session_turn_router import plan_pre_router_navigation  # noqa: E402
+from chat.services.workflow_suspend import (  # noqa: E402
+    has_suspended_expense,
+    has_suspended_leave,
+)
+
+
+def _paused_leave_wf() -> dict:
+    return {
+        "active_flow": "leave",
+        "status": "paused",
+        "draft": {"start_date": "2026-07-10"},
+        "step": "reason",
+        "review_pending": False,
+    }
+
+
+def _suspended_leave_only_wf() -> dict:
+    return {
+        "suspended_leave": {
+            "draft": {"start_date": "2026-07-10"},
+            "step": "reason",
+            "status": "active",
+            "review_pending": False,
+        }
+    }
+
+
+def _plan(message: str, wf: dict, *, is_cancel: bool = False):
+    return plan_pre_router_navigation(message, wf, is_cancel=is_cancel)
+
+
+def test_n50_paused_leave_resumes_on_continuation():
+    steps = _plan("ব্যক্তিগত কাজ", _paused_leave_wf())
+    assert [s.rule for s in steps] == ["N50_resume_paused_leave"]
+    assert steps[0].log_step == "leave_wizard_auto_resumed"
+    assert is_leave_in_progress(steps[-1].state)
+    assert not is_leave_paused(steps[-1].state)
+
+
+def test_n50_policy_interrupt_keeps_leave_paused():
+    steps = _plan("payslip কোথায় পাবো?", _paused_leave_wf())
+    assert steps == []
+
+
+def test_n51_resume_leave_while_expense_active_switches():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "items": [{"amount": 100.0, "category": "Lunch"}],
+        },
+        **_suspended_leave_only_wf(),
+    }
+    steps = _plan("back to leave", wf)
+    assert steps[0].rule == "N51_switch_expense_to_suspended_leave"
+    assert steps[0].log_step == "expense_suspended_resume_leave_nav"
+    final = steps[-1].state
+    assert is_leave_in_progress(final)
+    assert not is_expense_in_progress(final)
+    assert has_suspended_expense(final)
+
+
+def test_n52b_paused_expense_resumes_on_show_request():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "paused": True,
+            "stage": "collecting",
+            "items": [{"amount": 100.0, "category": "Lunch"}],
+        }
+    }
+    steps = _plan("previous expense show koro", wf)
+    assert [s.rule for s in steps] == ["N52b_resume_paused_expense"]
+    assert steps[0].log_step == "expense_wizard_auto_resumed"
+    assert is_expense_in_progress(steps[-1].state)
+    assert not is_expense_paused(steps[-1].state)
+
+
+def test_n53_suspended_leave_restored_when_nothing_active():
+    steps = _plan("back to leave", _suspended_leave_only_wf())
+    assert [s.rule for s in steps] == ["N53_restore_suspended_leave"]
+    assert steps[0].log_step == "suspended_leave_restored"
+    final = steps[-1].state
+    assert is_leave_in_progress(final)
+    assert not has_suspended_leave(final)
+
+
+def test_n54_suspended_expense_restored_when_nothing_active():
+    wf = {
+        "suspended_expense": {
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "items": [{"amount": 100.0, "category": "Lunch"}],
+            }
+        }
+    }
+    steps = _plan("previous expense show koro", wf)
+    assert [s.rule for s in steps] == ["N54_restore_suspended_expense"]
+    assert steps[0].log_step == "suspended_expense_restored"
+    final = steps[-1].state
+    assert is_expense_in_progress(final)
+    assert not has_suspended_expense(final)
+
+
+def test_n55a_active_leave_suspended_for_expense_query():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": {"start_date": "2026-07-11"},
+        "step": "reason",
+        "review_pending": False,
+    }
+    steps = _plan("আজকের মোট খরচ কত?", wf)
+    assert [s.rule for s in steps] == ["N55a_suspend_leave_for_expense_query"]
+    assert steps[0].log_step == "leave_suspended_for_expense_query"
+    final = steps[-1].state
+    assert not is_leave_in_progress(final)
+    assert has_suspended_leave(final)
+
+
+def test_nav_cancel_blocks_all_navigation():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "items": [{"amount": 100.0, "category": "Lunch"}],
+        },
+        **_suspended_leave_only_wf(),
+    }
+    assert _plan("back to leave", wf, is_cancel=True) == []
+
+
+def test_nav_rules_thread_state_n50_then_n55a():
+    """Paused leave + expense query: resume first (N50), then park for the query (N55a)."""
+    steps = _plan("আজকের মোট খরচ কত?", _paused_leave_wf())
+    assert [s.rule for s in steps] == [
+        "N50_resume_paused_leave",
+        "N55a_suspend_leave_for_expense_query",
+    ]
+    final = steps[-1].state
+    assert not is_leave_in_progress(final)
+    assert has_suspended_leave(final)
+
+
+def test_nav_noop_on_empty_state():
+    assert _plan("hello", {}) == []

@@ -182,17 +182,20 @@ def _apply_bucket_to_draft(draft: dict[str, Any], result: LeaveBucketResult) -> 
     if result.bucket == "other":
         lt = str(draft.get("leave_type") or "").lower()
         if lt in ("sick", "medical", "health"):
-            draft["leave_type"] = "casual"
-        draft.pop("_reason_implied", None)
-        from chat.services.leave_draft_utils import clear_supporting_document_if_unneeded
+            from chat.services.leave_draft_utils import invalidate_leave_type_for_reselect
 
-        clear_supporting_document_if_unneeded(draft)
+            invalidate_leave_type_for_reselect(draft)
+        else:
+            draft.pop("_reason_implied", None)
+            from chat.services.leave_draft_utils import clear_supporting_document_if_unneeded
+
+            clear_supporting_document_if_unneeded(draft)
     elif result.bucket == "sick":
         from chat.services.leave.normalization import infer_leave_type_from_text
 
         if not draft.get("leave_type"):
             inferred = infer_leave_type_from_text(str(draft.get("reason") or ""))
-            if inferred:
+            if inferred == "sick":
                 draft["leave_type"] = inferred
 
     draft["_leave_bucket"] = result.bucket

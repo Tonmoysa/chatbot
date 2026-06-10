@@ -121,8 +121,17 @@ class LeaveEntityPipeline:
             field_sources["leave_type"] = "rules_explicit_type"
         elif not entities.get("leave_type") and llm_entities.get("leave_type"):
             lt = str(llm_entities.get("leave_type") or "").strip().lower()
-            if lt and field_sources.get("leave_type") == "llm_primary":
-                entities["leave_type"] = lt
+            from chat.services.leave.normalization import text_has_sick_signal
+            from chat.services.leave_draft_utils import reason_indicates_non_sick_leave
+
+            if explicit_lt:
+                entities["leave_type"] = explicit_lt
+            elif lt == "sick" and text_has_sick_signal(message):
+                entities["leave_type"] = "sick"
+            elif not reason_indicates_non_sick_leave(message) and field_sources.get(
+                "leave_type"
+            ) == "llm_primary" and lt == "sick":
+                entities["leave_type"] = "sick"
 
         from chat.services.leave.normalization import (
             strip_ungrounded_day_scope,
@@ -307,8 +316,15 @@ class LeaveEntityPipeline:
 
         lt = entities.get("leave_type")
         if lt and (overwrite or not draft.get("leave_type")):
-            if explicit_leave_type_from_message(message) or reason or draft.get("reason"):
+            from chat.services.leave_draft_utils import should_auto_infer_wizard_leave_type
+
+            if explicit_leave_type_from_message(message):
                 draft["leave_type"] = str(lt).strip().lower()
+            elif (
+                str(lt).strip().lower() == "sick"
+                and should_auto_infer_wizard_leave_type(draft)
+            ):
+                draft["leave_type"] = "sick"
 
     @staticmethod
     def _normalize_draft(draft: dict[str, Any]) -> None:

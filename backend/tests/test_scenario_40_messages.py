@@ -78,8 +78,8 @@ SCENARIO_STEPS: list[StepExpect] = [
     ),
     StepExpect(
         2,
-        "কারণ ব্যক্তিগত কাজ।",
-        note="Leave reason: personal work",
+        "annual leave। কারণ ব্যক্তিগত কাজ।",
+        note="Leave reason: personal work + annual leave type",
         leave_reason_contains="ব্যক্তিগত",
     ),
     StepExpect(

@@ -432,7 +432,7 @@ def route_session_turn(
             matched_predicate="wants_pending_leave_show",
         )
 
-    if wants_leave_session_summary(msg) and snapshot.leave_domain_active:
+    if wants_leave_session_summary(msg) and snapshot.leave_summary_available:
         return _decision(
             turn_kind=TurnKind.SUMMARY,
             intent=INTENT_LEAVE_REQUEST,
@@ -919,10 +919,26 @@ def route_session_turn(
 
     wizard_active = snapshot.leave_active or snapshot.expense_active
 
-    if is_general_knowledge_out_of_scope(msg) or (
-        not wizard_active
-        and is_off_topic_for_hr_assistant(msg, wizard_active=False)
-    ):
+    if is_general_knowledge_out_of_scope(msg):
+        if wizard_active:
+            return _decision(
+                turn_kind=TurnKind.CHITCHAT,
+                intent=INTENT_UNKNOWN,
+                target_workflow=None,
+                handler_id="wizard_side_question",
+                reason="P72_general_knowledge_wizard",
+                matched_predicate="is_general_knowledge_out_of_scope",
+            )
+        return _decision(
+            turn_kind=TurnKind.OUT_OF_SCOPE,
+            intent=INTENT_UNKNOWN,
+            target_workflow=None,
+            handler_id="global_intent",
+            reason="P73_out_of_scope",
+            matched_predicate="is_general_knowledge_out_of_scope",
+        )
+
+    if not wizard_active and is_off_topic_for_hr_assistant(msg, wizard_active=False):
         return _decision(
             turn_kind=TurnKind.OUT_OF_SCOPE,
             intent=INTENT_UNKNOWN,
@@ -1007,3 +1023,181 @@ def route_session_turn(
         reason="P99_no_match",
         confidence=0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Pre-router navigation rows (N50–N55)
+#
+# Resume / restore / switch are stateful: the P00–P99 matrix must classify
+# against a snapshot that already reflects the navigation the user just asked
+# for. These rows therefore run as a separate router-owned phase *before*
+# ``route_session_turn``. The router decides (pattern + priority, first match
+# per row, state threaded between rows); the orchestrator only persists each
+# step and logs it — see ``orchestrator._apply_pre_router_navigation``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NavigationStep:
+    rule: str                   # priority row id, e.g. "N53_restore_suspended_leave"
+    log_step: str               # observability step name (kept from legacy phase)
+    state: dict[str, Any]       # workflow state after applying this step
+
+
+def _leave_application_excluding_policy(message: str) -> bool:
+    """New leave request phrasing — not a question about leave *policy*."""
+    from chat.services.policy_intent_helpers import is_policy_interrupt_message
+    from chat.services.workflow_navigation import is_leave_application_message
+
+    if is_policy_interrupt_message(message):
+        return False
+    return is_leave_application_message(message)
+
+
+def _answers_suspended_leave_step(message: str, workflow_state: dict[str, Any]) -> bool:
+    from chat.services.intent_detector import _message_answers_wizard_step
+    from chat.services.turn_classifier import _canonical_leave_wizard_token
+    from chat.services.workflow_suspend import KEY_SUSPENDED_LEAVE
+
+    sl = (workflow_state or {}).get(KEY_SUSPENDED_LEAVE) or {}
+    step = sl.get("step")
+    if not step:
+        return False
+    if _message_answers_wizard_step(message, step):
+        return True
+    return bool(_canonical_leave_wizard_token(message))
+
+
+def plan_pre_router_navigation(
+    message: str,
+    workflow_state: dict[str, Any] | None,
+    *,
+    is_cancel: bool,
+) -> list[NavigationStep]:
+    """
+    Evaluate navigation rows N50–N55 in priority order and return the steps to
+    apply. Each row sees the state produced by the previous matched row, so the
+    plan is deterministic and the caller can persist the steps one by one.
+    """
+    from chat.services.expense_workflow import (
+        is_expense_in_progress,
+        is_expense_paused,
+        resume_expense_session,
+        wants_resume_or_show_expense,
+    )
+    from chat.services.leave_workflow import (
+        deactivate_leave_session,
+        is_leave_in_progress,
+        is_leave_paused,
+        resume_leave_session,
+    )
+    from chat.services.policy_intent_helpers import is_policy_interrupt_message
+    from chat.services.workflow_priority import (
+        expense_query_should_suspend_leave,
+        should_clear_misrouted_leave,
+    )
+    from chat.services.workflow_suspend import (
+        clear_suspended_leave,
+        has_suspended_expense,
+        has_suspended_leave,
+        restore_suspended_expense,
+        restore_suspended_leave,
+        suspend_leave_for_workflow_switch,
+        switch_active_expense_to_suspended_leave,
+        wants_resume_suspended_leave,
+    )
+
+    steps: list[NavigationStep] = []
+    state: dict[str, Any] = workflow_state or {}
+
+    def _apply(rule: str, log_step: str, new_state: dict[str, Any]) -> None:
+        nonlocal state
+        state = new_state
+        steps.append(NavigationStep(rule=rule, log_step=log_step, state=new_state))
+
+    # N50 — resume paused leave on any continuation except an explicit policy lookup.
+    if is_leave_paused(state) and not is_cancel:
+        if wants_resume_suspended_leave(message) or not is_policy_interrupt_message(message):
+            _apply(
+                "N50_resume_paused_leave",
+                "leave_wizard_auto_resumed",
+                resume_leave_session(state),
+            )
+
+    # N51 — explicit "resume leave" while an expense wizard is active → switch.
+    if (
+        not is_cancel
+        and has_suspended_leave(state)
+        and wants_resume_suspended_leave(message)
+        and is_expense_in_progress(state)
+        and not is_leave_in_progress(state)
+    ):
+        _apply(
+            "N51_switch_expense_to_suspended_leave",
+            "expense_suspended_resume_leave_nav",
+            switch_active_expense_to_suspended_leave(state),
+        )
+
+    # N52 — paused expense: explicit leave resume wins, else resume the expense.
+    if is_expense_paused(state) and not is_cancel:
+        if wants_resume_suspended_leave(message) and has_suspended_leave(state):
+            _apply(
+                "N52a_paused_expense_to_suspended_leave",
+                "expense_paused_resume_leave_nav",
+                switch_active_expense_to_suspended_leave(state),
+            )
+        elif wants_resume_or_show_expense(message):
+            _apply(
+                "N52b_resume_paused_expense",
+                "expense_wizard_auto_resumed",
+                resume_expense_session(state),
+            )
+
+    # N53 — restore a leave parked while the user completed another task.
+    if (
+        has_suspended_leave(state)
+        and not is_leave_in_progress(state)
+        and not is_expense_in_progress(state)
+        and not is_cancel
+        and (
+            wants_resume_suspended_leave(message)
+            or _leave_application_excluding_policy(message)
+            or _answers_suspended_leave_step(message, state)
+        )
+    ):
+        _apply(
+            "N53_restore_suspended_leave",
+            "suspended_leave_restored",
+            restore_suspended_leave(state, force_active=True),
+        )
+
+    # N54 — restore a parked expense when nothing else is active.
+    if (
+        has_suspended_expense(state)
+        and not is_expense_in_progress(state)
+        and not is_leave_in_progress(state)
+        and not is_cancel
+        and wants_resume_or_show_expense(message)
+    ):
+        _apply(
+            "N54_restore_suspended_expense",
+            "suspended_expense_restored",
+            restore_suspended_expense(state),
+        )
+
+    # N55 — active leave: park it for an expense query, or clear a misroute.
+    if is_leave_in_progress(state):
+        if expense_query_should_suspend_leave(message):
+            _apply(
+                "N55a_suspend_leave_for_expense_query",
+                "leave_suspended_for_expense_query",
+                suspend_leave_for_workflow_switch(state),
+            )
+        elif should_clear_misrouted_leave(message, state):
+            _apply(
+                "N55b_clear_misrouted_leave",
+                "misrouted_leave_cleared",
+                clear_suspended_leave(deactivate_leave_session(state)),
+            )
+
+    return steps

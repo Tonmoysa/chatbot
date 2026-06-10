@@ -165,12 +165,22 @@ class LeaveConversationManager:
         date_error: str | None = None,
     ) -> str:
         missing_set = set(missing)
+        from chat.services.leave_draft_utils import is_non_sick_wizard_leave
+
+        non_sick = is_non_sick_wizard_leave(draft)
 
         if (
             primary_slot == SLOT_LEAVE_TYPE
             and SLOT_SCOPE in missing_set
             and SLOT_LEAVE_TYPE in missing_set
         ):
+            if non_sick:
+                return (
+                    "এখন জানাবেন:\n"
+                    "• **Annual leave** / **Leave without pay**\n"
+                    "• **Full Day** নাকি **Half Day**?\n"
+                    "(যেমন: annual leave, full day — একসাথে লিখলেও চলবে)"
+                )
             return (
                 "এখন জানাবেন:\n"
                 "• **Sick leave** / **Annual leave** / **Leave without pay**\n"
@@ -179,6 +189,12 @@ class LeaveConversationManager:
             )
 
         if primary_slot == SLOT_LEAVE_TYPE:
+            if non_sick:
+                return (
+                    "**Select Leave** — কোন ধরনের ছুটি?\n"
+                    "• **annual leave** (বার্ষিক)\n"
+                    "• **leave without pay** (বেতন ছাড়া)"
+                )
             return (
                 "**Select Leave** — কোন ধরনের ছুটি?\n"
                 "• **sick leave** (অসুস্থতা)\n"

@@ -191,20 +191,21 @@ def overlay_llm_semantic_fields(
         return sources
 
     from chat.services.leave.normalization import text_has_sick_signal
+    from chat.services.leave_draft_utils import reason_indicates_non_sick_leave
     from chat.services.leave_slot_extraction import explicit_leave_type_from_message
 
     explicit = explicit_leave_type_from_message(message)
-    has_anchor = bool(
-        explicit
-        or reason
-        or text_has_sick_signal(message)
-        or text_has_sick_signal(reason)
-    )
-    if has_anchor:
-        if explicit:
-            extraction.leave_type.value = explicit
-        else:
-            extraction.leave_type.value = lt
+    if explicit:
+        extraction.leave_type.value = explicit
+        extraction.leave_type.confidence = "high"
+        extraction.leave_type.source = "llm_primary"
+        sources["leave_type"] = "llm_primary"
+    elif reason_indicates_non_sick_leave(reason) or reason_indicates_non_sick_leave(message):
+        pass
+    elif lt == "sick" and (
+        text_has_sick_signal(message) or text_has_sick_signal(reason)
+    ):
+        extraction.leave_type.value = "sick"
         extraction.leave_type.confidence = "high"
         extraction.leave_type.source = "llm_primary"
         sources["leave_type"] = "llm_primary"

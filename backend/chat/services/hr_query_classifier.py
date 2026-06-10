@@ -229,6 +229,15 @@ def rules_classify_hr_query(
             QUERY_HR_POLICY, confidence=CONFIDENCE_RULES, source="rules_named_policy"
         )
 
+    from chat.services.leave_meta_queries import wants_leave_session_summary
+
+    if wants_leave_session_summary(raw):
+        return _finish_decision(
+            QUERY_LEAVE_REQUEST,
+            confidence=CONFIDENCE_RULES,
+            source="rules_leave_summary",
+        )
+
     if is_leave_balance_query(raw):
         return _finish_decision(
             QUERY_LEAVE_BALANCE, confidence=CONFIDENCE_RULES, source="rules_balance"

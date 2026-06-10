@@ -100,8 +100,8 @@ SCENARIO_STEPS: list[StepExpect] = [
     ),
     StepExpect(
         5,
-        "ছুটির কারণ পারিবারিক কাজ।",
-        note="Leave reason: family work",
+        "annual leave। ছুটির কারণ পারিবারিক কাজ।",
+        note="Leave reason: family work + annual leave type",
         leave_reason_contains="পারিবারিক",
     ),
     StepExpect(

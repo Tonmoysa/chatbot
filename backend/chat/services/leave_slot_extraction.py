@@ -479,10 +479,13 @@ def extract_leave_slots(
             _set(out.reason, "Paternity leave", confidence="high", source="implied_paternity")
 
     reason = extract_reason_from_message(raw)
-    if reason and out.reason.confidence != "high":
+    if reason:
         from chat.services.workflow_navigation import is_leave_navigation_phrase
 
-        if not is_leave_navigation_phrase(raw):
+        if not is_leave_navigation_phrase(raw) and (
+            out.reason.confidence != "high"
+            or out.reason.source == "implied_sick"
+        ):
             _set(out.reason, reason, confidence="high", source="rules_reason")
 
     return out

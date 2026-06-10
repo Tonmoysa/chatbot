@@ -45,6 +45,80 @@ def wants_leave_session_summary(message: str) -> bool:
     return bool(_LEAVE_SUMMARY_RE.search(raw))
 
 
+def session_has_leave_summary_context(workflow_state: dict[str, Any] | None) -> bool:
+    """True when this session has a leave draft or a submitted leave to summarize."""
+    from chat.services.leave_fsm import read_leave_last_submission
+
+    wf = workflow_state or {}
+    if _active_leave_draft(wf):
+        return True
+    if read_leave_last_submission(wf).get("submission_id"):
+        return True
+    st = read_leave_state(wf)
+    return bool(st.get("submission_id") or st.get("locked"))
+
+
+_PARALLEL_LEAVE_BLOCK_BN = (
+    "আপনার **আগের leave request** এখনো চলছে — আগে সেটা **submit** করুন অথবা **cancel** করুন, "
+    "তারপর নতুন leave request শুরু করতে পারবেন।"
+)
+_PARALLEL_LEAVE_BLOCK_EN = (
+    "Your **previous leave request** is still in progress — please **submit** or **cancel** it "
+    "before starting a new leave request."
+)
+
+
+def _leave_has_parallel_block_progress(workflow_state: dict[str, Any]) -> bool:
+    """True when an active leave wizard already has draft progress worth protecting."""
+    st = read_leave_state(workflow_state)
+    if st.get("review_pending"):
+        return True
+    if st.get("step"):
+        return True
+    draft = dict(st.get("draft") or {})
+    progress_keys = ("start_date", "end_date", "leave_type", "reason", "days", "day_scope")
+    return any(draft.get(k) for k in progress_keys)
+
+
+def should_block_parallel_leave_application(
+    message: str,
+    workflow_state: dict[str, Any] | None,
+) -> bool:
+    """
+    Predicate (R04): block a fresh leave application while another leave wizard is active.
+    Corrections, date edits, submit, and duplicate-overlap flows are excluded.
+    """
+    from chat.services.leave_fsm import is_leave_in_progress
+    from chat.services.workflow_navigation import is_leave_application_message
+
+    wf = workflow_state or {}
+    if not is_leave_in_progress(wf):
+        return False
+    if not _leave_has_parallel_block_progress(wf):
+        return False
+    if not is_leave_application_message(message):
+        return False
+    from chat.services.leave.date_correction import looks_like_date_only_message
+    from chat.services.leave.reason_correction_parser import looks_like_reason_correction
+    from chat.services.leave_confirm import parse_edit_slot, wants_leave_submit_command
+
+    if looks_like_reason_correction(message):
+        return False
+    if looks_like_date_only_message(message):
+        return False
+    if parse_edit_slot(message):
+        return False
+    if wants_leave_submit_command(message) or wants_cancel_leave_command(message):
+        return False
+    if re.search(r"^(yes|হ্যাঁ|haan|yep|ok|ঠিক)$", (message or "").strip(), re.I):
+        return False
+    return True
+
+
+def build_parallel_leave_block_message(*, lang: str = "bn") -> str:
+    return _PARALLEL_LEAVE_BLOCK_EN if lang == "en" else _PARALLEL_LEAVE_BLOCK_BN
+
+
 def wants_cancel_leave_command(message: str) -> bool:
     raw = (message or "").strip()
     return bool(_CANCEL_LEAVE_RE.search(raw))

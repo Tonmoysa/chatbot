@@ -181,7 +181,11 @@ def _infer_payment_category(
 
 def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
     from chat.services.leave.normalization import parse_wizard_leave_type_answer
-    from chat.services.leave_draft_utils import WIZARD_LEAVE_TYPES, sync_payment_from_leave_type
+    from chat.services.leave_draft_utils import (
+        WIZARD_LEAVE_TYPES,
+        should_auto_infer_wizard_leave_type,
+        sync_payment_from_leave_type,
+    )
 
     wizard_lt = parse_wizard_leave_type_answer(message)
     if wizard_lt:
@@ -192,16 +196,23 @@ def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
         return
     if draft.get("leave_type") in WIZARD_LEAVE_TYPES and not explicit_leave_type_from_message(message):
         return
+    explicit = explicit_leave_type_from_message(message)
+    if explicit:
+        draft["leave_type"] = "unpaid" if explicit == "unpaid" else explicit
+        if draft["leave_type"] == "casual":
+            draft["leave_type"] = "annual"
+        sync_payment_from_leave_type(draft)
+        return
+    if not should_auto_infer_wizard_leave_type(draft):
+        return
     low = message.lower()
     for pattern, code in _LEAVE_TYPE_PATTERNS:
         if re.search(pattern, low, re.I):
-            draft["leave_type"] = code
+            draft["leave_type"] = "casual" if code == "casual" else code
+            if draft["leave_type"] == "casual":
+                draft["leave_type"] = "annual"
             sync_payment_from_leave_type(draft)
             return
-    explicit = explicit_leave_type_from_message(message)
-    if explicit == "unpaid":
-        draft["leave_type"] = "unpaid"
-        sync_payment_from_leave_type(draft)
 
 
 def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
@@ -431,7 +442,9 @@ def process_leave_turn(
     )
     from chat.services.leave_meta_queries import (
         _target_date_range_from_leave_message,
+        build_parallel_leave_block_message,
         check_overlapping_submitted_leave,
+        should_block_parallel_leave_application,
     )
 
     choice_pack = handle_duplicate_leave_choice_turn(wf, message)
@@ -476,6 +489,23 @@ def process_leave_turn(
             wf, draft=seed, step=None, status=STATUS_ACTIVE, review_pending=False
         )
         st = read_leave_state(wf)
+
+    if should_block_parallel_leave_application(message, wf):
+        draft_preview = dict(read_leave_state(wf).get("draft") or {})
+        block = build_parallel_leave_block_message()
+        if is_awaiting_leave_confirmation(wf):
+            from chat.services.leave_confirm import build_confirmation_prompt
+
+            question = f"{block}\n\n{build_confirmation_prompt(draft_preview)}"
+        else:
+            question = block
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft_preview),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": question,
+        }
 
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message

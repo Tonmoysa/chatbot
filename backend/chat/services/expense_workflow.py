@@ -636,6 +636,13 @@ def message_mentions_expense_spend(message: str) -> bool:
 def wants_expense_summary(message: str) -> bool:
     """User wants to see expense review / day recap (not a new claim line)."""
     try:
+        from chat.services.leave_meta_queries import wants_leave_session_summary
+
+        if wants_leave_session_summary(message):
+            return False
+    except Exception:
+        pass
+    try:
         from chat.services.expense.wizard_commands import wants_expense_submit_command
 
         if wants_expense_submit_command(message):
@@ -682,6 +689,12 @@ def wants_expense_summary(message: str) -> bool:
         r"(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",
         low,
     ):
+        if re.search(
+            r"\b(leave|chuti|chhuti|holiday|wfh)\b|ছুটি",
+            message or "",
+            re.I | re.UNICODE,
+        ):
+            return False
         return True
     if re.search(
         r"(list|lists|লিস্ট).{0,30}(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",

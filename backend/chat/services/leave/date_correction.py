@@ -68,9 +68,12 @@ def looks_like_date_only_message(message: str, *, today: date | None = None) -> 
 
 
 def _apply_iso_range(draft: dict[str, Any], start_iso: str, end_iso: str) -> bool:
+    from chat.services.leave_draft_utils import sync_days_from_calendar_range
+
     before = (draft.get("start_date"), draft.get("end_date"))
     draft["start_date"] = start_iso
     draft["end_date"] = end_iso
+    sync_days_from_calendar_range(draft)
     draft.pop("_needs_date_clarify", None)
     draft.pop("_vague_next_week", None)
     after = (draft.get("start_date"), draft.get("end_date"))

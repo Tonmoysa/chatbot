@@ -44,6 +44,7 @@ class SessionSnapshot:
     has_suspended_leave: bool
     has_suspended_expense: bool
     has_expense_draft: bool
+    has_leave_summary_context: bool
     # Pending UI states
     duplicate_leave_choice_pending: bool
     expense_delete_verify_pending: bool
@@ -67,6 +68,10 @@ class SessionSnapshot:
     @property
     def leave_domain_active(self) -> bool:
         return self.leave_active or self.has_suspended_leave
+
+    @property
+    def leave_summary_available(self) -> bool:
+        return self.leave_domain_active or self.has_leave_summary_context
 
 
 def _expense_items_count(workflow_state: dict[str, Any]) -> int:
@@ -186,6 +191,7 @@ def build_classifier_snapshot(
         has_suspended_leave=False,
         has_suspended_expense=has_suspended_expense,
         has_expense_draft=has_expense_draft,
+        has_leave_summary_context=False,
         duplicate_leave_choice_pending=False,
         expense_delete_verify_pending=False,
         leave_submit_confirm_pending=leave_review_pending,
@@ -240,6 +246,10 @@ def build_session_snapshot(
 
     dup_prompt = _duplicate_leave_prompt(wf, msg, today=today)
 
+    from chat.services.leave_meta_queries import session_has_leave_summary_context
+
+    leave_summary_ctx = session_has_leave_summary_context(wf)
+
     leave_stage: str | None = None
     if leave_active:
         leave_stage = "review_pending" if leave_review_pending else "collecting"
@@ -259,6 +269,7 @@ def build_session_snapshot(
         has_suspended_leave=suspended_leave,
         has_suspended_expense=suspended_expense,
         has_expense_draft=has_draft,
+        has_leave_summary_context=leave_summary_ctx,
         duplicate_leave_choice_pending=is_duplicate_leave_choice_pending(wf),
         expense_delete_verify_pending=is_expense_delete_verify_pending(exp_block),
         leave_submit_confirm_pending=leave_review_pending,

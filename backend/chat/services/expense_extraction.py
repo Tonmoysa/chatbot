@@ -161,6 +161,8 @@ _BN_PLACE_ROMAN: dict[str, str] = {
     "কমলাপুর": "kamalapur",
     "বিমানবন্দর": "airport",
     "উত্তরা": "uttora",
+    "আগারগাঁও": "agargaon",
+    "আগারগাঁ": "agargaon",
     "বাড্ডা": "badda",
     "গুলশান": "gulshan",
     "বনানী": "banani",
@@ -583,7 +585,7 @@ def parse_amount_only(message: str) -> float | None:
 # Only strip a trailing number from a location when it is clearly an expense amount
 # (e.g. "mirpur 60 taka"), not part of the place name (e.g. "road 7", "mirpur 10").
 _AMOUNT_WITH_CURRENCY_TAIL_RE = re.compile(
-    r"\s+(?<!\d)(\d{1,6})(?:[.,](\d{1,2}))?\s+"
+    r"\s+(?<![\d০-৯])([\d০-৯]{1,6})(?:[.,](\d{1,2}))?\s+"
     r"(?:টাকা|taka|tk|tks|bdt|৳|cost|খরচ|hoyeche)\b.*$",
     re.I,
 )

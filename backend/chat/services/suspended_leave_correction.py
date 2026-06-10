@@ -236,6 +236,22 @@ def _apply_reason_correction(draft: dict[str, Any], message: str) -> bool:
     return False
 
 
+def _apply_leave_type_correction(draft: dict[str, Any], message: str) -> bool:
+    from chat.services.leave.normalization import parse_wizard_leave_type_answer
+    from chat.services.leave_draft_utils import WIZARD_LEAVE_TYPES, sync_payment_from_leave_type
+    from chat.services.leave_slot_extraction import explicit_leave_type_from_message
+
+    lt = explicit_leave_type_from_message(message) or parse_wizard_leave_type_answer(message)
+    if lt == "casual":
+        lt = "annual"
+    if lt in WIZARD_LEAVE_TYPES:
+        draft["leave_type"] = lt
+        sync_payment_from_leave_type(draft)
+        draft.pop("_leave_type_reselect_required", None)
+        return True
+    return False
+
+
 def _patch_leave_draft(
     draft: dict[str, Any],
     message: str,
@@ -245,6 +261,9 @@ def _patch_leave_draft(
     today_d = today or date.today()
     changed = False
     raw = normalize_message_for_parsing(message)
+
+    if _apply_leave_type_correction(draft, message):
+        changed = True
 
     if _DURATION_SWAP_RE.search(raw) or re.search(r"দুই\s*দিন|two\s*days?", raw, re.I):
         days = _parse_bn_duration_days(raw)

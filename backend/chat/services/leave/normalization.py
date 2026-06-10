@@ -30,6 +30,8 @@ SICK_SIGNALS: tuple[str, ...] = (
     "মাথা ব্যথা",
     "জ্বর",
     "অসুস্থ",
+    "চিকিৎসা",
+    "chikitsa",
     "onek osusto",
     "osusto",
     "oshustho",
@@ -380,7 +382,7 @@ def normalize_leave_draft(draft: dict[str, Any]) -> None:
     )
     if not draft.get("leave_type"):
         inferred = infer_leave_type_from_text(combined)
-        if inferred:
+        if inferred == "sick":
             draft["leave_type"] = inferred
 
     # Sick type with no explicit reason → implied reason (matches legacy behavior).

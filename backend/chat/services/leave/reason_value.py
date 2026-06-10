@@ -74,10 +74,24 @@ _FAMILY_REASON_RE = re.compile(
 
 _COMPOUND_LEAVE_APPLICATION_RE = re.compile(
     r"(?:"
-    r"apply\s+korte|chacchi|chacci|chuti\s+lagbe|leave\s+apply|"
+    r"apply\s+korte|chacchi|chacci|chuti\s+lagbe|leave\s+lagbe|leave\s+apply|"
     r"ekta\s+leave|leave\s+nite|chuti\s+nite|"
     r"\d+\s*(?:din|diner|days?|দিন)\s+jonno"
     r")",
+    re.I | re.UNICODE,
+)
+
+# Strip leave-request boilerplate accidentally captured by causal ``tai``/``bole`` regexes.
+_LEAVE_REQUEST_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"(?:(?:amar|ami|my|me)\s+)?"
+    r"(?:ajke|aj\s*ke|today|kal|kalke|kalker|agamikal|agami\s*kal|tomorrow)\s+"
+    r")?"
+    r"(?:"
+    r"(?:leave|chuti|chhuti|chhutti|ছুটি)\s*(?:lagbe|nite|chai|chacchi|chacci|apply)?"
+    r"|"
+    r"(?:lagbe|nite|chai)\s+(?:leave|chuti|chhuti)"
+    r")\s*",
     re.I | re.UNICODE,
 )
 
@@ -126,6 +140,31 @@ _BOILERPLATE_REASON_RE = re.compile(
 )
 
 
+def _health_reason_short_form(raw: str) -> str | None:
+    """Normalize sickness / health tokens from a longer utterance (R02)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    hm = _HEALTH_REASON_RE.search(text)
+    if hm:
+        token = hm.group(1).strip()
+        if re.search(r"osusto|oshustho|অসুস্থ", token, re.I):
+            return "onek osusto" if re.search(r"onek", token, re.I) else "অসুস্থতা"
+        return token[:2000]
+    if re.search(r"\bonek\s+osusto\b", text, re.I):
+        return "onek osusto"
+    if re.search(r"\b(osusto|oshustho)\b", text, re.I):
+        return "অসুস্থতা"
+    if re.search(r"\bsick\b", text, re.I):
+        return "sick leave / অসুস্থতা"
+    return None
+
+
+def looks_like_health_leave_reason(message: str) -> bool:
+    """Predicate: message carries a health/sickness signal usable as leave reason."""
+    return _health_reason_short_form(message or "") is not None
+
+
 def is_boilerplate_leave_reason(reason: str) -> bool:
     """True when a reason string is instruction filler, not a real cause."""
     raw = (reason or "").strip()
@@ -138,9 +177,26 @@ def is_boilerplate_leave_reason(reason: str) -> bool:
         return True
     if len(raw) >= 20 and _COMPOUND_LEAVE_APPLICATION_RE.search(raw):
         return True
+    # Mixed leave-application phrasing + health token — not a clean reason value.
+    if _LEAVE_INTENT_RE.search(raw) and _HEALTH_REASON_RE.search(raw):
+        return True
     if _LEAVE_INTENT_RE.search(raw) and len(raw.split()) > 8:
         return True
     return False
+
+
+def _sanitize_causal_reason_capture(capture: str, full_message: str) -> str | None:
+    """Clean ``tai``/``bole``/``for`` captures; fall back to health token when mixed."""
+    reason = _clean_reason_candidate(_trim_reason_fragment(capture))
+    reason = _LEAVE_REQUEST_PREFIX_RE.sub("", reason).strip()
+    if len(reason) < 3:
+        reason = ""
+    if reason and not is_boilerplate_leave_reason(reason):
+        return _normalize_extracted_reason(reason)
+    health = _health_reason_short_form(full_message)
+    if health:
+        return health
+    return None
 
 
 def strip_ungrounded_reason(
@@ -174,20 +230,9 @@ def extract_compound_review_reason(message: str) -> str | None:
     ):
         return None
 
-    hm = _HEALTH_REASON_RE.search(raw)
-    if hm:
-        token = hm.group(1).strip()
-        if re.search(r"osusto|oshustho|অসুস্থ", token, re.I):
-            return "onek osusto" if re.search(r"onek", token, re.I) else "অসুস্থতা"
-        return token[:2000]
-
-    if re.search(r"\bonek\s+osusto\b", raw, re.I):
-        return "onek osusto"
-    if re.search(r"\b(osusto|oshustho)\b", raw, re.I):
-        return "অসুস্থতা"
-
-    if re.search(r"\bsick\b", raw, re.I):
-        return "sick leave / অসুস্থতা"
+    health = _health_reason_short_form(raw)
+    if health:
+        return health
 
     m = _REASON_KEYWORD_RE.search(raw)
     if m:
@@ -348,15 +393,21 @@ def extract_reason_value(message: str, *, edit_context: bool = False) -> str | N
                 if len(reason) >= 3:
                     return _normalize_extracted_reason(reason)
 
-        hm = _HEALTH_REASON_RE.search(raw)
-        if hm:
-            return hm.group(1).strip()[:2000]
+        health = _health_reason_short_form(raw)
+        if health:
+            return health
 
         m = _REASON_EDIT_ASHOLE_RE.search(raw)
         if m:
             reason = _clean_reason_candidate(_trim_reason_fragment(m.group(1)))
             if len(reason) >= 3:
                 return _normalize_extracted_reason(reason)
+
+    # R02 — health signal beats causal ``tai``/``bole`` when leave intent is present.
+    if _LEAVE_INTENT_RE.search(raw):
+        health = _health_reason_short_form(raw)
+        if health:
+            return health
 
     for pattern in (
         _REASON_FOR_RE,
@@ -368,14 +419,14 @@ def extract_reason_value(message: str, *, edit_context: bool = False) -> str | N
     ):
         m = pattern.search(raw)
         if m:
-            reason = _clean_reason_candidate(_trim_reason_fragment(m.group(1)))
-            if len(reason) >= 3:
-                return _normalize_extracted_reason(reason)
+            reason = _sanitize_causal_reason_capture(m.group(1), raw)
+            if reason:
+                return reason
 
     if _LEAVE_INTENT_RE.search(raw):
-        hm = _HEALTH_REASON_RE.search(raw)
-        if hm:
-            return hm.group(1).strip()[:2000]
+        health = _health_reason_short_form(raw)
+        if health:
+            return health
 
     m = _REASON_KEYWORD_RE.search(raw)
     if m:

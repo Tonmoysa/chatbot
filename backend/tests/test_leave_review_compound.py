@@ -2,7 +2,13 @@
 
 from unittest.mock import patch
 
-from chat.services.leave.reason_value import extract_compound_review_reason, extract_reason_value
+from chat.services.leave.reason_value import (
+    extract_compound_review_reason,
+    extract_reason_value,
+    is_boilerplate_leave_reason,
+    looks_like_health_leave_reason,
+)
+from chat.services.leave.entity_pipeline import LeaveEntityPipeline
 from chat.services.leave.review_turn_parser import (
     is_review_compound_correction,
     try_apply_review_compound_update,
@@ -15,6 +21,42 @@ REVIEW_COMPOUND_MSG = (
     "ami 3 diner jonno ekta sick leave apply korte chacchi.."
     "ami onek osusto..and eta paid leave hobe.."
 )
+
+
+# Golden rows — leave reason extraction (owner: leave/reason_value.py, R01/R02)
+LEAVE_LAGBE_OSUSTO_MSG = "amar ajke leave lagbe onek osusto tai leave lagbe"
+OSUSTO_BEFORE_TAI_MSG = "ami onek osusto tai ajke leave lagbe"
+
+
+def test_g_reason_leave_lagbe_osusto_not_full_application() -> None:
+    """R01 compound + R02: ``leave lagbe … osusto tai leave`` → short health reason."""
+    assert looks_like_health_leave_reason(LEAVE_LAGBE_OSUSTO_MSG)
+    reason = extract_reason_value(LEAVE_LAGBE_OSUSTO_MSG)
+    assert reason == "onek osusto"
+    assert "leave lagbe" not in (reason or "").lower()
+    assert extract_compound_review_reason(LEAVE_LAGBE_OSUSTO_MSG) == "onek osusto"
+
+
+def test_g_reason_osusto_before_tai_still_works() -> None:
+    reason = extract_reason_value(OSUSTO_BEFORE_TAI_MSG)
+    assert reason == "onek osusto"
+
+
+def test_g_reason_mixed_capture_is_boilerplate() -> None:
+    assert is_boilerplate_leave_reason("amar ajke leave lagbe onek osusto")
+
+
+def test_entity_pipeline_rules_only_leave_lagbe_osusto() -> None:
+    """LLM-off path must still extract ``onek osusto`` (no orchestrator override)."""
+    pipeline = LeaveEntityPipeline()
+    result = pipeline.extract(
+        LEAVE_LAGBE_OSUSTO_MSG,
+        intent="LEAVE_REQUEST",
+        context_lines=[],
+        trace_id="t-reason-rules-only",
+        use_llm=False,
+    )
+    assert result.entities.get("reason") == "onek osusto"
 
 
 def test_extract_compound_review_reason_osusto() -> None:

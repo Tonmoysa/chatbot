@@ -802,6 +802,24 @@ def process_confirmation_turn(
             workflow_state=wf, message=message, draft=d
         )
 
+    from chat.services.leave_meta_queries import (
+        build_parallel_leave_block_message,
+        should_block_parallel_leave_application,
+    )
+
+    if should_block_parallel_leave_application(message, wf):
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(d),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": (
+                f"{build_parallel_leave_block_message()}\n\n"
+                f"{build_confirmation_prompt(d)}"
+            ),
+            "cancelled": False,
+        }
+
     if wf.get(KEY_EDIT_SNAPSHOT) and wants_navigate_back_to_leave_review(message):
         wf, snap = _restore_edit_snapshot(wf)
         from chat.services.leave_workflow import build_merged_entities_for_engine
@@ -903,10 +921,34 @@ def process_confirmation_turn(
         from chat.services.leave.normalization import normalize_leave_draft
         from chat.services.leave_draft_utils import apply_leave_draft_defaults
         from chat.services.leave_policies import get_company_leave_policy
+        from chat.services.leave_slots import generate_question, get_missing_slots
 
         policy = get_company_leave_policy("default")
         normalize_leave_draft(d)
         apply_leave_draft_defaults(d, policy)
+        missing = get_missing_slots(d, policy=policy)
+        if missing:
+            slot = missing[0]
+            wf = apply_leave_state(
+                wf,
+                draft=d,
+                step=slot,
+                status=STATUS_ACTIVE,
+                review_pending=False,
+            )
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(d),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": generate_question(
+                    slot,
+                    d,
+                    remaining=len(missing),
+                    missing=missing,
+                ),
+                "cancelled": False,
+            }
         wf = apply_leave_state(
             wf,
             draft=d,

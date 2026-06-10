@@ -232,6 +232,23 @@ class SessionTurnDecision:
 | P52 | `wants_resume_suspended_leave` | has_suspended_leave | RESUME_SUSPENDED | LEAVE_REQUEST | `workflow_suspend` |
 | P53 | `wants_resume_or_show_expense` | expense_domain | RESUME_SUSPENDED | EXPENSE_CLAIM | `expense_workflow` |
 
+### Pre-router navigation rows (N50–N55)
+
+These run **before** P00–P99 via `plan_pre_router_navigation` so the snapshot
+the classifier sees already reflects resume/restore/switch. The orchestrator
+only persists each planned step and logs `rule` + legacy `log_step` name.
+
+| ID | Condition | Mutation |
+|----|-----------|----------|
+| N50 | `is_leave_paused` + not cancel + (resume leave OR not policy interrupt) | `resume_leave_session` |
+| N51 | suspended leave + resume leave + expense active + leave not active | `switch_active_expense_to_suspended_leave` |
+| N52a | expense paused + resume leave + has suspended leave | `switch_active_expense_to_suspended_leave` |
+| N52b | expense paused + `wants_resume_or_show_expense` | `resume_expense_session` |
+| N53 | suspended leave + nothing active + resume/apply/answer step | `restore_suspended_leave` |
+| N54 | suspended expense + nothing active + resume/show expense | `restore_suspended_expense` |
+| N55a | leave in progress + expense query | `suspend_leave_for_workflow_switch` |
+| N55b | leave in progress + misrouted leave clear | `clear_suspended_leave` + `deactivate_leave_session` |
+
 ### Tier 7 — Done collecting (AFTER correction tier)
 
 | ID | Predicate | Context | TurnKind | Intent | Handler |
@@ -390,7 +407,13 @@ Router `intent` field set হলে orchestrator **LLM intent skip** করব�
 | Expense summary/review/meta | `expense/session_action_memory.py`, `expense_workflow.py` | P40–P43 |
 | Leave confirm/defer | `leave_confirm.py` | P30–P33 |
 | Leave duplicate/overlap | `leave_meta_queries.py` | P20 |
+| Parallel leave block (active wizard) | `leave_meta_queries.py` → `should_block_parallel_leave_application` | R04 (workflow gate; not session router) |
+| Leave reason sick→other reselect | `leave/reason_bucket_classifier.py` → `_apply_bucket_to_draft` | R03 (entity/workflow reconcile; not session router) |
+| Non-sick Select Leave (annual vs LWOP) | `leave_draft_utils.py` → `is_non_sick_wizard_leave`, `should_auto_infer_wizard_leave_type` | R05 (workflow schema SLOT_LEAVE_TYPE; not session router) |
+| Expense route amount strip (BN) | `expense_extraction.py` → `_trim_route_location_tail`, `_BN_PLACE_ROMAN` | E01 (entity pipeline; not session router) |
+| Leave session summary vs balance | `leave_meta_queries.py` → `wants_leave_session_summary`, `session_has_leave_summary_context` | P42 (+ `hr_query_classifier` guard before balance) |
 | Suspended leave edit | `suspended_leave_correction.py` | P11 (with P10 guard) |
+| Leave reason / health signal | `leave/reason_value.py` → `looks_like_health_leave_reason`, `extract_reason_value` | R01–R02 (entity pipeline; not session router) |
 | Policy / balance | `intent_detector.py`, `policy_intent_helpers.py` | P70–P71 |
 | Context clarity | `message_context_clarity.py` | P21 |
 | Chitchat / OOS | `intent_detector.py`, `policy_intent_helpers.py` | P72–P73 |
@@ -461,7 +484,7 @@ if decision.handler_id == "leave_workflow":
 - [x] Orchestrator post-gates respect `router_locked_intent` (no re-override when router decisively locks a wizard-active intent)
 - [x] `apply_hr_query_to_intent` respects `router_locked` — only the HR_POLICY upgrade (invariant I5) may override a locked intent; meta/summary/status overrides skipped
 - [x] Pre-router navigation mutations consolidated into one auditable phase: `orchestrator._apply_pre_router_navigation` (resume/switch/restore/suspend in a single seam before the router)
-- [ ] Full inversion: navigation driven *by* router decision rows (P50–P53 flags) instead of the pre-router phase — optional follow-up, behaviour identical today
+- [x] Full inversion: navigation driven by router-owned rows **N50–N55** in `plan_pre_router_navigation` — orchestrator only persists + logs each step (`rule` in log payload); behaviour identical to the legacy pre-router phase
 - [x] LLM resilience: per-trace 429 fast-circuit in `llm_client` (rate-limited turn falls back to rules instantly; reset each turn)
 
 ### Execution-layer fixes (found via routing tests)
@@ -519,4 +542,4 @@ A: Entity extraction + cold-start intent (P99)। Wizard-active turn routing **r
 
 ---
 
-*Last updated: 2026-06-10 — Phase 5 complete except optional router-driven navigation inversion; scenario 35/36/40 + session router + regression suites green (LLM-off deterministic).*
+*Last updated: 2026-06-10 — Phase 5 complete including router-driven navigation inversion (N50–N55); scenario 35/36/40 + session router (27 tests) + regression suites green (LLM-off deterministic).*
