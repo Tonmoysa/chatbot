@@ -14,13 +14,34 @@ logger = logging.getLogger("hr_chatbot")
 _JSON_HTTP_FAILURES: dict[str, int] = {}
 _JSON_CIRCUIT_THRESHOLD = 3
 
+# Once a provider rate-limit (HTTP 429) is hit for a trace, every further LLM
+# call in that same chat turn would also fail — so we trip a hard circuit and
+# fall back to rules immediately instead of burning latency on doomed retries.
+_RATE_LIMIT_TRIPPED: set[str] = set()
+
 
 def clear_llm_trace_state(trace_id: str = "") -> None:
-    """Reset per-trace JSON LLM failure counters (call once per chat turn)."""
+    """Reset per-trace LLM failure counters / circuits (call once per chat turn)."""
     if not trace_id:
         _JSON_HTTP_FAILURES.clear()
+        _RATE_LIMIT_TRIPPED.clear()
         return
-    _JSON_HTTP_FAILURES.pop(trace_id.strip(), None)
+    key = trace_id.strip()
+    _JSON_HTTP_FAILURES.pop(key, None)
+    _RATE_LIMIT_TRIPPED.discard(key)
+
+
+def _rate_limit_tripped(trace_id: str) -> bool:
+    return bool(trace_id) and trace_id in _RATE_LIMIT_TRIPPED
+
+
+def _maybe_trip_rate_limit(trace_id: str, exc: Exception) -> None:
+    if not trace_id:
+        return
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        if trace_id not in _RATE_LIMIT_TRIPPED:
+            logger.warning("llm_rate_limit_circuit_open trace_id=%s", trace_id)
+        _RATE_LIMIT_TRIPPED.add(trace_id)
 
 
 def _http_error_detail(exc: Exception) -> str:
@@ -94,6 +115,8 @@ class LLMClient:
     ) -> dict[str, Any] | None:
         if not self.is_configured():
             return None
+        if _rate_limit_tripped(trace_id):
+            return None
         if _json_circuit_open(trace_id):
             logger.warning("llm_json_circuit_open trace_id=%s", trace_id)
             return None
@@ -132,6 +155,8 @@ class LLMClient:
         """
         if not self.is_configured():
             return None
+        if _rate_limit_tripped(trace_id):
+            return None
         url = f"{self.base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -159,6 +184,7 @@ class LLMClient:
                 .strip()
             ) or None
         except Exception as exc:
+            _maybe_trip_rate_limit(trace_id, exc)
             logger.warning(
                 "llm_http_error trace_id=%s err=%s mode=text",
                 trace_id,
@@ -207,6 +233,7 @@ class LLMClient:
                 .strip()
             )
         except Exception as exc:
+            _maybe_trip_rate_limit(trace_id, exc)
             if json_format:
                 _record_json_http_failure(trace_id)
             logger.warning(

@@ -8,8 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from chat.services.leave_draft_utils import (
+    WIZARD_LEAVE_TYPES,
+    apply_multi_day_scope_default,
+    is_multi_day_leave,
+    is_reason_skip_message,
+    needs_half_day_period,
     normalize_end_equals_start_if_missing,
     supporting_document_needed,
+    sync_payment_from_leave_type,
     validate_dates,
 )
 from chat.services.leave_policies import CompanyLeavePolicy
@@ -18,8 +24,8 @@ from chat.services.leave_slots import (
     SLOT_DATE_CLARIFY,
     SLOT_DATES,
     SLOT_DOCUMENT,
+    SLOT_HALF_PERIOD,
     SLOT_LEAVE_TYPE,
-    SLOT_PAYMENT,
     SLOT_REASON,
     SLOT_SCOPE,
 )
@@ -35,23 +41,24 @@ class LeaveWorkflowSchema:
 
     required_fields: tuple[str, ...] = (
         "start_date",
-        "leave_payment_category",
+        "leave_type",
         "day_scope",
-        "reason",
     )
 
     optional_fields: tuple[str, ...] = (
-        "leave_type",
+        "leave_payment_category",
         "end_date",
         "days",
+        "reason",
+        "half_day_period",
         "document_text",
     )
 
     ask_order: tuple[str, ...] = (
         SLOT_DATE_CLARIFY,
         SLOT_LEAVE_TYPE,
-        SLOT_PAYMENT,
         SLOT_SCOPE,
+        SLOT_HALF_PERIOD,
         SLOT_DATES,
         SLOT_REASON,
         SLOT_DOCUMENT,
@@ -61,7 +68,6 @@ class LeaveWorkflowSchema:
         default_factory=lambda: (
             "dates_not_in_past",
             "dates_valid_range",
-            "reason_min_length",
             "supporting_document_if_sick_long",
         )
     )
@@ -76,6 +82,8 @@ class LeaveWorkflowSchema:
         return out
 
     def reason_satisfied(self, draft: dict[str, Any]) -> bool:
+        if draft.get("_reason_skipped"):
+            return True
         if len(str(draft.get("reason") or "").strip()) >= 4:
             return True
         if draft.get("_reason_implied"):
@@ -99,6 +107,9 @@ class LeaveWorkflowSchema:
         del policy  # reserved for tenant-specific required fields later
         missing: list[str] = []
 
+        sync_payment_from_leave_type(draft)
+        apply_multi_day_scope_default(draft)
+
         if extraction and extraction.vague_date and not draft.get("start_date"):
             missing.append(SLOT_DATE_CLARIFY)
 
@@ -106,10 +117,16 @@ class LeaveWorkflowSchema:
             missing.append(SLOT_DATES)
             return self._order(missing)
 
-        if not draft.get("leave_payment_category"):
-            missing.append(SLOT_PAYMENT)
-        if not draft.get("day_scope"):
+        lt = str(draft.get("leave_type") or "").strip().lower()
+        if lt not in WIZARD_LEAVE_TYPES:
+            missing.append(SLOT_LEAVE_TYPE)
+
+        if not is_multi_day_leave(draft) and not draft.get("day_scope"):
             missing.append(SLOT_SCOPE)
+
+        if needs_half_day_period(draft) and not draft.get("half_day_period"):
+            missing.append(SLOT_HALF_PERIOD)
+
         if not draft.get("start_date"):
             missing.append(SLOT_DATES)
 
@@ -120,7 +137,7 @@ class LeaveWorkflowSchema:
                 if SLOT_DATES not in missing:
                     missing.append(SLOT_DATES)
 
-        if not self.reason_satisfied(draft):
+        if not self.reason_satisfied(draft) and not draft.get("_reason_asked"):
             missing.append(SLOT_REASON)
 
         if supporting_document_needed(draft):
@@ -145,6 +162,20 @@ class LeaveWorkflowSchema:
             extraction=extraction,
             date_error=date_error,
         )
+
+
+def mark_reason_asked(draft: dict[str, Any]) -> None:
+    draft["_reason_asked"] = True
+
+
+def apply_reason_skip(draft: dict[str, Any], message: str) -> bool:
+    if is_reason_skip_message(message):
+        draft["_reason_skipped"] = True
+        draft.pop("reason", None)
+        draft.pop("_reason_implied", None)
+        mark_reason_asked(draft)
+        return True
+    return False
 
 
 def get_leave_workflow_schema() -> LeaveWorkflowSchema:

@@ -51,8 +51,13 @@ def wants_resume_suspended_leave(message: str) -> bool:
     if not t:
         return False
     try:
-        from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
+        from chat.services.leave_confirm import (
+            is_confirmation_yes,
+            wants_defer_expense_for_leave_submit,
+        )
 
+        if is_confirmation_yes(t):
+            return False
         if wants_defer_expense_for_leave_submit(t):
             return True
     except Exception:

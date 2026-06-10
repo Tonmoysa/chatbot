@@ -144,6 +144,69 @@ def parse_day_scope_answer(message: str) -> str | None:
     return None
 
 
+_WIZARD_SICK_RE = re.compile(
+    r"\b(sick|medical|health|osusto|oshustho|ill(?:ness)?)\b|অসুস্থ|জ্বর|মেডিকেল",
+    re.I | re.UNICODE,
+)
+_WIZARD_ANNUAL_RE = re.compile(
+    r"\b(annual|vacation|pto)\b|বার্ষিক|annual\s*leave",
+    re.I | re.UNICODE,
+)
+_WIZARD_UNPAID_RE = re.compile(
+    r"\b(lwop|unpaid|without\s+pay|leave\s+without\s+pay)\b|বেতন\s*ছাড়া|বিনা\s*বেতন",
+    re.I | re.UNICODE,
+)
+_HALF_FIRST_RE = re.compile(
+    r"(?:"
+    r"\bfirst\s*half\b|morning|am\b|"
+    r"প্রথম\s*অর্ধ|সকাল|ফার্স্ট\s*হাফ"
+    r")",
+    re.I | re.UNICODE,
+)
+_HALF_SECOND_RE = re.compile(
+    r"(?:"
+    r"\bsecond\s*half\b|afternoon|pm\b|evening|"
+    r"দ্বিতীয়\s*অর্ধ|দিতীয়\s*অর্ধ|বিকেল|সেকেন্ড\s*হাফ"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def parse_wizard_leave_type_answer(message: str) -> str | None:
+    """Parse sick / annual / unpaid wizard Select Leave answers."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if low in {"sick", "annual", "unpaid"}:
+        return low
+    if _WIZARD_UNPAID_RE.search(text):
+        return "unpaid"
+    if _WIZARD_SICK_RE.search(text):
+        return "sick"
+    if _WIZARD_ANNUAL_RE.search(text):
+        return "annual"
+    return None
+
+
+def parse_half_day_period_answer(message: str) -> str | None:
+    """Parse first half vs second half for half-day leave."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    has_first = bool(_HALF_FIRST_RE.search(text))
+    has_second = bool(_HALF_SECOND_RE.search(text))
+    if has_first and not has_second:
+        return "first"
+    if has_second and not has_first:
+        return "second"
+    if text.lower() in {"first", "1", "1st", "prothom", "prathom"}:
+        return "first"
+    if text.lower() in {"second", "2", "2nd", "ditiyo", "ditio"}:
+        return "second"
+    return None
+
+
 def message_explicitly_states_day_scope(message: str) -> bool:
     """True only when the user clearly said full/half day in this message."""
     return parse_day_scope_answer(message) is not None

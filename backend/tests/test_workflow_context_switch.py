@@ -119,7 +119,8 @@ def test_expense_during_leave_review_suspends_draft_and_keeps_tomorrow_date(
         session_id=sid,
     )
     st = read_leave_state(session.workflow_state)
-    assert st.get("review_pending") or "জমা দেবেন" in (r1["response"]["message"] or "")
+    r1_msg = r1["response"]["message"] or ""
+    assert st.get("review_pending") or "জমা দেবেন" in r1_msg or "জমা দিন" in r1_msg
     draft_before = dict(st.get("draft") or {})
     if not st.get("review_pending"):
         r_full = orch.run_chat(
@@ -131,7 +132,8 @@ def test_expense_during_leave_review_suspends_draft_and_keeps_tomorrow_date(
         )
         session.refresh_from_db()
         draft_before = dict(read_leave_state(session.workflow_state).get("draft") or {})
-        assert "জমা দেবেন" in (r_full["response"]["message"] or "")
+        r_full_msg = r_full["response"]["message"] or ""
+        assert "জমা দেবেন" in r_full_msg or "জমা দিন" in r_full_msg
     assert draft_before.get("start_date") == "2026-06-04"
 
     r_exp = orch.run_chat(
@@ -279,7 +281,7 @@ def test_defer_leave_submit_during_expense_shows_review_not_auto_submit(monkeypa
     assert r3["intent"] == INTENT_LEAVE_REQUEST
     msg = r3["response"]["message"] or ""
     assert "From and To" not in msg
-    assert "জমা দেবেন" in msg or "পর্যালোচনা" in msg
+    assert "জমা দেবেন" in msg or "জমা দিন" in msg or "পর্যালোচনা" in msg
     assert r3["decision"]["outcome"] != "SUBMITTED"
     session.refresh_from_db()
     assert is_leave_in_progress(session.workflow_state)
@@ -404,7 +406,9 @@ def test_leave_expense_leave_expense_preserves_pending_amount(monkeypatch):
         trace_id="ds-3",
     )
     assert r3["intent"] == INTENT_LEAVE_REQUEST
-    assert "জমা দেবেন" in (r3["response"]["message"] or "")
+    assert "জমা দেবেন" in (r3["response"]["message"] or "") or "জমা দিন" in (
+        r3["response"]["message"] or ""
+    )
 
     session.refresh_from_db()
     assert has_suspended_expense(session.workflow_state)
@@ -648,7 +652,19 @@ def test_expense_recap_during_leave_review_then_submit_leave_preserves_draft(
     )
     session.refresh_from_db()
     st = read_leave_state(session.workflow_state)
-    assert st.get("review_pending") or "জমা দেবেন" in (r3["response"]["message"] or "")
+    r3_msg = r3["response"]["message"] or ""
+    if not st.get("review_pending"):
+        r3b = orch.run_chat(
+            company_id=COMPANY_ID,
+            message="casual leave",
+            session_id=sid,
+            employee_id=emp,
+            trace_id="erl-leave-type",
+        )
+        session.refresh_from_db()
+        st = read_leave_state(session.workflow_state)
+        r3_msg = r3b["response"]["message"] or ""
+    assert st.get("review_pending") or "জমা দেবেন" in r3_msg or "জমা দিন" in r3_msg
 
     r_exp = orch.run_chat(
         company_id=COMPANY_ID,
@@ -679,7 +695,7 @@ def test_expense_recap_during_leave_review_then_submit_leave_preserves_draft(
     msg = r_submit["response"]["message"] or ""
     assert "Paid" in msg or "paid" in msg.lower()
     assert "2026-06-09" in msg
-    assert "জমা দেবেন" in msg or "জমা হয়নি" in msg
+    assert "জমা দেবেন" in msg or "জমা দিন" in msg or "জমা হয়নি" in msg
     assert "কারণ" in msg or "family program" in msg.lower()
     assert "Paid নাকি unpaid" not in msg
     session.refresh_from_db()

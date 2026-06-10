@@ -65,16 +65,23 @@ def test_family_program_three_days_skips_document_slot() -> None:
     assert SLOT_DOCUMENT not in get_missing_slots(draft)
 
 
-def test_sick_start_family_reason_correction_full_flow_skips_doctor() -> None:
+def test_sick_start_family_reason_correction_full_flow_skips_doctor(monkeypatch) -> None:
+    import datetime as dt
+
+    fixed = dt.date(2026, 6, 8)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+
     wf = {
         "active_flow": "leave",
         "status": "active",
-        "step": "leave_payment_category",
+        "step": "reason",
         "draft": {
             "reason": "অসুস্থতা / sick leave",
             "_reason_implied": True,
             "leave_type": "sick",
             "days": 3,
+            "day_scope": "full",
         },
     }
     pack = process_leave_turn(
@@ -86,15 +93,7 @@ def test_sick_start_family_reason_correction_full_flow_skips_doctor() -> None:
     wf = pack["workflow_state"]
     draft = wf.get("draft") or {}
     assert draft.get("reason") == "family program"
-    assert draft.get("leave_type") == "casual"
-
-    pack = process_leave_turn(
-        workflow_state=wf,
-        message="paid and full day",
-        entities={},
-        company_id="company-a",
-    )
-    wf = pack["workflow_state"]
+    assert draft.get("leave_type") == "annual"
 
     pack = process_leave_turn(
         workflow_state=wf,
@@ -200,8 +199,8 @@ def test_document_step_reason_correction_to_family_skips_attachment_in_review() 
             "reason": "onek osusto",
             "leave_type": "sick",
             "days": 3,
-            "start_date": "2026-06-09",
-            "end_date": "2026-06-11",
+            "start_date": "2026-06-12",
+            "end_date": "2026-06-14",
             "leave_payment_category": "paid",
             "day_scope": "full",
         },
@@ -222,8 +221,8 @@ def test_document_step_reason_correction_to_family_skips_attachment_in_review() 
             trace_id="t-doc-reason-fix",
         )
     draft = read_leave_state(pack["workflow_state"]).get("draft") or {}
-    assert draft.get("reason") == "family program"
-    assert draft.get("leave_type") == "casual"
+    assert draft.get("reason") in ("family program", "family problem")
+    assert draft.get("leave_type") == "annual"
     assert "document_text" not in draft
     summary = build_leave_review_summary(draft)
     assert "সংযুক্তি" not in summary

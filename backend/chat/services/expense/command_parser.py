@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from chat.services.expense.command_schema import (
     CorrectionCommandPlan,
     CorrectionParseResult,
@@ -46,12 +48,86 @@ def _normalize_remove_cat(raw: str) -> str:
     return normalize_category(raw)
 
 
-def parse_correction_plan(message: str) -> CorrectionCommandPlan:
+_ORDINAL_INDEX_MAP = {
+    "first": 0,
+    "প্রথম": 0,
+    "prothom": 0,
+    "1st": 0,
+    "second": 1,
+    "দ্বিতীয়": 1,
+    "ditio": 1,
+    "2nd": 1,
+    "third": 2,
+    "তৃতীয়": 2,
+    "3rd": 2,
+}
+
+_LAST_ORDINAL_RE = re.compile(
+    r"(?:শেষ|শেষটা|last)\s*(?:expense|entry|line|খরচ|টা)?",
+    re.I | re.UNICODE,
+)
+
+_ORDINAL_AMOUNT_RE = re.compile(
+    r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last|prothom|ditio).{0,40}"
+    r"(?:entry|line|expense|খরচ)(?:\s+টা)?\s+"
+    r"(?P<old>\d+(?:[.,]\d+)?)\s*(?:না|na)\s*,?\s*(?P<new>\d+(?:[.,]\d+)?)",
+    re.I | re.UNICODE,
+)
+
+
+def _ordinal_index_from_message(low: str, *, item_count: int | None = None) -> int | None:
+    """Map ordinal words; Bengali tokens skip ``\\b`` (unreliable with conjuncts)."""
+    if _LAST_ORDINAL_RE.search(low):
+        if item_count is not None and item_count > 0:
+            return item_count - 1
+        return None
+    for word, idx in _ORDINAL_INDEX_MAP.items():
+        if word.isascii():
+            if re.search(rf"\b{re.escape(word)}\b", low, re.I):
+                return idx
+        elif re.search(re.escape(word), low, re.I | re.UNICODE):
+            return idx
+    return None
+
+
+def _parse_ordinal_amount_update(
+    message: str, *, item_count: int | None = None
+) -> tuple[int, float] | None:
+    low = _normalize_correction_message(message)
+    m = _ORDINAL_AMOUNT_RE.search(low)
+    if not m:
+        return None
+    idx = _ordinal_index_from_message(low, item_count=item_count)
+    if idx is None:
+        return None
+    try:
+        return idx, float(str(m.group("new")).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_ordinal_delete_index(message: str, *, item_count: int | None = None) -> int | None:
+    low = _normalize_correction_message(message)
+    if not re.search(r"\b(delete|remove|বাদ|মুছ)\b", low, re.I):
+        return None
+    if not re.search(r"\b(entry|line|expense|খরচ)\b", low, re.I):
+        return None
+    return _ordinal_index_from_message(low, item_count=item_count)
+
+
+def parse_correction_plan(
+    message: str, *, item_count: int | None = None
+) -> CorrectionCommandPlan:
     """Build a correction plan from regex matches (same coverage as legacy apply_corrections)."""
     plan = CorrectionCommandPlan()
     low = _normalize_correction_message(message)
     if not low.strip():
         return plan
+
+    plan.remove_by_index = _parse_ordinal_delete_index(message, item_count=item_count)
+    plan.update_amount_by_index = _parse_ordinal_amount_update(
+        message, item_count=item_count
+    )
 
     for m in _REPLACE_RE.finditer(low):
         plan.replacements.append(
@@ -154,10 +230,20 @@ def parse_correction_plan(message: str) -> CorrectionCommandPlan:
 
     for m in _UPDATE_AMOUNT_RE.finditer(low):
         try:
-            amt = float(m.group("amt").replace(",", "."))
+            new_amt = float(m.group("amt").replace(",", "."))
         except ValueError:
             continue
-        plan.update_amounts.append((normalize_category(m.group("cat")), amt))
+        old_raw = m.group("old")
+        if old_raw:
+            try:
+                old_amt = float(str(old_raw).replace(",", "."))
+                pair = (new_amt, old_amt)
+                if pair not in plan.amount_replacements:
+                    plan.amount_replacements.append(pair)
+                continue
+            except (TypeError, ValueError):
+                pass
+        plan.update_amounts.append((normalize_category(m.group("cat")), new_amt))
     plan.has_update_amount_pattern = bool(_UPDATE_AMOUNT_RE.search(low))
 
     has_remove = bool(
@@ -248,7 +334,7 @@ def resolve_correction_plan(
     from chat.services.expense.command_llm_gate import correction_llm_should_use
     from chat.services.expense.command_llm_parser import parse_correction_plan_llm
 
-    rules_plan = parse_correction_plan(message)
+    rules_plan = parse_correction_plan(message, item_count=len(items or []))
     if rules_plan.has_any_correction():
         return CorrectionParseResult(plan=rules_plan, source="rules")
 

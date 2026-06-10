@@ -50,6 +50,7 @@ class MockCRMAdapter(CRMAdapter):
                         "request_id": rid,
                         "company_id": company,
                         "employee_id": emp,
+                        "session_id": rec.get("session_id"),
                         "status": rec.get("status"),
                         "leave_status": (rec.get("decision") or {}).get("leave_status"),
                         "entities": rec.get("entities") or {},

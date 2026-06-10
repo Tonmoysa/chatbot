@@ -241,6 +241,7 @@ def preprocess_expense_message(message: str) -> str:
     text = text.replace("বাসে", " bus ")
     text = text.replace("লাঞ্ছ", " lunch ")
     text = text.replace("লাঞ্চ", " lunch ")
+    text = text.replace("কফি", " snack ")
     text = text.replace("নাস্তা", " snack ")
     text = re.sub(r"চা\s+snack", " snack ", text, flags=re.I)
     # \\b does not work on Bengali words — replace longest metro compounds first.
@@ -1254,6 +1255,12 @@ def extract_expense_items(message: str) -> ExtractionResult:
             for it in chunk_items:
                 if not it.category and not (it.notes or "").strip():
                     it.notes = clause
+                if is_travel_category(it.category) and not (
+                    it.from_location and it.to_location
+                ):
+                    pair = parse_from_to_locations(clause)
+                    if pair:
+                        it.from_location, it.to_location = pair
             items.extend(chunk_items)
         elif _AMOUNT_RE.search(clause):
             malformed.append(clause[:120])

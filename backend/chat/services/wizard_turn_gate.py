@@ -56,6 +56,8 @@ def looks_like_leave_review_update(message: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
+    if looks_like_expense_correction(text):
+        return False
     if parse_edit_slot(text):
         return True
     if is_leave_navigation_phrase(text):

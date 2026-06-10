@@ -322,7 +322,7 @@ def parse_turn_rules(
 
     if has_pending_line and pending_step in ("category", "from_to"):
         if looks_like_draft_edit_signal(text, items, block) and items is not None:
-            plan = parse_correction_plan(text)
+            plan = parse_correction_plan(text, item_count=len(items or []))
             if plan.has_any_correction():
                 return TurnDecision(
                     turn_type=TURN_EDIT_DRAFT,
@@ -352,7 +352,7 @@ def parse_turn_rules(
             source="rules",
         )
 
-    plan = parse_correction_plan(text)
+    plan = parse_correction_plan(text, item_count=len(items or []))
     if plan.has_any_correction():
         existing_cats = {
             str(row.get("category") or "").lower() for row in items
@@ -442,7 +442,7 @@ def resolve_expense_turn(
         and pending_step in ("category", "from_to")
         and looks_like_draft_edit_signal(message, items, block)
     ):
-        plan = parse_correction_plan(message)
+        plan = parse_correction_plan(message, item_count=len(items or []))
         if plan.has_any_correction():
             return TurnDecision(
                 turn_type=TURN_EDIT_DRAFT,

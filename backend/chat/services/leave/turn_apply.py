@@ -11,7 +11,14 @@ def _is_iso_date(s: str) -> bool:
 
 from chat.services.leave.reason_value import extract_reason_value
 from chat.services.leave.turn_schema import LeaveFieldUpdate
-from chat.services.leave_slots import SLOT_DATES, SLOT_PAYMENT, SLOT_REASON, SLOT_SCOPE
+from chat.services.leave_slots import (
+    SLOT_DATES,
+    SLOT_HALF_PERIOD,
+    SLOT_LEAVE_TYPE,
+    SLOT_PAYMENT,
+    SLOT_REASON,
+    SLOT_SCOPE,
+)
 from chat.services.leave.normalization import normalize_leave_draft
 
 
@@ -39,6 +46,16 @@ def apply_leave_field_update(
             draft.pop("_reason_implied", None)
             changed = True
 
+    elif slot == SLOT_LEAVE_TYPE:
+        from chat.services.leave.normalization import parse_wizard_leave_type_answer
+        from chat.services.leave_draft_utils import sync_payment_from_leave_type
+
+        lt = str(val or "").strip().lower() or parse_wizard_leave_type_answer(raw or "")
+        if lt in {"sick", "annual", "unpaid"}:
+            draft["leave_type"] = lt
+            sync_payment_from_leave_type(draft)
+            changed = True
+
     elif slot == SLOT_SCOPE:
         from chat.services.leave_workflow import _force_scope_from_message
 
@@ -46,6 +63,14 @@ def apply_leave_field_update(
             draft["day_scope"] = val
             changed = True
         elif _force_scope_from_message(raw or str(val), draft):
+            changed = True
+
+    elif slot == SLOT_HALF_PERIOD:
+        from chat.services.leave.normalization import parse_half_day_period_answer
+
+        period = str(val or "").strip().lower() or parse_half_day_period_answer(raw or "")
+        if period in {"first", "second"}:
+            draft["half_day_period"] = period
             changed = True
 
     elif slot == SLOT_PAYMENT:

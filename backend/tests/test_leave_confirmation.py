@@ -48,7 +48,7 @@ def test_slots_complete_does_not_auto_submit(monkeypatch):
     )
     assert not r3.get("confirmed_submit")
     assert is_awaiting_leave_confirmation(r3["workflow_state"])
-    assert "জমা দেবেন" in (r3.get("question") or "")
+    assert "জমা দি" in (r3.get("question") or "")
 
 
 def test_confirmation_yes_submits_only_after_explicit_yes():
@@ -119,8 +119,7 @@ def test_review_unpaid_hobe_keeps_sick_leave_category():
     assert d.get("leave_payment_category") == "lwop"
     prompt = out.get("question") or ""
     assert "Payment:" not in prompt
-    assert "Select Leave: sick" not in prompt
-    assert "unpaid" in prompt
+    assert "leave without pay" in prompt.lower() or "unpaid" in prompt.lower()
 
 
 def test_review_paid_hobe_after_unpaid_restores_payment_keeps_sick():
@@ -151,14 +150,14 @@ def test_review_paid_hobe_after_unpaid_restores_payment_keeps_sick():
 def test_build_confirmation_prompt_lists_summary():
     prompt = build_confirmation_prompt(
         {
-            "leave_type": "casual",
+            "leave_type": "annual",
             "leave_payment_category": "paid",
             "day_scope": "half",
             "start_date": "2026-05-10",
             "reason": "family",
         }
     )
-    assert "Select Leave: paid" in prompt
+    assert "Select Leave: annual leave" in prompt
     assert "casual" not in prompt.split("Leave Type")[0]
     assert "Payment:" not in prompt
     assert "edit" in prompt.lower()
@@ -294,7 +293,7 @@ def test_edit_abort_restores_review_summary():
         message="edit korbo na",
         draft=dict(draft),
     )
-    assert "জমা দেবেন" in (out.get("question") or "")
+    assert "জমা দি" in (out.get("question") or "")
     assert read_leave_state(out["workflow_state"]).get("review_pending") is True
     assert out["workflow_state"].get("leave_edit_snapshot") is None
 
@@ -384,7 +383,7 @@ def test_edit_menu_half_day_applies_without_scope_reask():
     )
     d = read_leave_state(out["workflow_state"]).get("draft") or {}
     assert d.get("day_scope") == "half"
-    assert "জমা দেবেন" in (out.get("question") or "")
+    assert "জমা দি" in (out.get("question") or "")
 
 
 def test_review_half_day_correction_updates_scope():

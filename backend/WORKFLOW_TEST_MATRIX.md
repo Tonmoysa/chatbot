@@ -1,5 +1,32 @@
 # Workflow Test Matrix (Backend)
 
+> **Routing refactor spec:** see [`docs/TURN_ROUTER_SPEC.md`](docs/TURN_ROUTER_SPEC.md) for the single `session_turn_router` priority matrix and migration plan.
+
+## Mandatory CI Gate (routing)
+
+Any change to routing/intent logic MUST keep these green before merge:
+
+```bash
+cd backend
+python -m pytest \
+  tests/test_session_turn_router.py \
+  tests/test_scenario_35_messages.py \
+  tests/test_scenario_36_messages.py \
+  tests/test_scenario_40_messages.py \
+  tests/test_workflow_context_switch.py \
+  tests/test_expense_wizard_interrupt.py -q
+```
+
+**PR checklist for any new routing phrase / behavior:**
+
+1. Add (or reuse) a `looks_like_*` / `wants_*` **predicate** in its domain module — never inline regex in the orchestrator.
+2. Add a priority **P-row** in `session_turn_router.py` (single source of truth).
+3. Add a **golden row** test in `tests/test_session_turn_router.py` (assert `decision.reason` / `turn_kind`).
+4. If the phrase appears mid-wizard, add a scenario/turn assertion in the relevant suite.
+5. Do NOT add a new parallel override in `orchestrator.py` post-gates — extend the router instead.
+
+> Router decisions are logged as `session_turn_routed` with `reason` (e.g. `P41_expense_summary`). When a scenario test fails, the `reason` pinpoints the wrong priority row.
+
 ## Test run
 
 - **Command**: `python -m pytest -q`

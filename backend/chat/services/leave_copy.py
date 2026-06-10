@@ -43,11 +43,43 @@ def confirmation_footer(lang: ReplyLang) -> str:
             "• **cancel** — cancel"
         )
     return (
-        "জমা দেবেন?\n"
+        "নিচের তথ্য একবার **চেক** করুন — সব **ঠিক** থাকলে **yes** লিখে জমা দিন।\n"
         "• **yes** — জমা দিন\n"
         "• **edit** — কোনো তথ্য বদলান (তারিখ, paid/unpaid, পুরো/হাফ দিন, কারণ)\n"
         "• **cancel** — বাতিল"
     )
+
+
+_BN_MONTH_NAMES = {
+    1: "জানুয়ারি",
+    2: "ফেব্রুয়ারি",
+    3: "মার্চ",
+    4: "এপ্রিল",
+    5: "মে",
+    6: "জুন",
+    7: "জুলাই",
+    8: "আগস্ট",
+    9: "সেপ্টেম্বর",
+    10: "অক্টোবর",
+    11: "নভেম্বর",
+    12: "ডিসেম্বর",
+}
+
+
+def _format_leave_date_label(iso: str, *, lang: ReplyLang) -> str:
+    if not iso or iso == "—":
+        return iso
+    if lang == "bn":
+        try:
+            import datetime as _dt
+
+            d = _dt.date.fromisoformat(iso)
+            month = _BN_MONTH_NAMES.get(d.month)
+            if month:
+                return f"{d.day} {month} ({iso})"
+        except ValueError:
+            pass
+    return iso
 
 
 def build_review_summary_body(
@@ -58,8 +90,9 @@ def build_review_summary_body(
 ) -> str:
     reply = normalize_reply_lang(lang or lang_from_draft(draft))
     scope = str(draft.get("day_scope") or "—")
-    start = str(draft.get("start_date") or "—")
-    end = str(draft.get("end_date") or start)
+    start = _format_leave_date_label(str(draft.get("start_date") or "—"), lang=reply)
+    end_raw = str(draft.get("end_date") or draft.get("start_date") or "—")
+    end = _format_leave_date_label(end_raw, lang=reply)
     reason = str(draft.get("reason") or "—")
     scope_txt = scope_label(scope, reply)
 

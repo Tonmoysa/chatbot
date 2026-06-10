@@ -12,7 +12,12 @@ import logging
 from chat.services.leave.normalization import parse_day_scope_answer
 from chat.services.leave.reason_value import extract_reason_replacement, extract_reason_value
 from chat.services.leave.turn_schema import CONFIDENCE_LLM_FALLBACK, LeaveFieldUpdate
-from chat.services.leave_slots import SLOT_REASON, SLOT_SCOPE
+from chat.services.leave.normalization import (
+    parse_half_day_period_answer,
+    parse_wizard_leave_type_answer,
+)
+from chat.services.leave_draft_utils import sync_payment_from_leave_type
+from chat.services.leave_slots import SLOT_HALF_PERIOD, SLOT_LEAVE_TYPE, SLOT_REASON, SLOT_SCOPE
 from chat.services.llm_client import LLMClient
 
 logger = logging.getLogger("hr_chatbot")
@@ -44,6 +49,11 @@ def _rules_collecting_slot(
     if not text:
         return None
 
+    if pending_slot == SLOT_LEAVE_TYPE:
+        lt = parse_wizard_leave_type_answer(text)
+        if lt:
+            return LeaveFieldUpdate(slot=SLOT_LEAVE_TYPE, value=lt, raw_value=text)
+
     if pending_slot == SLOT_SCOPE:
         scope = parse_day_scope_answer(text)
         if scope:
@@ -53,7 +63,20 @@ def _rules_collecting_slot(
                 raw_value=text,
             )
 
+    if pending_slot == SLOT_HALF_PERIOD:
+        period = parse_half_day_period_answer(text)
+        if period:
+            return LeaveFieldUpdate(
+                slot=SLOT_HALF_PERIOD,
+                value=period,
+                raw_value=text,
+            )
+
     if pending_slot == SLOT_REASON:
+        from chat.services.leave.date_correction import looks_like_date_only_message
+
+        if looks_like_date_only_message(text):
+            return None
         repl = extract_reason_replacement(text)
         if repl:
             return LeaveFieldUpdate(slot=SLOT_REASON, value=repl, raw_value=text)
@@ -110,6 +133,16 @@ def _llm_collecting_slot(
                 scope,
             )
             return LeaveFieldUpdate(slot=SLOT_SCOPE, value=scope, raw_value=message)
+
+    if slot == SLOT_LEAVE_TYPE:
+        lt = parse_wizard_leave_type_answer(str(value)) or str(value).strip().lower()
+        if lt in {"sick", "annual", "unpaid"}:
+            return LeaveFieldUpdate(slot=SLOT_LEAVE_TYPE, value=lt, raw_value=message)
+
+    if slot == SLOT_HALF_PERIOD:
+        period = parse_half_day_period_answer(str(value)) or str(value).strip().lower()
+        if period in {"first", "second"}:
+            return LeaveFieldUpdate(slot=SLOT_HALF_PERIOD, value=period, raw_value=message)
 
     if slot == SLOT_REASON:
         reason = str(value).strip()

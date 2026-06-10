@@ -23,6 +23,8 @@ class CorrectionCommandPlan:
     cat_er_amounts: list[tuple[str, float]] = field(default_factory=list)
     add_amounts: list[tuple[str, float]] = field(default_factory=list)
     amount_replacements: list[tuple[float, float]] = field(default_factory=list)
+    remove_by_index: int | None = None
+    update_amount_by_index: tuple[int, float] | None = None
     has_update_amount_pattern: bool = False
     has_remove_one_pattern: bool = False
     has_transfer_pattern: bool = False
@@ -45,6 +47,8 @@ class CorrectionCommandPlan:
             or self.cat_er_amounts
             or self.add_amounts
             or self.amount_replacements
+            or self.remove_by_index is not None
+            or self.update_amount_by_index is not None
             or bool(self.set_category_only)
         )
 

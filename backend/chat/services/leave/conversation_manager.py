@@ -9,13 +9,14 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from chat.services.leave_draft_utils import format_half_day_period_label, format_select_leave_label
 from chat.services.leave_slot_extraction import LeaveSlotExtraction
 from chat.services.leave_slots import (
     SLOT_DATE_CLARIFY,
     SLOT_DATES,
     SLOT_DOCUMENT,
+    SLOT_HALF_PERIOD,
     SLOT_LEAVE_TYPE,
-    SLOT_PAYMENT,
     SLOT_REASON,
     SLOT_SCOPE,
 )
@@ -75,20 +76,26 @@ class LeaveConversationManager:
         if draft.get("reason") and SLOT_REASON not in missing_set:
             lines.append(self._ack_reason(draft))
 
-        if draft.get("leave_payment_category") and SLOT_PAYMENT not in missing_set:
-            lines.append(self._ack_payment(draft))
+        if draft.get("leave_type") and SLOT_LEAVE_TYPE not in missing_set:
+            lines.append(self._ack_leave_type(draft))
 
         if draft.get("day_scope") and SLOT_SCOPE not in missing_set:
             lines.append(self._ack_scope(draft))
 
+        if draft.get("half_day_period") and SLOT_HALF_PERIOD not in missing_set:
+            lines.append(self._ack_half_period(draft))
+
         if not lines:
             return ""
-        return "\n".join(lines[:4]) + "\n\n"
+        return "\n".join(lines[:5]) + "\n\n"
 
     @staticmethod
     def _ack_date(draft: dict[str, Any]) -> str:
         start = str(draft.get("start_date") or "").split("T")[0]
         end = str(draft.get("end_date") or start or "").split("T")[0]
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        if start == tomorrow and (not end or end == start):
+            return f"**আগামীকাল** ({start})-এর ছুটি — নোট করা হয়েছে।"
         if end and end != start:
             return f"ছুটির তারিখ **{start}** থেকে **{end}** — আমার কাছে আছে।"
         return f"ছুটির তারিখ **{start}** — আমার কাছে আছে।"
@@ -101,15 +108,19 @@ class LeaveConversationManager:
         return f"কারণ: {reason} — নোট করা হয়েছে।"
 
     @staticmethod
-    def _ack_payment(draft: dict[str, Any]) -> str:
-        pay = str(draft.get("leave_payment_category") or "").strip().lower()
-        label = "Paid" if pay == "paid" else "Unpaid"
-        return f"**{label}** leave — ঠিক আছে।"
+    def _ack_leave_type(draft: dict[str, Any]) -> str:
+        label = format_select_leave_label(draft)
+        return f"**{label}** — ঠিক আছে।"
 
     @staticmethod
     def _ack_scope(draft: dict[str, Any]) -> str:
         scope = str(draft.get("day_scope") or "").strip().lower()
         label = "Full day" if scope == "full" else "Half day"
+        return f"**{label}** — ঠিক আছে।"
+
+    @staticmethod
+    def _ack_half_period(draft: dict[str, Any]) -> str:
+        label = format_half_day_period_label(draft)
         return f"**{label}** — ঠিক আছে।"
 
     def _build_dates_question(self, draft: dict[str, Any], date_error: str | None) -> str:
@@ -156,22 +167,23 @@ class LeaveConversationManager:
         missing_set = set(missing)
 
         if (
-            primary_slot == SLOT_PAYMENT
+            primary_slot == SLOT_LEAVE_TYPE
             and SLOT_SCOPE in missing_set
-            and SLOT_PAYMENT in missing_set
+            and SLOT_LEAVE_TYPE in missing_set
         ):
             return (
                 "এখন জানাবেন:\n"
-                "• **Paid** নাকি **unpaid**?\n"
+                "• **Sick leave** / **Annual leave** / **Leave without pay**\n"
                 "• **Full Day** নাকি **Half Day**?\n"
-                "(যেমন: paid, full day — একসাথে লিখলেও চলবে)"
+                "(যেমন: sick leave, full day — একসাথে লিখলেও চলবে)"
             )
 
-        if primary_slot in (SLOT_LEAVE_TYPE, SLOT_PAYMENT):
+        if primary_slot == SLOT_LEAVE_TYPE:
             return (
-                "**Select Leave** — paid নাকি unpaid?\n"
-                "• paid\n"
-                "• unpaid"
+                "**Select Leave** — কোন ধরনের ছুটি?\n"
+                "• **sick leave** (অসুস্থতা)\n"
+                "• **annual leave** (বার্ষিক)\n"
+                "• **leave without pay** (বেতন ছাড়া)"
             )
 
         if primary_slot == SLOT_SCOPE:
@@ -180,18 +192,24 @@ class LeaveConversationManager:
                 "(full / half লিখলেও চলবে)"
             )
 
+        if primary_slot == SLOT_HALF_PERIOD:
+            return (
+                "হাফ ডে ছুটি — **প্রথম অর্ধ** নাকি **দ্বিতীয় অর্ধ**?\n"
+                "(first half / second half / সকাল / বিকেল)"
+            )
+
         if primary_slot == SLOT_DATES:
             return self._build_dates_question(draft, date_error)
 
         if primary_slot == SLOT_REASON:
             return (
-                "Reason টা এক লাইনে লিখুন।\n"
-                "(যেমন: sick, family কাজ, travel — বাংলা/English যেকোনো)"
+                "Reason টা এক লাইনে লিখুন (ঐচ্ছিক)।\n"
+                "(যেমন: family কাজ, travel — বাংলা/English যেকোনো; না থাকলে **skip** লিখুন)"
             )
 
         if primary_slot == SLOT_DOCUMENT:
             return (
-                "অসুস্থতার ছুটির জন্য **ডাক্তারের চিট** বা প্রাসঙ্গিক কাগজ দরকার হতে পারে।\n"
+                "অসুস্থতার ছুটির জন্য **ডাক্তারের প্রাসঙ্গিক কাগজ দরকার হতে পারে।\n"
                 "এখন **আপলোড/পেস্ট** করুন, না হলে **skip** বা **parbo na** লিখুন — "
                 "ম্যানেজার রিভিউ নেবেন।"
             )

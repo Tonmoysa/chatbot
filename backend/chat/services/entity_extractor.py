@@ -49,7 +49,13 @@ def _infer_leave_calendar_start(low: str) -> str | None:
     """
     Banglish like \"may er 11 tarik\" / \"11 tarikh may\" — calendar day, not N days of leave.
     """
+    from chat.services.bn_normalize import infer_bn_calendar_date, normalize_message_for_parsing
+
     today = date.today()
+    low = normalize_message_for_parsing(low).lower()
+    bn_iso = infer_bn_calendar_date(low, today=today)
+    if bn_iso:
+        return bn_iso
     # month (optional \"er\") day [tarik]
     m1 = re.search(
         rf"\b({_MONTH_ALT})\s+(?:er\s+)?(\d{{1,2}})(?:\s*(?:tarik|tarikh|th|st|nd|rd))?\b",

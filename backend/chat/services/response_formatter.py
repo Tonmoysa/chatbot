@@ -205,6 +205,15 @@ def build_user_message(
         return ("Please provide a request reference to look up status.", "needs_input")
 
     if intent == INTENT_LEAVE_BALANCE:
+        balances = crm_payload.get("balances_by_type")
+        if balances:
+            from chat.services.leave.session_ledger import format_leave_balance_message
+
+            msg = format_leave_balance_message(
+                balances,
+                leave_type_filter=crm_payload.get("balance_query_type"),
+            )
+            return (msg, "success")
         bal = crm_payload.get("leave_balance_days")
         if bal is not None:
             return (

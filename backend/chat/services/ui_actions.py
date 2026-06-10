@@ -12,7 +12,7 @@ from chat.services.expense.expense_fsm import (
 )
 from chat.services.leave_confirm import SLOT_EDIT_MENU
 from chat.services.leave_fsm import is_awaiting_leave_confirmation, read_leave_state
-from chat.services.leave_slots import SLOT_PAYMENT, SLOT_SCOPE
+from chat.services.leave_slots import SLOT_HALF_PERIOD, SLOT_LEAVE_TYPE, SLOT_SCOPE
 from chat.services.leave_workflow import is_leave_in_progress, pending_step
 
 MAX_ACTIONS = 12
@@ -119,19 +119,25 @@ def _leave_actions(workflow_state: dict[str, Any]) -> list[dict[str, str]]:
         ]
 
     step = (pending_step(workflow_state) or "").strip()
-    if step == SLOT_PAYMENT:
+    if step in (SLOT_LEAVE_TYPE, "leave_type"):
         return [
-            _chip("leave_paid", label="Paid", label_bn="Paid", message="paid", kind="primary"),
-            _chip("leave_unpaid", label="Unpaid", label_bn="Unpaid", message="unpaid", kind="secondary"),
+            _chip("leave_sick", label="Sick leave", label_bn="Sick leave", message="sick leave", kind="primary"),
+            _chip("leave_annual", label="Annual leave", label_bn="Annual leave", message="annual leave", kind="secondary"),
+            _chip("leave_unpaid", label="Without pay", label_bn="Without pay", message="leave without pay", kind="secondary"),
         ]
     if step == SLOT_SCOPE:
         return [
             _chip("leave_full", label="Full day", label_bn="পুরো দিন", message="full day", kind="primary"),
             _chip("leave_half", label="Half day", label_bn="হাফ দিন", message="half day", kind="secondary"),
         ]
+    if step == SLOT_HALF_PERIOD:
+        return [
+            _chip("leave_first_half", label="First half", label_bn="প্রথম অর্ধ", message="first half", kind="primary"),
+            _chip("leave_second_half", label="Second half", label_bn="দ্বিতীয় অর্ধ", message="second half", kind="secondary"),
+        ]
     if step == SLOT_EDIT_MENU:
         return [
-            _chip("leave_edit_payment", label="Paid/Unpaid", label_bn="Paid/Unpaid", message="payment"),
+            _chip("leave_edit_type", label="Leave type", label_bn="ছুটির ধরন", message="type"),
             _chip("leave_edit_scope", label="Full/Half", label_bn="পুরো/হাফ", message="scope"),
             _chip("leave_edit_date", label="Date", label_bn="তারিখ", message="date"),
             _chip("leave_edit_reason", label="Reason", label_bn="কারণ", message="reason"),

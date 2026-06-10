@@ -148,13 +148,33 @@ class DecisionEngine:
             confirms the draft (``leave_workflow_confirmed``), skip duplicate checks.
             """
             if not entities.get("leave_workflow_confirmed"):
+                from chat.services.leave_draft_utils import (
+                    WIZARD_LEAVE_TYPES,
+                    sync_payment_from_leave_type,
+                )
+
+                probe = dict(entities)
+                sync_payment_from_leave_type(probe)
+                entities["leave_payment_category"] = probe.get("leave_payment_category")
+
+                lt = str(entities.get("leave_type") or "").strip().lower()
+                if lt not in WIZARD_LEAVE_TYPES:
+                    return {
+                        "outcome": "NEEDS_CLARIFICATION",
+                        "reason": (
+                            "কোন ধরনের ছুটি — **sick leave**, **annual leave**, "
+                            "নাকি **leave without pay**?"
+                        ),
+                        "rules_applied": ["LEAVE_TYPE_UNKNOWN"],
+                    }
+
                 pay = str(entities.get("leave_payment_category") or "").strip().lower()
                 if pay not in (LEAVE_PAYMENT_PAID, LEAVE_PAYMENT_LWOP):
                     return {
                         "outcome": "NEEDS_CLARIFICATION",
                         "reason": (
-                            "এখনও বোঝা যাচ্ছে না ছুটিটা বেতনসহ নাকি বেতন ছাড়া। "
-                            "একটু লিখুন: বেতনসহ / paid — অথবা বেতন ছাড়া / unpaid।"
+                            "এখনও বোঝা যাচ্ছে না ছুটির ধরন। "
+                            "sick / annual / unpaid লিখুন।"
                         ),
                         "rules_applied": ["LEAVE_PAYMENT_UNKNOWN"],
                     }

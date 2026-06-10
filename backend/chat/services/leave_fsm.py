@@ -29,6 +29,7 @@ KEY_IDEMPOTENCY_KEY = "idempotency_key"
 KEY_CRM_DRAFT_ID = "crm_draft_id"
 KEY_LOCKED = "locked"
 KEY_EDIT_SNAPSHOT = "leave_edit_snapshot"
+KEY_LEAVE_LAST_SUBMISSION = "leave_last_submission"
 
 
 def deep_merge_draft(existing: dict[str, Any] | None, patch: dict[str, Any] | None) -> dict[str, Any]:
@@ -117,9 +118,33 @@ def read_leave_state(workflow_state: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def read_leave_last_submission(workflow_state: dict[str, Any] | None) -> dict[str, Any]:
+    """Archived submission — survives a new in-session leave draft."""
+    wf = normalize_workflow_state(workflow_state)
+    last = dict(wf.get(KEY_LEAVE_LAST_SUBMISSION) or {})
+    if last.get("submission_id"):
+        return last
+    st = read_leave_state(wf)
+    if st.get("submission_id") and (
+        st.get("locked") or st.get("status") == STATUS_SUBMITTED
+    ):
+        return {
+            "submission_id": str(st.get("submission_id") or ""),
+            "submitted_at": str(st.get("submitted_at") or ""),
+            "draft": dict(st.get("draft") or {}),
+        }
+    return {}
+
+
 def is_leave_submission_locked(workflow_state: dict[str, Any] | None) -> bool:
+    """True only when the *current* leave flow is terminal — not merely prior session history."""
     st = read_leave_state(workflow_state)
     return bool(st.get("locked")) and st.get("status") == STATUS_SUBMITTED
+
+
+def has_leave_submission_history(workflow_state: dict[str, Any] | None) -> bool:
+    """Whether any leave was submitted earlier in this session (archive may survive a new draft)."""
+    return bool(read_leave_last_submission(workflow_state).get("submission_id"))
 
 
 def is_leave_flow_active(workflow_state: dict[str, Any] | None) -> bool:
@@ -230,6 +255,11 @@ def mark_submitted(
     wf[KEY_LOCKED] = True
     if idempotency_key:
         wf[KEY_IDEMPOTENCY_KEY] = idempotency_key
+    wf[KEY_LEAVE_LAST_SUBMISSION] = {
+        "submission_id": str(submission_id or ""),
+        "submitted_at": wf[KEY_SUBMITTED_AT],
+        "draft": dict(draft),
+    }
     return wf
 
 

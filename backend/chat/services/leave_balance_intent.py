@@ -14,6 +14,12 @@ def _is_leave_application_message(message: str) -> bool:
     return is_leave_application_message(message)
 
 
+def detect_balance_leave_type(message: str) -> str | None:
+    from chat.services.leave.session_ledger import detect_balance_leave_type as _detect
+
+    return _detect(message)
+
+
 def is_leave_balance_query(message: str) -> bool:
     """
     True when the user asks how much leave they have left — not applying for leave.
@@ -22,6 +28,17 @@ def is_leave_balance_query(message: str) -> bool:
     if not raw:
         return False
     if _is_leave_application_message(raw):
+        return False
+
+    if re.search(
+        r"(বছরে|প্রতি\s*বছর|per\s*year|yearly|each\s*year)",
+        raw,
+        re.I | re.UNICODE,
+    ) and re.search(
+        r"(policy|পলিসি|নীতি|নিয়ম|পাওয়া\s*যায়|entitled|allowance|কত\s*দিন)",
+        raw,
+        re.I | re.UNICODE,
+    ):
         return False
 
     low = raw.lower()

@@ -291,15 +291,19 @@ def test_bug16_expense_review_ui_remove_train_chip():
     assert any(a["message"] == "remove train" for a in actions)
 
 
-def test_bug17_leave_paid_unpaid_ui_chips():
+def test_bug17_leave_type_ui_chips():
     wf = {
         "active_flow": "leave",
         "status": "active",
         "draft": {"start_date": "2026-06-08", "reason": "fever"},
-        "step": "leave_payment_category",
+        "step": "leave_type",
     }
     actions = build_ui_actions(wf)
-    assert {a["message"] for a in actions} == {"paid", "unpaid"}
+    assert {a["message"] for a in actions} == {
+        "sick leave",
+        "annual leave",
+        "leave without pay",
+    }
 
 
 @pytest.mark.django_db

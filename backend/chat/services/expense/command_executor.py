@@ -147,6 +147,16 @@ def execute_correction_plan(
         if len(out) < before:
             changed = True
 
+    if plan.update_amount_by_index is not None:
+        idx, new_amt = plan.update_amount_by_index
+        if 0 <= idx < len(out):
+            out[idx]["amount"] = new_amt
+            changed = True
+
+    if plan.remove_by_index is not None and 0 <= plan.remove_by_index < len(out):
+        del out[plan.remove_by_index]
+        changed = True
+
     for cat, new_amt in plan.update_amounts:
         if _set_category_amount(out, cat, new_amt):
             changed = True
@@ -246,7 +256,7 @@ def apply_message_corrections(
             parse_source=parse_result.source,
         )
 
-    rules_plan = parse_correction_plan(message)
+    rules_plan = parse_correction_plan(message, item_count=len(items))
     llm_kwargs = dict(
         stage=stage,
         pending_step=pending_step,

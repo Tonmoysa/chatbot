@@ -112,11 +112,65 @@ def classify_workflow_turn(
     leave_review_pending: bool = False,
     expense_review_pending: bool = False,
     balance_probe: bool = False,
+    has_suspended_expense: bool = False,
+    has_expense_draft: bool = False,
 ) -> str:
     """
     Classify the user's message while a wizard is active.
-    Priority: cancel > confirm > correction > policy/balance > chitchat > new workflow > slot.
+
+    Phase 4: delegates to ``session_turn_router`` when possible; legacy rules
+    remain as P99 fallback only.
     """
+    from chat.services.session_snapshot import build_classifier_snapshot
+    from chat.services.session_turn_bridge import workflow_turn_from_router_decision
+    from chat.services.session_turn_router import route_session_turn
+
+    snap = build_classifier_snapshot(
+        message,
+        leave_active=leave_active,
+        expense_active=expense_active,
+        pending_leave_step=pending_leave_step,
+        pending_expense_step=pending_expense_step,
+        leave_review_pending=leave_review_pending,
+        expense_review_pending=expense_review_pending,
+        balance_probe=balance_probe,
+        has_suspended_expense=has_suspended_expense,
+        has_expense_draft=has_expense_draft,
+    )
+    decision = route_session_turn(snap)
+    if not decision.reason.startswith("P99"):
+        routed = workflow_turn_from_router_decision(decision)
+        if routed:
+            return routed
+
+    return _classify_workflow_turn_legacy(
+        message,
+        leave_active=leave_active,
+        expense_active=expense_active,
+        pending_leave_step=pending_leave_step,
+        pending_expense_step=pending_expense_step,
+        leave_review_pending=leave_review_pending,
+        expense_review_pending=expense_review_pending,
+        balance_probe=balance_probe,
+        has_suspended_expense=has_suspended_expense,
+        has_expense_draft=has_expense_draft,
+    )
+
+
+def _classify_workflow_turn_legacy(
+    message: str,
+    *,
+    leave_active: bool,
+    expense_active: bool,
+    pending_leave_step: str | None = None,
+    pending_expense_step: str = "",
+    leave_review_pending: bool = False,
+    expense_review_pending: bool = False,
+    balance_probe: bool = False,
+    has_suspended_expense: bool = False,
+    has_expense_draft: bool = False,
+) -> str:
+    """Legacy priority chain — used only when router returns P99."""
     if _is_cancel_form_request(message):
         return TURN_CANCEL
 
@@ -132,8 +186,18 @@ def classify_workflow_turn(
         if looks_like_clarify_reply_signal(message):
             return TURN_SLOT_ANSWER
 
-    if expense_active and looks_like_expense_correction(message):
+    expense_domain_active = expense_active or has_suspended_expense or has_expense_draft
+
+    if expense_domain_active and looks_like_expense_correction(message):
         return TURN_CORRECTION
+
+    if expense_domain_active:
+        from chat.services.suspended_leave_correction import (
+            looks_like_suspended_leave_correction,
+        )
+
+        if looks_like_suspended_leave_correction(message):
+            return TURN_CORRECTION
 
     if expense_active and looks_like_expense_wizard_continuation(message):
         return TURN_SLOT_ANSWER

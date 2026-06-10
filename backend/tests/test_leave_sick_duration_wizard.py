@@ -3,7 +3,7 @@
 from unittest.mock import patch
 
 from chat.services.leave.conversation_manager import LeaveConversationManager
-from chat.services.leave_slots import SLOT_DATES, SLOT_PAYMENT, SLOT_SCOPE, get_missing_slots
+from chat.services.leave_slots import SLOT_DATES, SLOT_LEAVE_TYPE, SLOT_SCOPE, get_missing_slots
 from chat.services.leave_workflow import _apply_slots_from_message, process_leave_turn
 
 SICK_3_DAY_MSG = (
@@ -58,7 +58,7 @@ def test_llm_invented_payment_not_applied_without_user_words() -> None:
     assert "end_date" not in draft
 
 
-def test_missing_slots_include_payment_scope_before_dates() -> None:
+def test_missing_slots_include_dates_for_multi_day_sick() -> None:
     draft: dict = {}
     _apply_slots_from_message(
         draft,
@@ -72,10 +72,10 @@ def test_missing_slots_include_payment_scope_before_dates() -> None:
         },
     )
     missing = get_missing_slots(draft)
-    assert SLOT_PAYMENT in missing
-    assert SLOT_SCOPE in missing
+    assert SLOT_SCOPE not in missing
+    assert draft.get("day_scope") == "full"
     assert SLOT_DATES in missing
-    assert missing[0] == SLOT_PAYMENT
+    assert SLOT_LEAVE_TYPE not in missing
 
 
 def test_dates_prompt_for_multi_day_is_professional() -> None:
@@ -92,7 +92,7 @@ def test_dates_prompt_for_multi_day_is_professional() -> None:
     assert "Full day" not in q
 
 
-def test_process_leave_turn_sick_3_day_asks_payment_not_fake_ack() -> None:
+def test_process_leave_turn_sick_3_day_asks_dates_not_fake_ack() -> None:
     wf: dict = {}
     with patch(
         "chat.services.leave.entity_pipeline.EntityExtractor"
@@ -123,12 +123,16 @@ def test_process_leave_turn_sick_3_day_asks_payment_not_fake_ack() -> None:
     q = pack.get("question") or ""
     assert "Paid leave — ঠিক আছে" not in q
     assert "Full day — ঠিক আছে" not in q
-    assert "paid" in q.lower() or "Paid" in q
-    assert "Full Day" in q or "Half Day" in q
-    assert "ছুটির তারিখ" not in q
+    assert "sick leave" in q.lower() or "Sick" in q
+    assert "কোন তারিখ" in q or "তারিখ থেকে" in q
 
 
-def test_agamikal_theke_applies_three_day_end_date() -> None:
+def test_agamikal_theke_applies_three_day_end_date(monkeypatch) -> None:
+    import datetime as dt
+
+    fixed = dt.date(2026, 6, 8)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
     wf = {
         "active_flow": "leave",
         "status": "active",
@@ -154,7 +158,12 @@ def test_agamikal_theke_applies_three_day_end_date() -> None:
     assert "2026-06-09" in q and "2026-06-11" in q
 
 
-def test_agamkal_typo_theke_applies_three_day_end_date() -> None:
+def test_agamkal_typo_theke_applies_three_day_end_date(monkeypatch) -> None:
+    import datetime as dt
+
+    fixed = dt.date(2026, 6, 8)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
     wf = {
         "active_flow": "leave",
         "status": "active",
@@ -178,25 +187,25 @@ def test_agamkal_typo_theke_applies_three_day_end_date() -> None:
     assert draft.get("end_date") == "2026-06-11"
 
 
-def test_paid_full_day_then_asks_three_day_dates_not_review() -> None:
+def test_sick_type_then_asks_three_day_dates_not_review() -> None:
     wf = {
         "active_flow": "leave",
         "status": "active",
-        "step": "leave_payment_category",
+        "step": "leave_type",
         "draft": {
             "reason": "onek osusto",
-            "leave_type": "sick",
             "days": 3,
         },
     }
     pack = process_leave_turn(
         workflow_state=wf,
-        message="paid and full day",
+        message="sick leave",
         entities={},
         company_id="company-a",
     )
     q = pack.get("question") or ""
     draft = (pack["workflow_state"].get("draft") or {})
+    assert draft.get("leave_type") == "sick"
     assert draft.get("leave_payment_category") == "paid"
     assert draft.get("day_scope") == "full"
     assert draft.get("days") == 3

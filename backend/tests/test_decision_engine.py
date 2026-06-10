@@ -99,6 +99,7 @@ def test_leave_approved_with_balance():
     d = eng.evaluate(
         intent=INTENT_LEAVE_REQUEST,
         entities={
+            "leave_type": "annual",
             "leave_payment_category": "paid",
             "day_scope": "full",
             "start_date": "2026-05-10",
@@ -117,6 +118,7 @@ def test_leave_paid_insufficient_balance_routes_to_hr():
     d = eng.evaluate(
         intent=INTENT_LEAVE_REQUEST,
         entities={
+            "leave_type": "annual",
             "leave_payment_category": "paid",
             "day_scope": "full",
             "start_date": "2026-05-10",
@@ -135,6 +137,7 @@ def test_leave_lwop_routes_to_manager():
     d = eng.evaluate(
         intent=INTENT_LEAVE_REQUEST,
         entities={
+            "leave_type": "unpaid",
             "leave_payment_category": "lwop",
             "day_scope": "full",
             "start_date": "2026-05-10",
@@ -155,6 +158,7 @@ def test_leave_wizard_confirmed_skips_field_clarification():
         intent=INTENT_LEAVE_REQUEST,
         entities={
             "leave_workflow_confirmed": True,
+            "leave_type": "annual",
             "leave_payment_category": "paid",
             "day_scope": "full",
             "start_date": "2026-05-10",
@@ -177,7 +181,7 @@ def test_leave_without_wizard_still_requires_fields():
         crm_context={},
     )
     assert d["outcome"] == "NEEDS_CLARIFICATION"
-    assert "LEAVE_DAY_SCOPE_UNKNOWN" in (d.get("rules_applied") or [])
+    assert "LEAVE_TYPE_UNKNOWN" in (d.get("rules_applied") or [])
 
 
 @pytest.mark.django_db
@@ -268,8 +272,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
     # User must confirm type, paid/unpaid, and scope when not in the message.
     chain = (
         "amar kalke chuti lagbe",
-        "casual",
-        "paid",
+        "annual leave",
         "full",
         "cousin graduation out of Dhaka.",
         "yes",
@@ -298,8 +301,7 @@ def test_leave_request_duplicate_is_deduped_after_wizard(monkeypatch):
 
     dup_chain = (
         "amar abar kalke chuti lagbe",
-        "casual",
-        "paid",
+        "annual leave",
         "full",
         "cousin graduation out of Dhaka.",
         "yes",
@@ -455,12 +457,14 @@ def test_banglish_may_11_calendar_means_one_day_not_eleven(monkeypatch):
 
     def run_leave_block(emp: str, start_msg: str, trace_prefix: str) -> None:
         sid_local = None
+        # Reason answer leads to the review + confirmation gate; the final
+        # "হ্যাঁ" confirms and submits (same flow as scenario 36).
         steps = (
             start_msg,
-            "casual",
-            "paid",
+            "annual leave",
             "full day",
             "Travel to village for ceremonies.",
+            "হ্যাঁ সব ঠিক আছে।",
         )
         last_local = None
         for i, msg in enumerate(steps):

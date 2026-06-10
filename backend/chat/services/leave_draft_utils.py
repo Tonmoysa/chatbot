@@ -10,8 +10,23 @@ LEAVE_PAYMENT_PAID = "paid"
 LEAVE_PAYMENT_LWOP = "lwop"
 DAY_SCOPE_FULL = "full"
 DAY_SCOPE_HALF = "half"
+HALF_PERIOD_FIRST = "first"
+HALF_PERIOD_SECOND = "second"
+
+WIZARD_LEAVE_TYPES: frozenset[str] = frozenset({"sick", "annual", "unpaid"})
 
 _SICK_DOCUMENT_MIN_SPAN_DAYS = 3
+
+_REASON_SKIP_RE = re.compile(
+    r"(?:"
+    r"^skip$|"
+    r"\bskip\b|"
+    r"^na$|^no$|"
+    r"lagbe\s*na|dorkar\s*na|thak|thakbe|"
+    r"না\s*লাগবে|লাগবে\s*না|দরকার\s*না|থাক"
+    r")",
+    re.I | re.UNICODE,
+)
 
 _NON_SICK_LEAVE_REASON_RE = re.compile(
     r"(?:"
@@ -69,6 +84,47 @@ def calendar_span_days(draft: dict[str, Any]) -> int:
     return max(0, (e - s).days) + 1
 
 
+def is_multi_day_leave(draft: dict[str, Any]) -> bool:
+    """True when the request spans more than one calendar day."""
+    try:
+        if draft.get("days") is not None and float(draft["days"]) > 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    span = calendar_span_days(draft)
+    return span > 1
+
+
+def is_reason_skip_message(message: str) -> bool:
+    text = (message or "").strip()
+    if not text:
+        return False
+    return bool(_REASON_SKIP_RE.search(text))
+
+
+def sync_payment_from_leave_type(draft: dict[str, Any]) -> None:
+    """Map wizard leave type → paid / lwop payment category."""
+    lt = str(draft.get("leave_type") or "").strip().lower()
+    if lt == "unpaid":
+        draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
+    elif lt in WIZARD_LEAVE_TYPES:
+        draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
+
+
+def apply_multi_day_scope_default(draft: dict[str, Any]) -> None:
+    """Multi-day leave is always full day — no half-day prompt."""
+    if is_multi_day_leave(draft):
+        draft["day_scope"] = DAY_SCOPE_FULL
+        draft.pop("half_day_period", None)
+
+
+def needs_half_day_period(draft: dict[str, Any]) -> bool:
+    return (
+        str(draft.get("day_scope") or "").lower() == DAY_SCOPE_HALF
+        and not is_multi_day_leave(draft)
+    )
+
+
 def canonicalize_leave_reason(reason: str) -> str:
     """Normalize Banglish reason corrections (famil program, X hobe reason)."""
     text = (reason or "").strip()
@@ -105,8 +161,9 @@ def reconcile_leave_type_from_reason(draft: dict[str, Any]) -> None:
         draft["reason"] = reason
     if reason_indicates_non_sick_leave(reason):
         lt = str(draft.get("leave_type") or "").lower()
-        if lt in ("sick", "medical", "health"):
-            draft["leave_type"] = "casual"
+        if lt in ("sick", "medical", "health", "casual"):
+            draft["leave_type"] = "annual"
+            sync_payment_from_leave_type(draft)
         draft.pop("_reason_implied", None)
         clear_supporting_document_if_unneeded(draft)
         return
@@ -252,20 +309,37 @@ def apply_leave_draft_defaults(draft: dict[str, Any], policy: Any) -> None:
         if dlt not in ALL_LEAVE_TYPES:
             dlt = "casual"
         draft["leave_type"] = dlt
+    sync_payment_from_leave_type(draft)
     if not draft.get("leave_payment_category"):
         tr = policy.type_rule(str(draft.get("leave_type") or ""))
         if tr and not tr.paid:
             draft["leave_payment_category"] = LEAVE_PAYMENT_LWOP
         else:
             draft["leave_payment_category"] = LEAVE_PAYMENT_PAID
-    # day_scope is never defaulted — user must say full/half explicitly.
+    apply_multi_day_scope_default(draft)
 
 
 def format_select_leave_label(draft: dict[str, Any]) -> str:
-    """CRM Select Leave — paid or unpaid only."""
+    """CRM Select Leave — sick / annual / unpaid (leave without pay)."""
+    lt = str(draft.get("leave_type") or "").strip().lower()
+    if lt == "sick":
+        return "sick leave"
+    if lt == "annual":
+        return "annual leave"
+    if lt == "unpaid":
+        return "leave without pay"
     pay = str(draft.get("leave_payment_category") or "").strip().lower()
     if pay == LEAVE_PAYMENT_PAID:
-        return "paid"
+        return "paid leave"
     if pay == LEAVE_PAYMENT_LWOP:
-        return "unpaid"
+        return "leave without pay"
+    return "—"
+
+
+def format_half_day_period_label(draft: dict[str, Any]) -> str:
+    period = str(draft.get("half_day_period") or "").strip().lower()
+    if period == HALF_PERIOD_FIRST:
+        return "first half"
+    if period == HALF_PERIOD_SECOND:
+        return "second half"
     return "—"

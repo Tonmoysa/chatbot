@@ -70,6 +70,7 @@ def build_leave_submission_payload(
         "leave_type": str(entities.get("leave_type") or "").strip().lower() or None,
         "leave_category": _map_leave_category(pay),
         "duration_type": _map_duration_type(scope),
+        "half_day_period": str(entities.get("half_day_period") or "").strip().lower() or None,
         "start_date": start or None,
         "end_date": end or None,
         "reason": str(entities.get("reason") or "").strip() or None,

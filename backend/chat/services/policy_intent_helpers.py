@@ -570,3 +570,35 @@ def is_leave_wizard_misroute_complaint(message: str) -> bool:
     if not message:
         return False
     return bool(_LEAVE_WIZARD_MISROUTE_COMPLAINT_RE.search(message))
+
+
+def is_policy_interrupt_message(message: str) -> bool:
+    """True when the user is asking about HR policy/rules (not filling leave slots)."""
+    from chat.services.intent_detector import _strong_hr_policy
+
+    raw = message or ""
+    if re.search(r"(ডকুমেন্ট|document|নথি|প্রমাণ)", raw, re.I | re.UNICODE) and re.search(
+        r"(ছুটি|leave|sick|অসুস্থ|অসুস্থতা|medical)",
+        raw,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if is_expense_entitlement_query(message):
+        return True
+    if re.search(
+        r"annual\s+leave.{0,30}(?:বছরে|per\s*year|yearly|পাওয়া\s*যায়|কত\s*দিন)",
+        raw,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if _strong_hr_policy(message) and is_rules_query(message):
+        return True
+    low = (message or "").lower()
+    if re.search(
+        r"\b(payslip|pay\s*slip|salary\s*slip|payroll|payslips)\b",
+        low,
+    ):
+        return True
+    return bool(
+        re.search(r"(পেস্লিপ|বেতন\s*স্লিপ|বেতনের\s*স্লিপ)", message or "", re.I)
+    )

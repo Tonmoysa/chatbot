@@ -47,11 +47,27 @@ class LeaveTypeRule:
     medical_doc_min_calendar_days: int | None = None
 
 
+# Default annual entitlement per leave type (calendar days) for balance queries.
+DEFAULT_LEAVE_ENTITLEMENTS: dict[str, float] = {
+    LEAVE_TYPE_SICK: 12.0,
+    LEAVE_TYPE_ANNUAL: 12.0,
+    LEAVE_TYPE_UNPAID: 12.0,
+}
+
+WIZARD_LEAVE_TYPES: frozenset[str] = frozenset(
+    {LEAVE_TYPE_SICK, LEAVE_TYPE_ANNUAL, LEAVE_TYPE_UNPAID}
+)
+
+
 @dataclass(frozen=True)
 class CompanyLeavePolicy:
     company_id: str
     # When the user does not mention a leave type, this code is used (tenant JSON override).
     default_leave_type_if_unspecified: str = LEAVE_TYPE_CASUAL
+    # Per-type balance entitlements (days) for chatbot balance answers.
+    leave_entitlements: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_LEAVE_ENTITLEMENTS)
+    )
     # Approval tiers (ledger days, after half-day multiplier)
     auto_approve_max_ledger_days: float = 1.0
     manager_approve_max_ledger_days: float = 3.0
@@ -135,9 +151,21 @@ def _policy_from_settings(company_id: str, raw: dict[str, Any]) -> CompanyLeaveP
     ).strip().lower()
     if def_lt not in ALL_LEAVE_TYPES:
         def_lt = base.default_leave_type_if_unspecified
+    entitlements = dict(DEFAULT_LEAVE_ENTITLEMENTS)
+    raw_ent = raw.get("leave_entitlements") or {}
+    if isinstance(raw_ent, dict):
+        for code, days in raw_ent.items():
+            c = str(code).strip().lower()
+            if c in entitlements:
+                try:
+                    entitlements[c] = float(days)
+                except (TypeError, ValueError):
+                    pass
+
     return CompanyLeavePolicy(
         company_id=company_id,
         default_leave_type_if_unspecified=def_lt,
+        leave_entitlements=entitlements,
         auto_approve_max_ledger_days=float(
             raw.get("auto_approve_max_ledger_days", base.auto_approve_max_ledger_days)
         ),

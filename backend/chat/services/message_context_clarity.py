@@ -27,7 +27,9 @@ _EXPLICIT_HR_ACTION_RE = re.compile(
     re.I,
 )
 _EXPLICIT_HR_ACTION_BN_RE = re.compile(
-    r"(ছুটি\s*কত|কত\s*দিন\s*আছে|ব্যালান্স|বাকি|আবেদন|জমা|খরচ|নিয়ম|পলিসি)"
+    r"(ছুটি\s*কত|কত\s*দিন\s*আছে|ব্যালান্স|বাকি|আবেদন|জমা|খরচ|নিয়ম|পলিসি|"
+    r"ছুটি.{0,15}(?:চাই|লাগবে|নিতে)|"
+    r"আবার.{0,25}(?:ছুটি|leave))"
 )
 
 _LEAVE_WIZARD_ASSISTANT_MARKERS = (

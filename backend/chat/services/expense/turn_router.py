@@ -6,6 +6,7 @@ Single entry: rules/LLM turn parse → deterministic handler.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from chat.services.expense.command_executor import execute_correction_plan
@@ -37,6 +38,79 @@ from chat.services.expense.slots import STAGE_COLLECTING, STAGE_REVIEW, STAGE_SU
 from chat.services.expense_validation import validate_expense_items
 
 
+def _handle_delete_verify_turn(
+    *,
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    lang: str | None,
+) -> TurnRouteResult | None:
+    """Process pending delete confirmation on any wizard stage."""
+    from chat.services.expense.expense_confirm import (
+        clear_expense_delete_verify,
+        is_confirmation_no,
+        is_confirmation_yes,
+        is_expense_delete_verify_pending,
+        read_expense_delete_verify_index,
+    )
+    from chat.services.expense.expense_fsm import set_expense_stage
+    from chat.services.expense_workflow import _pack, format_expense_summary
+
+    if not is_expense_delete_verify_pending(block):
+        return None
+    idx = read_expense_delete_verify_index(block)
+    if is_confirmation_no(message):
+        block = clear_expense_delete_verify(block)
+        q = "মুছে ফেলা **বাতিল** করা হয়েছে — draft **অপরিবর্তিত**।\n\n"
+        q += format_expense_summary(
+            items,
+            incurred_date_iso=inc_iso,
+            warnings=[],
+            line_flags=[],
+            lang=lang,
+        )
+        return TurnRouteResult(
+            handled=True,
+            pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+        )
+    if is_confirmation_yes(message):
+        if 0 <= idx < len(items):
+            items = [dict(x) for x in items]
+            del items[idx]
+        block = clear_expense_delete_verify(block)
+        set_expense_stage(block, STAGE_REVIEW)
+        val = validate_expense_items(
+            items,
+            incurred_date_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            message=message,
+        )
+        q = "মুছে ফেলা হয়েছে।\n\n" + format_expense_summary(
+            items,
+            incurred_date_iso=inc_iso,
+            warnings=val.warnings,
+            line_flags=val.line_flags,
+            lang=lang,
+        )
+        return TurnRouteResult(
+            handled=True,
+            pack=_pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                warnings=val.warnings,
+                inc_iso=inc_iso,
+            ),
+        )
+    return None
+
+
 def route_expense_wizard_turn(
     *,
     wf: dict[str, Any],
@@ -61,10 +135,28 @@ def route_expense_wizard_turn(
     )
     has_pending = bool(pending_line and pending_line.get("amount"))
 
+    delete_turn = _handle_delete_verify_turn(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if delete_turn is not None:
+        return delete_turn
+
     if stage not in (STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
         return TurnRouteResult(handled=False)
 
     if stage == STAGE_SUBMIT_CONFIRM:
+        from chat.services.leave_fsm import is_awaiting_leave_confirmation
+
+        if is_awaiting_leave_confirmation(wf):
+            return TurnRouteResult(handled=False)
+
         from chat.services.expense_workflow import handle_submit_confirm_turn
 
         return TurnRouteResult(
@@ -463,6 +555,16 @@ def _route_edit_draft(
     pending_line: dict[str, Any] | None = None,
 ) -> TurnRouteResult:
     from chat.services.expense.command_executor import apply_message_corrections
+    from chat.services.expense.expense_confirm import (
+        build_delete_confirm_prompt,
+        clear_expense_delete_verify,
+        is_confirmation_no,
+        is_confirmation_yes,
+        is_expense_delete_verify_pending,
+        mark_expense_delete_verify,
+        parse_ordinal_delete_index,
+        read_expense_delete_verify_index,
+    )
     from chat.services.expense.expense_fsm import set_expense_stage
     from chat.services.expense.session_action_memory import record_expense_corrected
     from chat.services.expense_workflow import (
@@ -470,6 +572,63 @@ def _route_edit_draft(
         _pack,
         format_expense_summary,
     )
+
+    if is_expense_delete_verify_pending(block):
+        idx = read_expense_delete_verify_index(block)
+        if is_confirmation_no(message):
+            block = clear_expense_delete_verify(block)
+            q = "মুছে ফেলা **বাতিল** করা হয়েছে — draft **অপরিবর্তিত**।\n\n"
+            q += format_expense_summary(
+                items,
+                incurred_date_iso=inc_iso,
+                warnings=[],
+                line_flags=[],
+                lang=lang,
+            )
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+            )
+        if is_confirmation_yes(message):
+            if 0 <= idx < len(items):
+                items = [dict(x) for x in items]
+                del items[idx]
+            block = clear_expense_delete_verify(block)
+            set_expense_stage(block, STAGE_REVIEW)
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            q = "মুছে ফেলা হয়েছে।\n\n" + format_expense_summary(
+                items,
+                incurred_date_iso=inc_iso,
+                warnings=val.warnings,
+                line_flags=val.line_flags,
+                lang=lang,
+            )
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                ),
+            )
+    else:
+        del_idx = parse_ordinal_delete_index(message)
+        if del_idx is not None and 0 <= del_idx < len(items):
+            block = mark_expense_delete_verify(block, del_idx)
+            q = build_delete_confirm_prompt(items, del_idx, lang=lang)
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+            )
 
     review_snapshot = [dict(x) for x in items]
     if stage == STAGE_REVIEW:
@@ -778,7 +937,6 @@ def _route_review_confirm(
         _build_submit_confirm_response,
         _pack,
     )
-    from datetime import date
 
     val = validate_expense_items(
         items,
@@ -800,7 +958,9 @@ def _route_review_confirm(
                 validation_blocked=True,
             ),
         )
-    date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
+    # No explicit `today=`: the helper resolves it from its own module-level
+    # `date`, keeping one patchable clock for all submit-date policy checks.
+    date_block = expense_submit_date_block_reason(inc_iso)
     if date_block:
         return TurnRouteResult(
             handled=True,

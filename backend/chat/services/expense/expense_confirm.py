@@ -33,8 +33,8 @@ _DENY_RE = re.compile(
 
 _UPDATE_AMOUNT_RE = re.compile(
     rf"(?P<cat>{_CATEGORY_TOKEN}|bos|bas)\s+"
-    r"(?:(?:\d+)\s*(?:টাকা|taka|tk)?\s*)?"
-    r"(?:না|na|no|not)\s+"
+    r"(?:(?P<old>\d+(?:[.,]\d{{1,2}})?)\s*(?:টাকা|taka|tk)?\s*)?"
+    r"(?:না|na|no|not)\s*[,]?\s+"
     r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk|হবে|hobe)?",
     re.I,
 )
@@ -237,7 +237,13 @@ def _has_category_replace_pattern(text: str) -> bool:
 
 def _normalize_correction_message(message: str) -> str:
     """Fix common STT/typo tokens before correction regexes run."""
-    text = message or ""
+    from chat.services.bn_normalize import normalize_bn_digits
+
+    text = normalize_bn_digits(message or "")
+    text = re.sub(r"বাস\s*ভাড়া", "bus", text, flags=re.I | re.UNICODE)
+    text = re.sub(r"(?<!\w)বাস(?!\w)", "bus", text, flags=re.UNICODE)
+    text = re.sub(r"মেট্রো\s*রেল", "metro rail", text, flags=re.I | re.UNICODE)
+    text = re.sub(r"নাস্তা", "snack", text, flags=re.UNICODE)
     return _CORRECTION_TYPO_RE.sub("bus", text)
 
 
@@ -323,12 +329,24 @@ def looks_like_expense_correction(message: str) -> bool:
         low,
         re.I,
     ):
+        # Affirmative delete confirm — not a correction ("হ্যাঁ delete করো")
+        if _has_bn_affirmative_token(message) or re.search(
+            r"^(yes|y|ok|okay|confirm|হ্যাঁ|হ্যা)\b", low, re.I | re.UNICODE
+        ):
+            return False
         return True
     if (
         _UPDATE_AMOUNT_RE.search(low)
         or _SET_AMOUNT_RE.search(low)
         or _CAT_ER_EXPENSE_AMOUNT_RE.search(low)
         or _CONTEXTUAL_CAT_AMOUNT_HOBE_RE.search(low)
+    ):
+        return True
+    if re.search(
+        r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last).{0,30}"
+        r"(?:entry|line|expense|খরচ).{0,20}(?:delete|remove|বাদ|মুছ)",
+        low,
+        re.I | re.UNICODE,
     ):
         return True
     if _TRANSFER_RE.search(low) or _PARTIAL_DEDUCT_RE.search(low):
@@ -346,16 +364,97 @@ def looks_like_expense_correction(message: str) -> bool:
         return True
     if _ADD_RE.search(low):
         return True
+    _na_swap = re.compile(r"(?:^|[\s,])(?:na|না)(?:[\s,]|$)", re.I | re.UNICODE)
     if re.search(r"\b(bus|lunch|train|snack|dinner|breakfast|bike|cab|metro|rail|rickshaw|cng)\b", low, re.I):
-        if re.search(r"(?:na|না)", low, re.I) and re.search(r"\d", low):
+        if _na_swap.search(low) and re.search(r"\d", low):
             return True
         if re.search(r"(?:hobe|হবে|update|change)\b", low, re.I) and re.search(r"\d", low):
             return True
+    if re.search(
+        r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last).{0,30}"
+        r"(?:entry|line|expense|খরচ|টা).{0,30}\d+.{0,25}(?:না|na).{0,25}\d+",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last).{0,40}"
+        r"(?:expense|entry|line|খরচ|টা).{0,40}\d+.{0,30}(?:ছিল|chilo|was)",
+        low,
+        re.I | re.UNICODE,
+    ) and re.search(r"(?:করে\s*দাও|kore\s*daw|হবে|hobe|habe)", low, re.I):
+        return True
     return False
+
+
+_KEY_DELETE_VERIFY = "expense_delete_verify_pending"
+_KEY_DELETE_INDEX = "expense_delete_verify_index"
+
+
+def parse_ordinal_delete_index(message: str) -> int | None:
+    from chat.services.expense.command_parser import _parse_ordinal_delete_index
+
+    return _parse_ordinal_delete_index(message)
+
+
+def is_expense_delete_verify_pending(block: dict[str, Any] | None) -> bool:
+    return bool((block or {}).get(_KEY_DELETE_VERIFY))
+
+
+def read_expense_delete_verify_index(block: dict[str, Any] | None) -> int:
+    """Pending delete line index; ``0`` is valid — never use ``or -1`` on this field."""
+    raw = (block or {}).get(_KEY_DELETE_INDEX)
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
+def mark_expense_delete_verify(block: dict[str, Any], index: int) -> dict[str, Any]:
+    block[_KEY_DELETE_VERIFY] = True
+    block[_KEY_DELETE_INDEX] = int(index)
+    return block
+
+
+def clear_expense_delete_verify(block: dict[str, Any]) -> dict[str, Any]:
+    block.pop(_KEY_DELETE_VERIFY, None)
+    block.pop(_KEY_DELETE_INDEX, None)
+    return block
+
+
+def build_delete_confirm_prompt(
+    items: list[dict[str, Any]],
+    index: int,
+    *,
+    lang: str | None = None,
+) -> str:
+    if 0 <= index < len(items):
+        row = items[index]
+        amt = float(row.get("amount") or 0)
+        cat = str(row.get("category") or "line").strip()
+        return (
+            f"**{index + 1} নম্বর** expense (**{cat}**, **{amt:g} Tk**) "
+            f"**মুছে ফেলব**? (**হ্যাঁ** / **না**)"
+        )
+    return "এই expense line **delete** করব? (**হ্যাঁ** / **না**)"
 
 
 def build_confirmation_question() -> str:
     return "সব তথ্য কি ঠিক আছে? (হ্যাঁ / না)"
+
+
+def _has_bn_affirmative_token(text: str) -> bool:
+    """Bengali affirmatives — \\b is unreliable on Indic scripts."""
+    return bool(
+        re.search(
+            r"(?:^|[\s,;])(হ্যাঁ|হ্যা|ঠিক\s*আছে|সব\s*ঠিক|জি)(?:[\s,;।.!?]|$)",
+            text or "",
+            re.I | re.UNICODE,
+        )
+        or re.search(r"^(হ্যাঁ|হ্যা|ঠিক\s*আছে|সব\s*ঠিক|জি)(?:[\s,;।.!?]|$)", text or "", re.I)
+    )
 
 
 def is_confirmation_yes(message: str) -> bool:
@@ -371,9 +470,18 @@ def is_confirmation_yes(message: str) -> bool:
             return False
     except Exception:
         pass
+    try:
+        from chat.services.expense_workflow import wants_expense_summary
+
+        if wants_expense_summary(t):
+            return False
+    except Exception:
+        pass
     if _CONFIRM_RE.match(t):
         return True
-    return bool(re.search(r"\b(confirm|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
+    if _has_bn_affirmative_token(t):
+        return True
+    return bool(re.search(r"\b(confirm|yes|ok|okay)\b", t, re.I))
 
 
 def is_submit_confirm_yes(message: str) -> bool:
@@ -389,17 +497,45 @@ def is_submit_confirm_yes(message: str) -> bool:
         from chat.services.expense.wizard_commands import wants_expense_submit_command
 
         if wants_expense_submit_command(t):
+            # Combined affirmative + submit at CRM gate counts as yes.
+            if re.search(
+                r"(?:ঠিক\s*আছে|সব\s*ঠিক|হ্যাঁ|yes|confirm)",
+                t,
+                re.I | re.UNICODE,
+            ):
+                return True
+            if re.search(
+                r"(?:expense|খরচ|application|report).{0,50}(?:submit|জমা)",
+                t,
+                re.I | re.UNICODE,
+            ):
+                return False
             return True
     except Exception:
         pass
     if _CONFIRM_RE.match(t):
         return True
-    return bool(re.search(r"\b(confirm|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I))
+    if _has_bn_affirmative_token(t):
+        return True
+    return bool(re.search(r"\b(confirm|yes|ok|okay)\b", t, re.I))
 
 
 def is_confirmation_no(message: str) -> bool:
     t = (message or "").strip()
     if _DENY_RE.match(t):
+        return True
+    # Explicit cancel: "না delete করো না", "no don't delete"
+    if re.search(r"^(?:no|nope|না)\b", t, re.I) and re.search(
+        r"(?:delete|remove|মুছ|বাতিল|kor[o]?\s*na|koro\s*na)\b",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"^(?:no|nope|না)\b.*(?:delete|remove|মুছ).*(?:না|na|no)\s*$",
+        t,
+        re.I | re.UNICODE,
+    ):
         return True
     # Standalone denial only — not "bus 50 na 70 hobe" style corrections.
     if len(re.findall(r"\S+", t)) <= 2:
@@ -570,19 +706,13 @@ def _prune_zero_lines(out: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _set_category_amount(
     out: list[dict[str, Any]], cat: str, new_amt: float
 ) -> bool:
-    """Update amount; collapse multiple rows of the same category to one."""
+    """Update the first matching category row; keep other lines (e.g. two bus routes)."""
     cat_l = cat.lower()
-    idxs = [
-        i
-        for i, row in enumerate(out)
-        if str(row.get("category") or "").lower() == cat_l
-    ]
-    if not idxs:
-        return False
-    out[idxs[0]]["amount"] = new_amt
-    for i in reversed(idxs[1:]):
-        del out[i]
-    return True
+    for row in out:
+        if str(row.get("category") or "").lower() == cat_l:
+            row["amount"] = new_amt
+            return True
+    return False
 
 
 def _replace_category(
@@ -678,7 +808,7 @@ def build_correction_failure_notice(
         return travel_group_not_found_notice(items, lang=lang)
     from chat.services.expense.command_parser import parse_correction_plan
 
-    plan = parse_correction_plan(message)
+    plan = parse_correction_plan(message, item_count=len(items))
     for cat in plan.remove_verb_first:
         matches = [
             row

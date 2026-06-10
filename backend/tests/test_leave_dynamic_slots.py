@@ -33,20 +33,18 @@ def test_kalke_sick_leave_prefills_type_and_date():
     assert draft.get("reason")  # implied
     missing = get_missing_slots(draft)
     assert "leave_dates" not in missing
-    assert "leave_payment_category" in missing
     assert "leave_type" not in missing
     assert "reason" not in missing
     assert "day_scope" in missing
 
 
-def test_agamikal_paid_leave_skips_date_and_reason():
+def test_agamikal_paid_leave_needs_type_and_scope():
     draft = _draft_from_message("আগামীকাল paid leave চাই")
     assert draft.get("start_date")
     assert draft.get("leave_payment_category") == "paid"
     missing = get_missing_slots(draft)
     assert "leave_dates" not in missing
-    assert "leave_payment_category" not in missing
-    assert "leave_type" not in missing
+    assert "leave_type" in missing
     assert "day_scope" in missing
 
 
@@ -64,8 +62,8 @@ def test_today_half_day_casual():
     missing = get_missing_slots(draft)
     assert "day_scope" not in missing
     assert "leave_dates" not in missing
-    assert "leave_payment_category" in missing
-    assert "leave_type" not in missing
+    assert "leave_type" in missing
+    assert "half_day_period" in missing
 
 
 def test_full_paid_sick_single_turn_almost_complete():
@@ -88,8 +86,8 @@ def test_vague_date_triggers_clarification():
 
 
 @pytest.mark.django_db
-def test_wizard_asks_payment_then_scope_after_sick_phrase(monkeypatch):
-    """Explicit sick + date + implied reason still requires paid/unpaid and scope."""
+def test_wizard_asks_scope_after_sick_phrase(monkeypatch):
+    """Explicit sick + date + implied reason still requires full/half scope."""
     fixed = dt.date(2026, 5, 7)
 
     class FixedDate(dt.date):
@@ -110,45 +108,35 @@ def test_wizard_asks_payment_then_scope_after_sick_phrase(monkeypatch):
     )
     assert not r1["complete"]
     q1 = r1.get("question") or ""
-    assert "বেতন" in q1 or "paid" in q1.lower()
+    assert "হাফ" in q1 or "পুরো" in q1 or "half" in q1.lower() or "full" in q1.lower()
     assert "প্রথম প্রশ্ন" not in q1
     assert "১/৫" not in q1
 
     r2 = process_leave_turn(
         workflow_state=r1["workflow_state"],
-        message="paid",
-        entities={},
-        company_id="company-a",
-    )
-    assert not r2["complete"]
-    q2 = r2.get("question") or ""
-    assert "হাফ" in q2 or "পুরো" in q2 or "half" in q2.lower() or "full" in q2.lower()
-
-    r3 = process_leave_turn(
-        workflow_state=r2["workflow_state"],
         message="full",
         entities={},
         company_id="company-a",
     )
-    assert not r3["complete"]
-    assert not r3.get("confirmed_submit")
-    assert "জমা দেবেন" in (r3.get("question") or "") or "yes" in (r3.get("question") or "").lower()
+    assert not r2["complete"]
+    assert not r2.get("confirmed_submit")
+    assert "জমা দেবেন" in (r2.get("question") or "") or "yes" in (r2.get("question") or "").lower()
 
-    r4 = process_leave_turn(
-        workflow_state=r3["workflow_state"],
+    r3 = process_leave_turn(
+        workflow_state=r2["workflow_state"],
         message="yes",
         entities={},
         company_id="company-a",
     )
-    assert r4["complete"]
-    assert r4.get("confirmed_submit")
-    assert r4["merged_entities"].get("leave_type") == "sick"
-    assert r4["merged_entities"].get("reason")
+    assert r3["complete"]
+    assert r3.get("confirmed_submit")
+    assert r3["merged_entities"].get("leave_type") == "sick"
+    assert r3["merged_entities"].get("reason")
 
 
 @pytest.mark.django_db
-def test_wizard_partial_message_collects_type_payment_scope_reason(monkeypatch):
-    """Vague chuti message: ask leave type, paid/unpaid, scope, then reason."""
+def test_wizard_partial_message_collects_type_scope_reason(monkeypatch):
+    """Vague chuti message: ask leave type, scope, then reason."""
     fixed = dt.date(2026, 5, 7)
 
     class FixedDate(dt.date):
@@ -174,7 +162,7 @@ def test_wizard_partial_message_collects_type_payment_scope_reason(monkeypatch):
 
     r2 = process_leave_turn(
         workflow_state=r1["workflow_state"],
-        message="casual",
+        message="annual leave",
         entities={},
         company_id="company-a",
     )
@@ -182,7 +170,7 @@ def test_wizard_partial_message_collects_type_payment_scope_reason(monkeypatch):
 
     r3 = process_leave_turn(
         workflow_state=r2["workflow_state"],
-        message="paid",
+        message="full",
         entities={},
         company_id="company-a",
     )
@@ -190,27 +178,19 @@ def test_wizard_partial_message_collects_type_payment_scope_reason(monkeypatch):
 
     r4 = process_leave_turn(
         workflow_state=r3["workflow_state"],
-        message="full",
-        entities={},
-        company_id="company-a",
-    )
-    assert not r4["complete"]
-
-    r5 = process_leave_turn(
-        workflow_state=r4["workflow_state"],
         message="family kajer jonno",
         entities={},
         company_id="company-a",
     )
-    assert not r5["complete"]
-    assert "জমা দেবেন" in (r5.get("question") or "")
+    assert not r4["complete"]
+    assert "জমা দেবেন" in (r4.get("question") or "")
 
-    r6 = process_leave_turn(
-        workflow_state=r5["workflow_state"],
+    r5 = process_leave_turn(
+        workflow_state=r4["workflow_state"],
         message="yes",
         entities={},
         company_id="company-a",
     )
-    assert r6["complete"]
-    assert r6.get("confirmed_submit")
-    assert r6["merged_entities"].get("reason")
+    assert r5["complete"]
+    assert r5.get("confirmed_submit")
+    assert r5["merged_entities"].get("reason")

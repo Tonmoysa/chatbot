@@ -218,6 +218,17 @@ def rules_classify_hr_query(
             QUERY_HR_POLICY, confidence=CONFIDENCE_RULES, source="rules_policy"
         )
 
+    from chat.services.policy_intent_helpers import is_rules_query as _is_rules_query
+
+    if _strong_hr_policy(raw) and _is_rules_query(raw) and re.search(
+        r"annual\s+leave|sick\s+leave|casual\s+leave",
+        raw,
+        re.I,
+    ):
+        return _finish_decision(
+            QUERY_HR_POLICY, confidence=CONFIDENCE_RULES, source="rules_named_policy"
+        )
+
     if is_leave_balance_query(raw):
         return _finish_decision(
             QUERY_LEAVE_BALANCE, confidence=CONFIDENCE_RULES, source="rules_balance"
@@ -548,14 +559,30 @@ def apply_hr_query_to_intent(
     decision: HrQueryDecision,
     *,
     message: str = "",
+    router_locked: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    """Upgrade weak/unknown intent when the query classifier is confident."""
+    """Upgrade weak/unknown intent when the query classifier is confident.
+
+    When the session router decisively locked the intent (``router_locked``),
+    only the HR_POLICY upgrade may still apply (spec §6 / invariant I5:
+    policy beats expense claim); all other overrides are skipped so the
+    classifier cannot re-introduce parallel-layer conflicts.
+    """
     if not decision.maps_to_intent:
         return intent, intent_result
     if decision.confidence < CONFIDENCE_LLM_FALLBACK:
         return intent, intent_result
-    # HR policy intent stays with the intent detector / RAG-on-unknown path.
+    if router_locked and decision.maps_to_intent != INTENT_HR_POLICY:
+        return intent, intent_result
     if decision.maps_to_intent == INTENT_HR_POLICY:
+        if intent != INTENT_HR_POLICY:
+            return decision.maps_to_intent, {
+                **intent_result,
+                "intent": decision.maps_to_intent,
+                "confidence": decision.confidence,
+                "source": (intent_result.get("source") or "intent")
+                + f"+hr_query_{decision.source}",
+            }
         return intent, intent_result
     from chat.services.expense.wizard_commands import (
         is_expense_wizard_command,

@@ -11,10 +11,14 @@ from chat.services.expense.wizard_commands import (
     wants_expense_done_command,
     wants_expense_done_command_rules_only,
 )
+import httpx
+
 from chat.services.llm_client import (
     LLMClient,
     _JSON_HTTP_FAILURES,
     _JSON_CIRCUIT_THRESHOLD,
+    _maybe_trip_rate_limit,
+    _rate_limit_tripped,
     clear_llm_trace_state,
 )
 
@@ -106,3 +110,55 @@ def test_llm_json_second_attempt_without_response_format(monkeypatch):
     )
     assert out == {"ok": True}
     assert calls == [True, False]
+
+
+def _make_429() -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://x/chat/completions")
+    response = httpx.Response(429, request=request, text="rate limit reached")
+    return httpx.HTTPStatusError("429", request=request, response=response)
+
+
+def test_rate_limit_trips_circuit_for_trace():
+    clear_llm_trace_state("trace-429")
+    assert not _rate_limit_tripped("trace-429")
+    _maybe_trip_rate_limit("trace-429", _make_429())
+    assert _rate_limit_tripped("trace-429")
+    # Non-429 errors must not trip the rate-limit circuit.
+    clear_llm_trace_state("trace-other")
+    _maybe_trip_rate_limit("trace-other", RuntimeError("boom"))
+    assert not _rate_limit_tripped("trace-other")
+
+
+def test_rate_limited_trace_short_circuits_json_and_text(monkeypatch):
+    clear_llm_trace_state("trace-429b")
+    _maybe_trip_rate_limit("trace-429b", _make_429())
+
+    def boom(*args, **kwargs):
+        raise AssertionError("LLM should not be called after rate-limit trip")
+
+    monkeypatch.setattr(
+        "chat.services.llm_client.LLMClient.is_configured", lambda self: True
+    )
+    monkeypatch.setattr("chat.services.llm_client.LLMClient._complete", boom)
+    monkeypatch.setattr("httpx.Client.post", boom)
+
+    assert (
+        LLMClient().chat_json(
+            system_prompt="sys", user_prompt="hi", trace_id="trace-429b"
+        )
+        is None
+    )
+    assert (
+        LLMClient().chat_text(
+            system_prompt="sys", user_prompt="hi", trace_id="trace-429b"
+        )
+        is None
+    )
+
+
+def test_clear_trace_state_resets_rate_limit():
+    clear_llm_trace_state("trace-429c")
+    _maybe_trip_rate_limit("trace-429c", _make_429())
+    assert _rate_limit_tripped("trace-429c")
+    clear_llm_trace_state("trace-429c")
+    assert not _rate_limit_tripped("trace-429c")

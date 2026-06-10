@@ -1043,6 +1043,24 @@ def _ingest_new_claim_preserving_pending_category(
     )
 
 
+def _finalize_route_as_bus(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Auto-categorize from→to travel lines as Bus when amount is known."""
+    frm = str(entry.get("from_location") or "").strip()
+    to = str(entry.get("to_location") or "").strip()
+    amt = float(entry.get("amount") or 0)
+    if not frm or not to or amt <= 0:
+        return None
+    return normalize_expense_line(
+        {
+            "category": "Bus",
+            "amount": amt,
+            "from_location": frm,
+            "to_location": to,
+            "notes": str(entry.get("source_clause") or "").strip(),
+        }
+    )
+
+
 def _pending_from_clause(clause: str) -> dict[str, Any] | None:
     """Build a pending line from an uncategorized clause (amount ± route)."""
     text = (clause or "").strip()
@@ -1278,18 +1296,49 @@ def _ingest_extracted_lines(
 
     pending_entries: list[dict[str, Any]] = []
     for ni in uncategorized:
-        pending_entries.append(
-            {
-                "amount": float(ni.amount),
-                "category": "",
-                "from_location": ni.from_location or "",
-                "to_location": ni.to_location or "",
-                "source_clause": str(getattr(ni, "notes", "") or ""),
-            }
-        )
+        entry = {
+            "amount": float(ni.amount),
+            "category": "",
+            "from_location": ni.from_location or "",
+            "to_location": ni.to_location or "",
+            "source_clause": str(getattr(ni, "notes", "") or ""),
+        }
+        finalized = _finalize_route_as_bus(entry)
+        if finalized:
+            key = (
+                str(finalized.get("category") or "").lower(),
+                round(float(finalized.get("amount") or 0), 2),
+            )
+            if not any(
+                (
+                    str(r.get("category") or "").lower(),
+                    round(float(r.get("amount") or 0), 2),
+                )
+                == key
+                for r in out
+            ):
+                out.append(finalized)
+            continue
+        pending_entries.append(entry)
     for clause in ext.malformed:
         entry = _pending_from_clause(clause)
         if entry:
+            finalized = _finalize_route_as_bus(entry)
+            if finalized:
+                key = (
+                    str(finalized.get("category") or "").lower(),
+                    round(float(finalized.get("amount") or 0), 2),
+                )
+                if not any(
+                    (
+                        str(r.get("category") or "").lower(),
+                        round(float(r.get("amount") or 0), 2),
+                    )
+                    == key
+                    for r in out
+                ):
+                    out.append(finalized)
+                continue
             pending_entries.append(entry)
 
     if needs_route:
@@ -1567,6 +1616,107 @@ def format_expense_submitted_message(
         incurred_date_iso=incurred_date_iso,
         reference_id=reference_id,
         lang=normalize_reply_lang(lang),
+    )
+
+
+def _append_single_review_line_if_new(
+    items: list[dict[str, Any]], message: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """During review, append one new parsed line unless it duplicates an existing row."""
+    if looks_like_expense_correction(message):
+        return items, False
+    ext = extract_expense_items(message)
+    if len(ext.items) != 1:
+        return items, False
+    ni = ext.items[0]
+    try:
+        amt = round(float(ni.amount or 0), 2)
+    except (TypeError, ValueError):
+        return items, False
+    if amt <= 0:
+        return items, False
+    cat = str(ni.category or "Other")
+    cat_l = cat.lower()
+    for row in items:
+        if (
+            str(row.get("category") or "").lower() == cat_l
+            and abs(float(row.get("amount") or 0) - amt) < 0.01
+        ):
+            return items, False
+    new_row = normalize_expense_line(
+        {
+            "category": cat,
+            "amount": amt,
+            "from_location": getattr(ni, "from_location", "") or "",
+            "to_location": getattr(ni, "to_location", "") or "",
+        }
+    )
+    return items + [new_row], True
+
+
+def _try_enter_submit_confirm(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    message: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    lang: str,
+    trace_id: str = "",
+) -> dict[str, Any] | None:
+    from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+    if not wants_expense_submit_command(message):
+        return None
+    val = validate_expense_items(
+        items,
+        incurred_date_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+    )
+    if not val.ok:
+        set_expense_stage(block, STAGE_COLLECTING)
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=val.blocking_message,
+            warnings=val.warnings,
+            inc_iso=inc_iso,
+            validation_blocked=True,
+        )
+    date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
+    if date_block:
+        set_expense_stage(block, STAGE_REVIEW)
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=(
+                f"{date_block}\n\n"
+                "তারিখ ঠিক করে আবার বলুন (যেমন **ajke** lunch 100), তারপর summary দেখুন।"
+            ),
+            warnings=val.warnings,
+            inc_iso=inc_iso,
+            validation_blocked=True,
+        )
+    set_expense_stage(block, STAGE_SUBMIT_CONFIRM)
+    submit_q, submit_facts = _build_submit_confirm_response(
+        message,
+        lang=lang,
+        trace_id=trace_id,
+        last_question=expense_pending_prompt({"expense_request": block}) or "",
+    )
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=submit_q,
+        warnings=val.warnings,
+        inc_iso=inc_iso,
+        message_facts=submit_facts,
     )
 
 
@@ -2446,57 +2596,19 @@ def process_expense_turn(
                 message_facts=submit_facts,
             )
 
-        from chat.services.expense.wizard_commands import wants_expense_submit_command
-
-        if wants_expense_submit_command(message):
-            val = validate_expense_items(
-                items,
-                incurred_date_iso=inc_iso,
-                day_logged_total=day_logged_total,
-                daily_cap=daily_cap,
-            )
-            if not val.ok:
-                set_expense_stage(block, STAGE_COLLECTING)
-                return _pack(
-                    wf,
-                    block,
-                    items=items,
-                    question=val.blocking_message,
-                    warnings=val.warnings,
-                    inc_iso=inc_iso,
-                    validation_blocked=True,
-                )
-            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
-            if date_block:
-                set_expense_stage(block, STAGE_REVIEW)
-                return _pack(
-                    wf,
-                    block,
-                    items=items,
-                    question=(
-                        f"{date_block}\n\n"
-                        "তারিখ ঠিক করে আবার বলুন (যেমন **ajke** lunch 100), তারপর summary দেখুন।"
-                    ),
-                    warnings=val.warnings,
-                    inc_iso=inc_iso,
-                    validation_blocked=True,
-                )
-            set_expense_stage(block, STAGE_SUBMIT_CONFIRM)
-            submit_q, submit_facts = _build_submit_confirm_response(
-                message,
-                lang=lang,
-                trace_id=trace_id,
-                last_question=expense_pending_prompt({"expense_request": block}) or "",
-            )
-            return _pack(
-                wf,
-                block,
-                items=items,
-                question=submit_q,
-                warnings=val.warnings,
-                inc_iso=inc_iso,
-                message_facts=submit_facts,
-            )
+        submit_pack = _try_enter_submit_confirm(
+            wf,
+            block,
+            items,
+            message=message,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            lang=lang,
+            trace_id=trace_id,
+        )
+        if submit_pack:
+            return submit_pack
 
         review_snapshot = [dict(x) for x in items]
 
@@ -2528,7 +2640,10 @@ def process_expense_turn(
                 inc_iso=inc_iso,
             )
 
-        if (
+        items, appended_line = _append_single_review_line_if_new(items, message)
+        if appended_line:
+            review_snapshot = [dict(x) for x in items]
+        elif (
             not looks_like_expense_correction(message)
             and (extract_expense_items(message).items or [])
         ):
@@ -2544,7 +2659,7 @@ def process_expense_turn(
         if not items and review_snapshot:
             items = review_snapshot
 
-        corrected = False
+        corrected = appended_line
         if looks_like_expense_correction(message):
             items, corrected = _apply_review_corrections(
                 items,
@@ -2702,6 +2817,19 @@ def process_expense_turn(
             )
             if done_incomplete:
                 return done_incomplete
+            submit_pack = _try_enter_submit_confirm(
+                wf,
+                block,
+                items,
+                message=message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                lang=lang,
+                trace_id=trace_id,
+            )
+            if submit_pack:
+                return submit_pack
         # Legacy shortcut: if the user answers "yes" to the "anything else?"
         # prompt while still in collecting, treat it as "submit now".
         # This keeps older flows/tests compatible without requiring a second confirmation.
@@ -2767,11 +2895,44 @@ def process_expense_turn(
 
     loose_amt = parse_amount_only(message)
     if loose_amt is not None:
+        pair = parse_from_to_locations(message)
+        if pair:
+            route_line = _finalize_route_as_bus(
+                {
+                    "amount": loose_amt,
+                    "from_location": pair[0],
+                    "to_location": pair[1],
+                }
+            )
+            if route_line:
+                before_count = len(items)
+                items = dedupe_expense_items(items + [route_line])
+                if len(items) > before_count:
+                    from chat.services.expense.session_action_memory import (
+                        record_expense_lines_added,
+                    )
+
+                    wf = record_expense_lines_added(
+                        wf,
+                        new_items=items[before_count:],
+                        all_items=items,
+                        incurred_date_iso=inc_iso,
+                        stage=str(block.get("stage") or STAGE_COLLECTING),
+                    )
+                q, facts = _ask_more_lines_prompt(block, items, lang=lang)
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    inc_iso=inc_iso,
+                    message_facts=facts,
+                )
         block["pending_line"] = {
             "amount": loose_amt,
             "category": "",
-            "from_location": "",
-            "to_location": "",
+            "from_location": pair[0] if pair else "",
+            "to_location": pair[1] if pair else "",
         }
         block["pending_step"] = "category"
         set_expense_stage(block, STAGE_COLLECTING)
@@ -2784,6 +2945,48 @@ def process_expense_turn(
             inc_iso=inc_iso,
             message_facts=facts,
         )
+
+    if items and looks_like_expense_correction(message):
+        items_corr, changed_corr = _apply_corrections(
+            items, message, review_mode=False
+        )
+        if changed_corr:
+            items = dedupe_expense_items(items_corr)
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            if not val.ok:
+                set_expense_stage(block, STAGE_COLLECTING)
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=val.blocking_message
+                    or "কিছু তথ্য মিসিং আছে — amount + category দিন।",
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    validation_blocked=True,
+                )
+            set_expense_stage(block, STAGE_REVIEW)
+            q = "আপডেট করা হয়েছে।\n\n" + format_expense_summary(
+                items,
+                incurred_date_iso=inc_iso,
+                warnings=val.warnings,
+                line_flags=val.line_flags,
+                lang=lang,
+            )
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                warnings=val.warnings,
+                inc_iso=inc_iso,
+            )
 
     if items and should_block_compound_reingest(block, message, items):
         val = validate_expense_items(

@@ -81,10 +81,15 @@ _DEFER_LEAVE_SUBMIT_RE = re.compile(
     r"(?:leave|ছুটি|chuti|chhuti|request)|"
     r"leave\s+request\s+ta\s+age|"
     r"(?:leave|ছুটি|chuti|chhuti).{0,20}(?:request|application|abedon|আবেদন)?"
-    r".{0,15}(?:submit|joma|জমা).{0,15}(?:koro|kor|daw|dao|debo|de|diye|kore)|"
+    r".{0,15}(?:submit|joma|জমা).{0,15}(?:koro|kor|daw|dao|debo|de|diye|kore|করো|করুন|কর)|"
     r"leave\s+request\s+ta\s+submit",
     re.I | re.UNICODE,
 )
+
+
+def wants_leave_submit_command(message: str) -> bool:
+    """User wants to submit/finalize the current leave application."""
+    return wants_defer_expense_for_leave_submit(message)
 
 
 
@@ -140,8 +145,8 @@ def build_deferred_leave_return_prompt(
     body = build_confirmation_prompt(draft)
     if lang == "bn":
         intro = (
-            "আপনার ছুটির আবেদন এখনো **জমা হয়নি**। নিচের তথ্যগুলো যাচাই করুন — "
-            "সব ঠিক থাকলে **yes** লিখে জমা দিন; বদলাতে **edit** লিখুন।\n\n"
+            "আপনার ছুটির আবেদন এখনো **জমা হয়নি**। নিচের তথ্যগুলো একবার **চেক** করুন — "
+            "সব **ঠিক** থাকলে **yes** লিখে জমা দিন; বদলাতে **edit** লিখুন।\n\n"
         )
     elif lang == "banglish":
         intro = (
@@ -156,7 +161,14 @@ def build_deferred_leave_return_prompt(
     return intro + body
 
 
+_AFFIRMATIVE_RE = re.compile(
+    r"(হ্যাঁ|হ্যা|yes|ঠিক\s*আছে|thik\s*ache)",
+    re.I | re.UNICODE,
+)
 
+
+def _has_affirmative_token(message: str) -> bool:
+    return bool(_AFFIRMATIVE_RE.search((message or "").strip()))
 
 
 def wants_defer_leave_for_expense_submit(message: str) -> bool:
@@ -181,6 +193,12 @@ def wants_defer_expense_for_leave_submit(message: str) -> bool:
     """User wants to finish a parked leave (often submit) before continuing expense."""
     t = (message or "").strip()
     if not t:
+        return False
+    if (
+        _has_affirmative_token(t)
+        and re.search(r"\b(submit|জমা|joma)\b", t, re.I)
+        and re.search(r"\b(leave|ছুটি|chuti|chhuti)\b", t, re.I)
+    ):
         return False
     if _DEFER_EXPENSE_SUBMIT_RE.search(t):
         return False
@@ -217,8 +235,8 @@ def is_confirmation_yes(message: str) -> bool:
         return False
 
     if wants_defer_expense_for_leave_submit(t):
-
-        return False
+        if not _has_affirmative_token(t):
+            return False
 
     if _CONFIRM_YES_RE.match(t):
 
@@ -229,7 +247,16 @@ def is_confirmation_yes(message: str) -> bool:
     ):
         return False
 
-    return bool(re.search(r"\b(confirm|submit|ঠিক\s*আছে|হ্যাঁ)\b", t, re.I)) and not _EDIT_RE.search(t)
+    if (
+        _has_affirmative_token(t)
+        and re.search(r"\b(submit|জমা|joma)\b", t, re.I)
+        and re.search(r"\b(leave|ছুটি|chuti|chhuti)\b", t, re.I)
+    ):
+        return True
+
+    return bool(
+        re.search(r"\b(confirm|submit)\b", t, re.I) or _has_affirmative_token(t)
+    ) and not _EDIT_RE.search(t)
 
 
 
@@ -834,7 +861,7 @@ def process_confirmation_turn(
 
     from chat.services.wizard_turn_gate import is_leave_navigation_phrase
 
-    if is_leave_navigation_phrase(message):
+    if is_leave_navigation_phrase(message) and not is_confirmation_yes(message):
         return {
             "workflow_state": wf,
             "merged_entities": build_merged_entities_for_engine(d),
@@ -873,6 +900,20 @@ def process_confirmation_turn(
 
 
     if is_confirmation_yes(message):
+        from chat.services.leave.normalization import normalize_leave_draft
+        from chat.services.leave_draft_utils import apply_leave_draft_defaults
+        from chat.services.leave_policies import get_company_leave_policy
+
+        policy = get_company_leave_policy("default")
+        normalize_leave_draft(d)
+        apply_leave_draft_defaults(d, policy)
+        wf = apply_leave_state(
+            wf,
+            draft=d,
+            step=None,
+            status=STATUS_ACTIVE,
+            review_pending=True,
+        )
 
         return {
 

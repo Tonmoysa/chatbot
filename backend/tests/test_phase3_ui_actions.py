@@ -57,15 +57,19 @@ def test_expense_collecting_actions_when_items_present():
     assert "joma daw" in msgs
 
 
-def test_leave_payment_step_actions():
+def test_leave_type_step_actions():
     wf = {
         "active_flow": "leave",
         "status": "active",
         "draft": {"start_date": "2026-06-08", "reason": "sick"},
-        "step": "leave_payment_category",
+        "step": "leave_type",
     }
     actions = build_ui_actions(wf)
-    assert {a["message"] for a in actions} == {"paid", "unpaid"}
+    assert {a["message"] for a in actions} == {
+        "sick leave",
+        "annual leave",
+        "leave without pay",
+    }
 
 
 def test_leave_scope_step_actions():

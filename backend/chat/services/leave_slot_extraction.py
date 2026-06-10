@@ -31,6 +31,7 @@ class LeaveSlotExtraction:
     days: SlotValue = field(default_factory=SlotValue)
     leave_payment_category: SlotValue = field(default_factory=SlotValue)
     day_scope: SlotValue = field(default_factory=SlotValue)
+    half_day_period: SlotValue = field(default_factory=SlotValue)
     reason: SlotValue = field(default_factory=SlotValue)
     vague_date: bool = False
     clarification_needed: str | None = None
@@ -44,6 +45,7 @@ class LeaveSlotExtraction:
             "days",
             "leave_payment_category",
             "day_scope",
+            "half_day_period",
             "reason",
         ):
             sv: SlotValue = getattr(self, name)
@@ -74,6 +76,11 @@ _TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
     (r"\bcasual\s*leave\b|\bcasual\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
     (r"\b(annual|vacation|pto)\s*leave\b|\bannual\b|বার্ষিক", "annual"),
+    (
+        r"\b(unpaid\s+leave|leave\s+without\s+pay)\b|"
+        r"বেতন\s*ছাড়া\s*ছুটি|বিনা\s*বেতন\s*ছুটি",
+        "unpaid",
+    ),
     (r"\bmaternity\b|মাতৃত্ব", "maternity"),
     (r"\bpaternity\b|পিতৃত্ব", "paternity"),
     (r"\bemergency\b|জরুরি", "emergency"),
@@ -88,6 +95,11 @@ _PAYMENT_PATTERNS: tuple[tuple[str, str], ...] = (
 _SCOPE_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bhalf[- ]?day\b|\bhalf\b|হাফ|অর্ধ\s*দিন", "half"),
     (r"\bfull[- ]?day\b|\bfull\b|পুরো\s*দিন|সম্পূর্ণ\s*দিন", "full"),
+)
+
+_HALF_PERIOD_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bfirst\s*half\b|morning|am\b|প্রথম\s*অর্ধ|সকাল", "first"),
+    (r"\bsecond\s*half\b|afternoon|pm\b|evening|দ্বিতীয়\s*অর্ধ|বিকেল", "second"),
 )
 
 _LEAVE_TYPE_HINT_RE = re.compile(
@@ -261,8 +273,14 @@ def extract_leave_slots(
     skip_leave_phrase_gate: bool = False,
 ) -> LeaveSlotExtraction:
     """Rule-based slot extraction; LLM entities merged separately in prefill layer."""
+    from chat.services.bn_normalize import (
+        infer_bn_calendar_date,
+        infer_bn_calendar_date_range,
+        normalize_message_for_parsing,
+    )
+
     today = today or _today()
-    raw = (message or "").strip()
+    raw = normalize_message_for_parsing((message or "").strip())
     low = raw.lower()
     out = LeaveSlotExtraction()
 
@@ -299,6 +317,14 @@ def extract_leave_slots(
             _set(out.day_scope, scope, confidence="high", source="rules_scope")
             break
 
+    for pattern, period in _HALF_PERIOD_PATTERNS:
+        if re.search(pattern, low, re.I):
+            _set(out.half_day_period, period, confidence="high", source="rules_half_period")
+            break
+
+    if out.leave_type.value == "unpaid":
+        _set(out.leave_payment_category, "lwop", confidence="high", source="unpaid_type")
+
     # Relative dates
     # Common EN typos: tomarrow, tommorow, tomorow (still means tomorrow)
     if re.search(
@@ -318,21 +344,85 @@ def extract_leave_slots(
         _set(out.start_date, ds, confidence="high", source="today")
         _set(out.end_date, ds, confidence="high", source="today")
 
-    # Next week (low confidence on exact day unless user confirms)
+    # Bengali word durations (দুই দিন, তিনদিনের) — store count; may combine with date clarify
+    _BN_WORD_DAYS = {
+        "দুই": 2,
+        "তিন": 3,
+        "চার": 4,
+        "পাঁচ": 5,
+        "দুইদিনের": 2,
+        "তিনদিনের": 3,
+    }
+    m_bn_dur = re.search(
+        r"(দুই|তিন|চার|পাঁচ|দুইদিনের|তিনদিনের|\d+)\s*(?:দিনের|দিন|din|days?)",
+        low,
+        re.I | re.UNICODE,
+    )
+    if m_bn_dur:
+        token = m_bn_dur.group(1)
+        try:
+            n_days = int(token)
+        except ValueError:
+            n_days = _BN_WORD_DAYS.get(token, 0)
+        if n_days > 0:
+            _set(out.days, float(n_days), confidence="high", source="bn_word_duration")
+
+    # Next week WITHOUT explicit calendar dates → ask user for dates (do not guess)
     if re.search(r"\bnext\s+week\b|আগামী\s*সপ্তাহ|পরের\s*সপ্তাহ", low):
-        start = today + timedelta(days=7)
-        if out.vague_date:
-            _set(out.start_date, start.isoformat(), confidence="low", source="next_week_vague")
+        has_explicit_cal = bool(
+            infer_bn_calendar_date_range(raw, today=today)
+            or infer_bn_calendar_date(raw, today=today)
+        )
+        if not has_explicit_cal:
+            out.vague_date = True
+            out.clarification_needed = (
+                "আগামী সপ্তাহে ছুটি — **কখন / কোন তারিখ থেকে** শুরু হবে?\n"
+                "যেমন: **২৫ জুন থেকে ২৬ জুন**, বা **আগামীকাল**।"
+            )
         else:
-            _set(out.start_date, start.isoformat(), confidence="high", source="next_week")
-        if not out.end_date.value:
-            _set(out.end_date, start.isoformat(), confidence=out.start_date.confidence, source="next_week")
+            start = today + timedelta(days=7)
+            if out.vague_date:
+                _set(out.start_date, start.isoformat(), confidence="low", source="next_week_vague")
+            else:
+                _set(out.start_date, start.isoformat(), confidence="high", source="next_week")
+            if not out.end_date.value:
+                _set(
+                    out.end_date,
+                    start.isoformat(),
+                    confidence=out.start_date.confidence,
+                    source="next_week",
+                )
+
+    bn_range = infer_bn_calendar_date_range(raw, today=today)
+    if bn_range:
+        start_iso, end_iso = bn_range
+        _set(out.start_date, start_iso, confidence="high", source="bn_range")
+        _set(out.end_date, end_iso, confidence="high", source="bn_range")
+        try:
+            s = date.fromisoformat(start_iso)
+            e = date.fromisoformat(end_iso)
+            _set(out.days, float((e - s).days + 1), confidence="high", source="bn_range")
+        except ValueError:
+            pass
+    else:
+        bn_cal = infer_bn_calendar_date(raw, today=today)
+        if bn_cal:
+            _set(out.start_date, bn_cal, confidence="high", source="bn_calendar")
+            _set(out.end_date, bn_cal, confidence="high", source="bn_calendar")
 
     cal = _infer_leave_calendar_start(low)
     if cal:
         _set(out.start_date, cal, confidence="high", source="calendar_phrase")
         if not out.end_date.value:
             _set(out.end_date, cal, confidence="high", source="calendar_phrase")
+
+    if re.search(r"এক\s*দিন|one\s*day|1\s*দিন|একদিন", raw, re.I):
+        _set(out.days, 1.0, confidence="high", source="one_day_bn")
+        if out.start_date.confidence == "high" and out.start_date.value:
+            _set(out.end_date, out.start_date.value, confidence="high", source="one_day_bn")
+
+    if re.search(r"ব্যক্তিগত|personal", raw, re.I):
+        _set(out.reason, "ব্যক্তিগত কাজ", confidence="high", source="personal_bn")
 
     # ISO / DMY numeric
     m_iso = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", raw)
@@ -359,9 +449,19 @@ def extract_leave_slots(
         except ValueError:
             pass
 
-    # Range: from X to Y
-    if re.search(r"\b(from|to|until|till)\b|থেকে|পর্যন্ত", low):
-        pass  # end_date may come from LLM / separate patterns
+    # Range: ISO dates with থেকে / from … to …
+    iso_dates = re.findall(r"\b(\d{4}-\d{1,2}-\d{1,2})\b", raw)
+    if len(iso_dates) >= 2 and re.search(
+        r"\b(from|to|until|till)\b|থেকে|পর্যন্ত|theke", low
+    ):
+        try:
+            start_d = date.fromisoformat(iso_dates[0])
+            end_d = date.fromisoformat(iso_dates[1])
+            if end_d >= start_d:
+                _set(out.start_date, start_d.isoformat(), confidence="high", source="iso_range")
+                _set(out.end_date, end_d.isoformat(), confidence="high", source="iso_range")
+        except ValueError:
+            pass
 
     # Implied reason from leave type (conversational — avoids re-asking)
     if out.leave_type.confidence == "high":

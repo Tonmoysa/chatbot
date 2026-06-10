@@ -12,11 +12,13 @@ from chat.services.expense_extraction import _CATEGORY_TOKEN
 
 _SUBMIT_CMD_RE = re.compile(
     r"(?:"
-    r"\b(?:submit|sumit|submmit|submite)\b(?:\s+(?:it|this|koro|kor|now|please|debo|daw|dao))?"
+    r"\b(?:submit|sumit|submmit|submite)\b(?:\s+(?:it|this|koro|kor|now|please|debo|daw|dao|করো|করুন))?"
     r"|"
-    r"(?:joma|জমা)\s*(?:daw|dao|de|diye|deb[eo]|koro|kor|kore\s*daw|kore\s*debo)"
+    r"(?:joma|জমা)\s*(?:daw|dao|de|diye|deb[eo]|koro|kor|kore\s*daw|kore\s*debo|করো|করুন)"
     r"|"
-    r"(?:joma|জমা)\s*(?:koro|kor)"
+    r"(?:joma|জমা)\s*(?:koro|kor|করো|করুন)"
+    r"|"
+    r"(?:expense|খরচ).{0,30}(?:submit|জমা).{0,20}(?:koro|kor|করো|করুন)"
     r")",
     re.I | re.UNICODE,
 )
@@ -37,6 +39,11 @@ _REMOVE_VERB_CAT_RE = re.compile(
 _REMOVE_TYPO_CAT_RE = re.compile(
     r"\b(?:remove|delete)\s+(?P<cat>rtain|rtrain|tran|trin)\b",
     re.I,
+)
+
+_CANCEL_EXPENSE_RE = re.compile(
+    r"(?:^|\b)(?:cancel\s+expense|expense\s+cancel|খরচ\s*cancel|cancel\s*খরচ)(?:\s*[\.।]|$)",
+    re.I | re.UNICODE,
 )
 
 # Incidental "submit" in questions — not a wizard submit command.
@@ -62,10 +69,17 @@ def wants_expense_submit_command(message: str) -> bool:
     t = (message or "").strip()
     if not t:
         return False
+    from chat.services.expense.session_action_memory import (
+        wants_expense_pre_submit_review,
+    )
+
+    if wants_expense_pre_submit_review(t):
+        return False
     if _SUBMIT_QUESTION_RE.search(t):
         return False
     try:
         from chat.services.leave_confirm import (
+            _has_affirmative_token,
             wants_defer_expense_for_leave_submit,
             wants_defer_leave_for_expense_submit,
         )
@@ -74,9 +88,15 @@ def wants_expense_submit_command(message: str) -> bool:
             t
         ) or wants_defer_expense_for_leave_submit(t):
             return False
+        if (
+            re.search(r"\b(leave|ছুটি|chuti|chhuti)\b", t, re.I | re.UNICODE)
+            and re.search(r"\b(submit|জমা|joma)\b", t, re.I)
+            and _has_affirmative_token(t)
+        ):
+            return False
     except Exception:
         pass
-    if re.search(r"\b(age|আগে|first|prothom|before)\b", t, re.I) and _SUBMIT_CMD_RE.search(
+    if re.search(r"(age|আগে|first|prothom|before)", t, re.I | re.UNICODE) and _SUBMIT_CMD_RE.search(
         t
     ):
         return False
@@ -121,6 +141,18 @@ def wants_expense_submit_command(message: str) -> bool:
         re.I | re.UNICODE,
     ):
         return True
+    if re.search(
+        r"(?:expense|খরচ|application|report).{0,50}(?:submit|জমা)",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if _SUBMIT_CMD_RE.search(t) and re.search(
+        r"(?:koro|kor|করো|করুন|daw|dao|debo)\s*[\.।]?$",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return True
     return False
 
 
@@ -129,8 +161,18 @@ def wants_expense_done_command_rules(message: str) -> bool:
     t = (message or "").strip()
     if not t:
         return False
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+
+    if looks_like_expense_correction(t):
+        return False
     if _DONE_CMD_RE.match(t):
         return True
+    if re.search(
+        r"শেষ\s*(?:expense|entry|line|খরচ|টা)",
+        t,
+        re.I | re.UNICODE,
+    ):
+        return False
     return bool(re.search(r"\b(শেষ|আর\s*নেই|no\s+more)\b", t, re.I))
 
 
@@ -181,6 +223,11 @@ def is_expense_wizard_command(message: str) -> bool:
     from chat.services.expense.expense_confirm import looks_like_expense_correction
 
     return looks_like_expense_correction(message)
+
+
+def wants_cancel_expense_command(message: str) -> bool:
+    """Explicit cancel for expense draft only (not generic cancel / leave)."""
+    return bool(_CANCEL_EXPENSE_RE.search((message or "").strip()))
 
 
 def expense_wizard_help_hint(lang: str | None = None) -> str:

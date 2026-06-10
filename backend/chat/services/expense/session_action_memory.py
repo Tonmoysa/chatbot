@@ -31,6 +31,14 @@ def looks_like_submitted_expense_correction_attempt(
     has_submitted = bool(str(last_sub.get("reference_id") or action.get("reference_id") or ""))
     if not has_submitted and action.get("action_type") != "expense_submitted":
         return False
+    if not looks_like_expense_correction(message):
+        return False
+    if re.search(
+        r"\b(প্রথম|দ্বিতীয়|তৃতীয়|first|second|third)\b",
+        message or "",
+        re.I | re.UNICODE,
+    ):
+        return True
     return looks_like_expense_correction(message)
 
 
@@ -142,11 +150,40 @@ def wants_post_submit_edit_question(message: str) -> bool:
     )
 
 
+def wants_expense_pre_submit_review(message: str) -> bool:
+    """User wants to see expense draft/review before submitting."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if not re.search(r"\b(expense|খরচ|report)\b", raw, re.I) and "খরচ" not in raw:
+        return False
+    return bool(
+        re.search(
+            r"(?:submit|জমা|joma|report).{0,40}(?:age|আগে|before|prior)",
+            raw,
+            re.I | re.UNICODE,
+        )
+        or re.search(
+            r"(?:age|আগে|before).{0,40}(?:submit|জমা|report|দেখাও|dekhao|দেখ)",
+            raw,
+            re.I | re.UNICODE,
+        )
+        or re.search(
+            r"(?:expense|খরচ|report).{0,30}(?:আরেকবার|abar|again).{0,25}"
+            r"(?:দেখাও|dekhao|দেখ|review)",
+            raw,
+            re.I | re.UNICODE,
+        )
+    )
+
+
 def wants_expense_meta_question(message: str) -> bool:
     """User asks about the bot's last expense action (not a new claim line)."""
     raw = (message or "").strip()
     if not raw:
         return False
+    if wants_expense_pre_submit_review(message):
+        return True
     from chat.services.expense.expense_total_dispute import is_expense_total_check_query
 
     if is_expense_total_check_query(message):
@@ -567,6 +604,21 @@ def format_meta_question_answer(
     items = draft_line_rows_for_block(block)
     stage = str(block.get("stage") or "")
     low = (message or "").lower()
+
+    if wants_expense_pre_submit_review(message):
+        if not items:
+            return "এখনো কোনো expense line নেই — আগে খরচ যোগ করুন।"
+        lines_out = []
+        for i, row in enumerate(items, 1):
+            cat = str(row.get("category") or "Other")
+            amt = float(row.get("amount") or 0)
+            lines_out.append(f"{i}. **{cat}** — **{amt:g} Tk**")
+        total = sum(float(x.get("amount") or 0) for x in items)
+        return (
+            "**Submit করার আগে পর্যালোচনা:**\n"
+            + "\n".join(lines_out)
+            + f"\n\nমোট: **{total:g} Tk** · stage **{stage or 'collecting'}**"
+        )
 
     if wants_expense_submit_timing_question(message):
         return _format_submit_timing_answer(wf, block, items, stage, lang=lang)

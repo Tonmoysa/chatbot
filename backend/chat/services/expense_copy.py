@@ -214,7 +214,7 @@ def submit_confirm_prompt(lang: ReplyLang) -> str:
             "- **No** — abar edit"
         )
     return (
-        "ডেটা ঠিক আছে।\n\n"
+        "নিচের তথ্য একবার **চেক** করুন — সব **ঠিক** থাকলে **হ্যাঁ** লিখে জমা দিন।\n\n"
         "**Expense CRM-এ জমা দেব?**\n"
         "- **হ্যাঁ** — submit করুন\n"
         "- **না** — আবার সম্পাদনা"

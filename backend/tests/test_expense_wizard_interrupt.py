@@ -438,9 +438,19 @@ def test_yes_at_review_advances_to_submit_confirm():
 
 
 @pytest.mark.django_db
-def test_yes_during_expense_review_after_leave_submitted():
+def test_yes_during_expense_review_after_leave_submitted(monkeypatch):
     """Expense yes must not be swallowed by a prior locked leave submission."""
+    from chat.services.expense.expense_fsm import STAGE_REVIEW
     from chat.services.leave_fsm import mark_submitted
+
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    monkeypatch.setattr(
+        "chat.services.intent_detector.LLMClient.is_configured",
+        lambda self: False,
+    )
 
     orch = ChatOrchestrator()
     emp = "exp-after-leave-yes"
@@ -458,8 +468,15 @@ def test_yes_during_expense_review_after_leave_submitted():
             message="done",
         )
 
+    wf_state = dict(pack["workflow_state"])
+    exp_block = dict(wf_state.get("expense_request") or {})
+    exp_block["stage"] = STAGE_REVIEW
+    exp_block["active"] = True
+    exp_block.pop("pending_step", None)
+    wf_state["expense_request"] = exp_block
+
     wf_state = mark_submitted(
-        pack["workflow_state"],
+        wf_state,
         draft={"leave_type": "casual", "start_date": "2026-05-25"},
         submission_id="PHP-LEAVE-TEST123",
     )

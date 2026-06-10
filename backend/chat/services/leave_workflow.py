@@ -44,6 +44,8 @@ from chat.services.leave_fsm import (
 from chat.services.leave_slots import (
     SLOT_DATES,
     SLOT_DOCUMENT,
+    SLOT_HALF_PERIOD,
+    SLOT_LEAVE_TYPE,
     SLOT_REASON,
     SLOT_SCOPE,
     apply_wizard_answer,
@@ -78,6 +80,7 @@ _LEAVE_TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
         "sick",
     ),
     (r"\b(casual)\b|ক্যাজুয়াল|নৈমিত্তিক", "casual"),
+    (r"\b(famil\w*|family|wedding|funeral)\b|পরিবার", "casual"),
     (r"\b(annual|vacation|pto)\b|বার্ষিক", "annual"),
     (r"\b(maternity)\b|মাতৃত্ব", "maternity"),
     (r"\b(paternity)\b|পিতৃত্ব", "paternity"),
@@ -177,15 +180,28 @@ def _infer_payment_category(
 
 
 def _infer_leave_type(message: str, draft: dict[str, Any]) -> None:
+    from chat.services.leave.normalization import parse_wizard_leave_type_answer
+    from chat.services.leave_draft_utils import WIZARD_LEAVE_TYPES, sync_payment_from_leave_type
+
+    wizard_lt = parse_wizard_leave_type_answer(message)
+    if wizard_lt:
+        draft["leave_type"] = wizard_lt
+        sync_payment_from_leave_type(draft)
+        return
     if is_payment_only_message(message):
         return
-    if draft.get("leave_type") and not explicit_leave_type_from_message(message):
+    if draft.get("leave_type") in WIZARD_LEAVE_TYPES and not explicit_leave_type_from_message(message):
         return
     low = message.lower()
     for pattern, code in _LEAVE_TYPE_PATTERNS:
         if re.search(pattern, low, re.I):
             draft["leave_type"] = code
+            sync_payment_from_leave_type(draft)
             return
+    explicit = explicit_leave_type_from_message(message)
+    if explicit == "unpaid":
+        draft["leave_type"] = "unpaid"
+        sync_payment_from_leave_type(draft)
 
 
 def _infer_day_scope(message: str, draft: dict[str, Any]) -> None:
@@ -231,6 +247,7 @@ def merge_extractor_entities(
         "reason",
         "leave_payment_category",
         "day_scope",
+        "half_day_period",
     ):
         v = entities.get(key)
         if v is None or v == "":
@@ -332,20 +349,30 @@ def _is_direct_slot_answer(message: str, pending_slot: str | None) -> bool:
     if not pending_slot or _is_compound_slot_message(message):
         return False
     t = message.strip().lower()
-    if pending_slot == "leave_type":
-        return t in {"paid", "unpaid", "lwop"}
+    if pending_slot in (SLOT_LEAVE_TYPE, "leave_type"):
+        from chat.services.leave.normalization import parse_wizard_leave_type_answer
+
+        return parse_wizard_leave_type_answer(message) is not None
     if pending_slot == "leave_payment_category":
         return t in {"paid", "unpaid", "lwop"}
-    if pending_slot == "day_scope":
+    if pending_slot == SLOT_SCOPE:
         from chat.services.leave.normalization import parse_day_scope_answer
 
         return parse_day_scope_answer(message) is not None
+    if pending_slot == SLOT_HALF_PERIOD:
+        from chat.services.leave.normalization import parse_half_day_period_answer
+
+        return parse_half_day_period_answer(message) is not None
     if pending_slot == "supporting_document":
         from chat.services.leave.document_turn_parser import is_document_slot_resolvable
 
         return is_document_slot_resolvable(message, use_llm=False)
-    if pending_slot == "reason":
-        return len(t) >= 4 and t not in {"paid", "unpaid", "full", "half"}
+    if pending_slot == SLOT_REASON:
+        from chat.services.leave_draft_utils import is_reason_skip_message
+
+        return is_reason_skip_message(message) or (
+            len(t) >= 4 and t not in {"paid", "unpaid", "full", "half", "sick", "annual"}
+        )
     return False
 
 
@@ -359,6 +386,7 @@ def build_merged_entities_for_engine(draft: dict[str, Any]) -> dict[str, Any]:
         "reason": draft.get("reason"),
         "leave_payment_category": draft.get("leave_payment_category"),
         "day_scope": draft.get("day_scope"),
+        "half_day_period": draft.get("half_day_period"),
         "document_text": draft.get("document_text"),
     }
     if draft.get("supporting_document_waived"):
@@ -367,11 +395,21 @@ def build_merged_entities_for_engine(draft: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pending_slot_unfilled(draft: dict[str, Any], pending_slot: str) -> bool:
+    from chat.services.leave_draft_utils import WIZARD_LEAVE_TYPES, needs_half_day_period
+
     if pending_slot == SLOT_SCOPE:
         return not draft.get("day_scope")
+    if pending_slot == SLOT_HALF_PERIOD:
+        return needs_half_day_period(draft) and not draft.get("half_day_period")
     if pending_slot == SLOT_REASON:
-        return not (draft.get("reason") or "").strip()
-    if pending_slot in ("leave_type", "leave_payment_category"):
+        return not (
+            (draft.get("reason") or "").strip()
+            or draft.get("_reason_skipped")
+            or draft.get("_reason_implied")
+        )
+    if pending_slot in (SLOT_LEAVE_TYPE, "leave_type"):
+        return str(draft.get("leave_type") or "").lower() not in WIZARD_LEAVE_TYPES
+    if pending_slot == "leave_payment_category":
         return not draft.get("leave_payment_category")
     if pending_slot == SLOT_DATES:
         return not draft.get("start_date")
@@ -387,16 +425,67 @@ def process_leave_turn(
     trace_id: str = "",
 ) -> dict[str, Any]:
     wf = normalize_workflow_state(workflow_state)
+    from chat.services.leave.duplicate_choice import (
+        handle_duplicate_leave_choice_turn,
+        mark_duplicate_leave_choice_pending,
+    )
+    from chat.services.leave_meta_queries import (
+        _target_date_range_from_leave_message,
+        check_overlapping_submitted_leave,
+    )
+
+    choice_pack = handle_duplicate_leave_choice_turn(wf, message)
+    if choice_pack:
+        wf = choice_pack.get("workflow_state") or wf
+        if choice_pack.get("duplicate_choice") == "continue":
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(
+                    dict(read_leave_state(wf).get("draft") or {})
+                ),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": choice_pack.get("question") or "",
+            }
+        if choice_pack.get("restart"):
+            wf = choice_pack["workflow_state"]
+
+    overlap_msg = check_overlapping_submitted_leave(wf, message)
+    if overlap_msg:
+        target_rng = _target_date_range_from_leave_message(message)
+        if target_rng:
+            wf = mark_duplicate_leave_choice_pending(
+                wf, target_start=target_rng[0], target_end=target_rng[1]
+            )
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(
+                dict(read_leave_state(wf).get("draft") or {})
+            ),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": overlap_msg,
+        }
+
     st = read_leave_state(wf)
     if st.get("active_flow") != ACTIVE_FLOW_LEAVE:
+        seed: dict[str, Any] = {}
+        if choice_pack and choice_pack.get("restart"):
+            seed = dict(read_leave_state(wf).get("draft") or {})
         wf = apply_leave_state(
-            wf, draft={}, step=None, status=STATUS_ACTIVE, review_pending=False
+            wf, draft=seed, step=None, status=STATUS_ACTIVE, review_pending=False
         )
         st = read_leave_state(wf)
 
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message
     had_scope = bool(draft.get("day_scope"))
+
+    from chat.services.leave.date_correction import try_apply_leave_date_correction
+
+    try_apply_leave_date_correction(
+        draft, message, trace_id=trace_id, use_llm=True
+    )
 
     from chat.services.leave_confirm import (
         SLOT_EDIT_MENU,
@@ -431,6 +520,37 @@ def process_leave_turn(
             "confirmed_submit": False,
             "question": format_expense_resume_message(wf, user_message=message),
         }
+
+    from chat.services.leave_confirm import is_confirmation_yes, wants_leave_submit_command
+
+    if (
+        wants_leave_submit_command(message)
+        and not is_awaiting_leave_confirmation(wf)
+        and not is_confirmation_yes(message)
+    ):
+        from chat.services.expense.expense_fsm import is_expense_in_progress
+
+        if is_expense_in_progress(wf):
+            from chat.services.workflow_suspend import suspend_expense_for_workflow_switch
+
+            wf = suspend_expense_for_workflow_switch(wf)
+
+        policy = get_company_leave_policy(company_id or "default")
+        normalize_leave_draft(draft)
+        apply_leave_draft_defaults(draft, policy)
+        missing = get_missing_slots(draft, policy=policy)
+        if not missing:
+            apply_leave_draft_defaults(draft, policy)
+            wf = mark_review_pending(wf, draft)
+            from chat.services.leave_confirm import build_deferred_leave_return_prompt
+
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(draft),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": build_deferred_leave_return_prompt(draft, message=message),
+            }
 
     if wf.get(KEY_EDIT_SNAPSHOT) and (
         is_edit_abort(message) or wants_navigate_back_to_leave_review(message)
@@ -618,6 +738,10 @@ def process_leave_turn(
         }
 
     slot = missing[0]
+    if slot == SLOT_REASON:
+        from chat.services.leave.workflow_schema import mark_reason_asked
+
+        mark_reason_asked(draft)
     wf = apply_leave_state(
         wf,
         draft=draft,

@@ -69,6 +69,10 @@ def _strong_expense_claim(message: str) -> bool:
         or wants_resume_or_show_expense(message)
     ):
         return False
+    from chat.services.policy_intent_helpers import is_rules_query
+
+    if _strong_hr_policy(message) and is_rules_query(message):
+        return False
     low = (message or "").lower()
     if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
         r"\b(status|track|where)\b", low
@@ -702,6 +706,10 @@ class IntentDetector:
             r"\b(not approved|still pending|too long|slow)\b", text.lower()
         ):
             return INTENT_APPROVAL_ESCALATION
+        from chat.services.leave_meta_queries import wants_cancel_leave_command
+
+        if wants_cancel_leave_command(raw_message or text):
+            return INTENT_LEAVE_REQUEST
         if re.search(
             r"\b(leave|pto|vacation|time off|sick day|day off|holiday)\b", text
         ):

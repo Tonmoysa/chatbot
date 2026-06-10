@@ -14,6 +14,7 @@ from chat.services.leave_slot_extraction import LeaveSlotExtraction
 SLOT_LEAVE_TYPE = "leave_type"
 SLOT_PAYMENT = "leave_payment_category"
 SLOT_SCOPE = "day_scope"
+SLOT_HALF_PERIOD = "half_day_period"
 SLOT_DATES = "leave_dates"
 SLOT_REASON = "reason"
 SLOT_DOCUMENT = "supporting_document"
@@ -41,6 +42,7 @@ def prefill_draft_from_extraction(
         ("days", "days"),
         ("leave_payment_category", "leave_payment_category"),
         ("day_scope", "day_scope"),
+        ("half_day_period", "half_day_period"),
         ("reason", "reason"),
     ):
         sv = getattr(extraction, slot_name)
@@ -53,6 +55,10 @@ def prefill_draft_from_extraction(
             draft[field] = "paid" if val == "paid" else "lwop"
         elif field == "day_scope":
             draft[field] = "half" if val == "half" else "full"
+        elif field == "half_day_period":
+            raw_period = str(val).strip().lower()
+            if raw_period in ("first", "second"):
+                draft[field] = raw_period
         else:
             draft[field] = val
         if field == "reason" and sv.source.startswith("implied"):
@@ -72,9 +78,15 @@ def prefill_draft_from_extraction(
     ):
         draft["days"] = extraction.days.value
 
-    from chat.services.leave_draft_utils import apply_duration_end_date
+    from chat.services.leave_draft_utils import (
+        apply_duration_end_date,
+        apply_multi_day_scope_default,
+        sync_payment_from_leave_type,
+    )
 
+    sync_payment_from_leave_type(draft)
     apply_duration_end_date(draft)
+    apply_multi_day_scope_default(draft)
 
 
 def apply_wizard_answer(
@@ -84,6 +96,12 @@ def apply_wizard_answer(
     message: str,
 ) -> None:
     """Parse a direct answer to the last asked slot (short replies like paid / full)."""
+    from chat.services.leave.normalization import (
+        parse_half_day_period_answer,
+        parse_wizard_leave_type_answer,
+    )
+    from chat.services.leave.workflow_schema import apply_reason_skip, mark_reason_asked
+    from chat.services.leave_draft_utils import sync_payment_from_leave_type
     from chat.services.leave_workflow import (
         _infer_day_scope,
         _infer_payment_category,
@@ -92,11 +110,18 @@ def apply_wizard_answer(
 
     msg = (message or "").strip()
     if pending_slot == SLOT_LEAVE_TYPE:
-        _infer_payment_category(msg, draft, force=True)
+        lt = parse_wizard_leave_type_answer(msg)
+        if lt:
+            draft["leave_type"] = lt
+            sync_payment_from_leave_type(draft)
     elif pending_slot == SLOT_PAYMENT:
         _infer_payment_category(msg, draft, force=True)
     elif pending_slot == SLOT_SCOPE:
         _infer_day_scope(msg, draft)
+    elif pending_slot == SLOT_HALF_PERIOD:
+        period = parse_half_day_period_answer(msg)
+        if period:
+            draft["half_day_period"] = period
     elif pending_slot == SLOT_DATE_CLARIFY:
         from chat.services.leave_slot_extraction import extract_leave_slots
 
@@ -108,13 +133,17 @@ def apply_wizard_answer(
         ex = extract_leave_slots(msg, skip_leave_phrase_gate=True)
         prefill_draft_from_extraction(draft, ex)
     elif pending_slot == SLOT_REASON:
+        if apply_reason_skip(draft, msg):
+            return
         edit_ctx = len(re.findall(r"\S+", msg)) > 4 or bool(
             re.search(r"\b(change|update|kor[eo]|hobe|ashole)\b", msg, re.I)
         )
         r = _reason_from_message(msg, edit_context=edit_ctx)
+        mark_reason_asked(draft)
         if r:
             draft["reason"] = r
             draft.pop("_reason_implied", None)
+            draft.pop("_reason_skipped", None)
     elif pending_slot == SLOT_DOCUMENT:
         from chat.services.leave.document_turn_parser import apply_document_answer
 
