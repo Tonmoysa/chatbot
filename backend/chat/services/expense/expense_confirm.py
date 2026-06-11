@@ -10,13 +10,15 @@ from typing import Any
 from chat.services.expense_extraction import (
     ExpenseLineItem,
     _CATEGORY_TOKEN,
+    _looks_like_route_answer,
+    extract_expense_items,
     is_travel_category,
     normalize_category,
 )
 
 _CONFIRM_RE = re.compile(
     r"^(?:"
-    r"yes|yep|yeah|ok|okay|confirm|submit|done|correct|right|"
+    r"yes|yep|yeah|ok|okay|confirm|submit|done|correct|right|ha|"
     r"হ্যাঁ|হ্যা|ঠিক\s*আছে|ঠিক|জমা\s*দাও|জমা\s*দিন|"
     r"thik\s*ache|thik|hmm?\s*yes|submit\s*koro"
     r")\s*\.?$",
@@ -52,6 +54,31 @@ _CAT_ER_EXPENSE_AMOUNT_RE = re.compile(
     r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*(?:হবে|hobe|হয়|hoy)?",
     re.I,
 )
+
+# "lunch er amount ta 200 koro" / "bus er taka 150 kore dao"
+_CAT_ER_AMOUNT_KORO_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN}|bos|bas)\s+er\s+"
+    r"(?:amount|টাকা|taka)\s+"
+    r"(?:ta|টা)\s+"
+    r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*"
+    r"(?:koro|kor|dao|daw|de|din|hobe|habe|hoy|kore\s*(?:dao|daw|de))?",
+    re.I | re.UNICODE,
+)
+
+_BARE_DELETE_RE = re.compile(
+    r"^(?:"
+    r"(?:delete|remove|মুছ|বাদ)\s*(?:koro|kor|dao|daw|de|din|kore\s*(?:dao|daw|de))?|"
+    r"(?:koro|kor|dao|daw)\s*(?:delete|remove|মুছ|বাদ)?"
+    r")\s*\.?$",
+    re.I | re.UNICODE,
+)
+
+_ORDINAL_IN_MESSAGE_RE = re.compile(
+    r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last|prothom|ditio)\b",
+    re.I | re.UNICODE,
+)
+
+_KEY_ORDINAL_AMOUNT_CONFIRM = "ordinal_amount_confirm_pending"
 
 _CORRECTION_TYPO_RE = re.compile(r"\b(bos|bas)\b", re.I)
 
@@ -247,6 +274,113 @@ def _normalize_correction_message(message: str) -> str:
     return _CORRECTION_TYPO_RE.sub("bus", text)
 
 
+_EXPLICIT_CORRECTION_MARKER_RE = re.compile(
+    r"(?:"
+    r"\bhobe\b|\bhabe\b|\bhoy\b|হবে|হয়|"
+    r"kore\s*d(?:aw|e|ao|in)|করে\s*দ|"
+    r"\bbaad\b|\bbad\b|বাদ|remove|delete|"
+    r"\bna\b|না|instead|replace|poriborte|poriborto|"
+    r"amount\s+ta|টাকা\s*টা|"
+    r"প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last|"
+    r"\bupdate\b|\bchange\b"
+    r")",
+    re.I | re.UNICODE,
+)
+
+_BARE_AMOUNT_KORE_DAO_RE = re.compile(
+    r"(?:"
+    r"(?:amount|টাকা|taka)\s+(?:ta|টা)\s+"
+    r"|(?:eta|এটা|seta|সেটা)\s+"
+    r")?"
+    r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*"
+    r"kore\s+(?:dao|daw|de|din)",
+    re.I | re.UNICODE,
+)
+
+
+def _has_explicit_correction_marker(message: str) -> bool:
+    low = _normalize_correction_message(message)
+    return bool(_EXPLICIT_CORRECTION_MARKER_RE.search(low))
+
+
+def _is_bare_fresh_category_amount_claim(message: str) -> bool:
+    """``lunch 150`` style ingest — not a review correction."""
+    text = (message or "").strip()
+    if not text or _has_explicit_correction_marker(text):
+        return False
+    ext = extract_expense_items(text)
+    if len(ext.items) != 1 or ext.malformed:
+        return False
+    item = ext.items[0]
+    if not str(item.category or "").strip():
+        return False
+    try:
+        return float(item.amount or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def parse_bare_amount_correction(message: str) -> float | None:
+    """``amount ta 200 kore dao`` — category unspecified amount update."""
+    low = _normalize_correction_message(message)
+    if _ORDINAL_IN_MESSAGE_RE.search(low):
+        return None
+    m = _BARE_AMOUNT_KORE_DAO_RE.search(low)
+    if not m:
+        return None
+    try:
+        return float(str(m.group("amt")).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def looks_like_new_expense_during_pending_slot(
+    message: str,
+    pending: dict[str, Any],
+    items: list[dict[str, Any]],
+    block: dict[str, Any] | None = None,
+    *,
+    pending_step: str = "",
+) -> bool:
+    """
+    Fresh categorized line while a category/from_to slot is open (queue-and-continue).
+
+    Example: pending Bus 100 (route open) + ``lunch 150`` → new line, not correction.
+    """
+    del block, items
+    step = (pending_step or "").strip().lower()
+    if step not in ("category", "from_to"):
+        return False
+    text = (message or "").strip()
+    if not text:
+        return False
+    if step == "from_to" and _looks_like_route_answer(text):
+        return False
+    if looks_like_expense_correction(text):
+        return False
+    ext = extract_expense_items(text)
+    if len(ext.items) != 1 or ext.malformed:
+        return False
+    item = ext.items[0]
+    if not str(item.category or "").strip():
+        return False
+    try:
+        new_amt = round(float(item.amount or 0), 2)
+    except (TypeError, ValueError):
+        return False
+    if new_amt <= 0:
+        return False
+    if step == "category":
+        try:
+            pending_amt = round(float(pending.get("amount") or 0), 2)
+        except (TypeError, ValueError):
+            return False
+        return abs(pending_amt - new_amt) >= 0.01
+    pending_cat = str(pending.get("category") or "").strip().lower()
+    new_cat = str(item.category or "").strip().lower()
+    return bool(new_cat and new_cat != pending_cat)
+
+
 def parse_category_slot_answer(message: str) -> str | None:
     """Single-category assignment without amount, e.g. ``metro rail hobe``."""
     text = (message or "").strip()
@@ -311,6 +445,10 @@ def looks_like_expense_correction(message: str) -> bool:
     low = _normalize_correction_message(message)
     if not low.strip():
         return False
+    if _is_bare_fresh_category_amount_claim(message):
+        return False
+    if parse_bare_amount_correction(message) is not None:
+        return True
     if _is_fresh_multi_category_expense_claim(message):
         return False
     if _REMOVE_TRAVEL_GROUP_RE.search(low) or _REMOVE_TRAVEL_GROUP_ALT_RE.search(low):
@@ -339,6 +477,7 @@ def looks_like_expense_correction(message: str) -> bool:
         _UPDATE_AMOUNT_RE.search(low)
         or _SET_AMOUNT_RE.search(low)
         or _CAT_ER_EXPENSE_AMOUNT_RE.search(low)
+        or _CAT_ER_AMOUNT_KORO_RE.search(low)
         or _CONTEXTUAL_CAT_AMOUNT_HOBE_RE.search(low)
     ):
         return True
@@ -389,6 +528,86 @@ def looks_like_expense_correction(message: str) -> bool:
 
 _KEY_DELETE_VERIFY = "expense_delete_verify_pending"
 _KEY_DELETE_INDEX = "expense_delete_verify_index"
+
+
+def looks_like_bare_delete_request(message: str) -> bool:
+    """``delete koro`` without naming a category/line."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = _normalize_correction_message(raw)
+    if not _BARE_DELETE_RE.search(low):
+        return False
+    from chat.services.expense_extraction import extract_expense_items
+
+    ext = extract_expense_items(raw)
+    return not ext.items
+
+
+def has_ordinal_amount_confirm_pending(block: dict[str, Any] | None) -> bool:
+    row = (block or {}).get(_KEY_ORDINAL_AMOUNT_CONFIRM)
+    return isinstance(row, dict) and row.get("index") is not None
+
+
+def read_ordinal_amount_confirm(block: dict[str, Any] | None) -> tuple[int, float] | None:
+    row = (block or {}).get(_KEY_ORDINAL_AMOUNT_CONFIRM)
+    if not isinstance(row, dict):
+        return None
+    try:
+        return int(row.get("index")), float(row.get("amount") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def mark_ordinal_amount_confirm(
+    block: dict[str, Any], *, index: int, amount: float
+) -> dict[str, Any]:
+    block[_KEY_ORDINAL_AMOUNT_CONFIRM] = {
+        "index": int(index),
+        "amount": float(amount),
+    }
+    return block
+
+
+def clear_ordinal_amount_confirm(block: dict[str, Any]) -> dict[str, Any]:
+    block.pop(_KEY_ORDINAL_AMOUNT_CONFIRM, None)
+    return block
+
+
+def build_ordinal_amount_confirm_prompt(
+    items: list[dict[str, Any]],
+    index: int,
+    new_amount: float,
+    *,
+    lang: str | None = None,
+) -> str:
+    from chat.services.expense_copy import format_expense_line_bullet, normalize_reply_lang
+    from chat.services.expense_workflow import format_expense_summary
+
+    reply_lang = normalize_reply_lang(lang)
+    if not (0 <= index < len(items)):
+        return correction_unclear_notice(lang)
+    row = items[index]
+    line = format_expense_line_bullet(row, reply_lang)
+    if reply_lang == "en":
+        head = (
+            f"Update line {index + 1} to **{new_amount:g} Tk**?\n\n"
+            f"Current: {line}\n\n"
+            f"Reply **yes** to confirm or **no** to keep unchanged."
+        )
+    elif reply_lang == "banglish":
+        head = (
+            f"Line {index + 1} **{new_amount:g} Tk** korbo?\n\n"
+            f"Ekhon: {line}\n\n"
+            f"**Yes** dile update hobe, **no** dile same thakbe."
+        )
+    else:
+        head = (
+            f"Line {index + 1} **{new_amount:g} Tk** করব?\n\n"
+            f"এখন: {line}\n\n"
+            f"**হ্যাঁ** দিলে update হবে, **না** দিলে আগের মতো থাকবে।"
+        )
+    return head
 
 
 def parse_ordinal_delete_index(message: str) -> int | None:
@@ -799,11 +1018,39 @@ def build_correction_failure_notice(
     items: list[dict[str, Any]],
     *,
     lang: str | None = None,
+    block: dict[str, Any] | None = None,
 ) -> str | None:
     """Explicit feedback when a correction was attempted but nothing changed."""
     if not looks_like_expense_correction(message):
         return None
     low = message or ""
+    if looks_like_bare_delete_request(message):
+        from chat.services.expense.confusion_handler import (
+            build_delete_entry_disambiguation_prompt,
+        )
+        from chat.services.expense_workflow import format_expense_summary
+
+        prompt = build_delete_entry_disambiguation_prompt(items, block, lang=lang)
+        if block:
+            inc = str(block.get("incurred_date_iso") or "")
+            if inc and items:
+                prompt += "\n\n" + format_expense_summary(
+                    items, incurred_date_iso=inc, lang=lang
+                )
+        return prompt
+
+    bare_amt = parse_bare_amount_correction(message)
+    if bare_amt is not None:
+        from chat.services.expense.confusion_handler import (
+            build_amount_correction_disambiguation_prompt,
+            list_amount_correction_targets,
+        )
+
+        targets = list_amount_correction_targets(items, block)
+        if len(targets) > 1:
+            return build_amount_correction_disambiguation_prompt(
+                targets, bare_amt, lang=lang
+            )
     if wants_travel_group_remove(low) and not _travel_lines_present(items):
         return travel_group_not_found_notice(items, lang=lang)
     from chat.services.expense.command_parser import parse_correction_plan

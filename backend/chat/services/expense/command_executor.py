@@ -41,6 +41,57 @@ def draft_category_names(
     return cats
 
 
+def _set_amount_on_pending(
+    block: dict[str, Any],
+    cat: str,
+    new_amt: float,
+) -> bool:
+    cat_l = cat.lower()
+    changed = False
+    pending = block.get("pending_line")
+    if isinstance(pending, dict):
+        if str(pending.get("category") or "").lower() == cat_l:
+            pending["amount"] = new_amt
+            changed = True
+    queue = block.get("pending_queue")
+    if isinstance(queue, list):
+        for row in queue:
+            if isinstance(row, dict) and str(row.get("category") or "").lower() == cat_l:
+                row["amount"] = new_amt
+                changed = True
+    return changed
+
+
+def _apply_bare_amount_to_target(
+    items: list[dict[str, Any]],
+    block: dict[str, Any] | None,
+    target: dict[str, Any],
+    new_amt: float,
+) -> bool:
+    kind = str(target.get("kind") or "")
+    if kind == "item":
+        idx = int(target.get("index") or -1)
+        if 0 <= idx < len(items):
+            items[idx]["amount"] = new_amt
+            return True
+        return False
+    if block is None:
+        return False
+    if kind == "pending":
+        pending = block.get("pending_line")
+        if isinstance(pending, dict) and pending.get("amount"):
+            pending["amount"] = new_amt
+            return True
+        return False
+    if kind == "pending_queue":
+        qi = int(target.get("index") or -1)
+        queue = block.get("pending_queue") or []
+        if 0 <= qi < len(queue) and isinstance(queue[qi], dict):
+            queue[qi]["amount"] = new_amt
+            return True
+    return False
+
+
 def _replace_category_in_pending(
     block: dict[str, Any],
     from_cat: str,
@@ -164,6 +215,18 @@ def execute_correction_plan(
     for cat, new_amt in plan.set_amounts:
         if _set_category_amount(out, cat, new_amt):
             changed = True
+        elif block is not None and _set_amount_on_pending(block, cat, new_amt):
+            changed = True
+
+    if plan.bare_amount_set is not None:
+        from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+        targets = list_amount_correction_targets(out, block)
+        if len(targets) == 1:
+            if _apply_bare_amount_to_target(
+                out, block, targets[0], plan.bare_amount_set
+            ):
+                changed = True
 
     for new_amt, old_amt in plan.amount_replacements:
         applied = False
@@ -174,6 +237,14 @@ def execute_correction_plan(
                     changed = True
                     applied = True
                     break
+        if not applied:
+            from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+            targets = list_amount_correction_targets(out, block)
+            if len(targets) == 1 and old_amt <= 0:
+                if _apply_bare_amount_to_target(out, block, targets[0], new_amt):
+                    changed = True
+                    applied = True
         if not applied and len(out) == 1:
             out[0]["amount"] = new_amt
             changed = True

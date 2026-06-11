@@ -355,6 +355,18 @@ def route_session_turn(
             matched_predicate="expense_delete_verify_pending",
         )
 
+    if snapshot.expense_ordinal_amount_confirm_pending and (
+        _is_confirmation_yes(msg) or _is_confirmation_no(msg)
+    ):
+        return _decision(
+            turn_kind=TurnKind.CONFIRM_YES if _is_confirmation_yes(msg) else TurnKind.CONFIRM_NO,
+            intent=INTENT_EXPENSE_CLAIM,
+            target_workflow="expense",
+            handler_id="expense.turn_router",
+            reason="P02b_ordinal_amount_confirm",
+            matched_predicate="expense_ordinal_amount_confirm_pending",
+        )
+
     # --- Tier 1: explicit commands ---
     from chat.services.leave_confirm import wants_leave_submit_command
     from chat.services.expense.wizard_commands import (
@@ -504,15 +516,34 @@ def route_session_turn(
         )
 
     if snapshot.expense_domain_active and looks_like_expense_correction(msg):
-        return _decision(
-            turn_kind=TurnKind.CORRECTION,
-            intent=INTENT_EXPENSE_CLAIM,
-            target_workflow="expense",
-            handler_id="expense.turn_router",
-            reason="P10_expense_correction",
-            matched_predicate="looks_like_expense_correction",
-            flags={"skip_llm_intent": True},
-        )
+        from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+        from chat.services.session_snapshot import _read_expense_block_for_routing
+
+        skip_p10 = False
+        if (
+            workflow_state
+            and snapshot.pending_expense_step in ("category", "from_to")
+        ):
+            exp_block = _read_expense_block_for_routing(workflow_state)
+            pending = exp_block.get("pending_line")
+            if isinstance(pending, dict) and pending.get("amount"):
+                skip_p10 = looks_like_new_expense_during_pending_slot(
+                    msg,
+                    pending,
+                    list(exp_block.get("items") or []),
+                    exp_block,
+                    pending_step=str(snapshot.pending_expense_step or ""),
+                )
+        if not skip_p10:
+            return _decision(
+                turn_kind=TurnKind.CORRECTION,
+                intent=INTENT_EXPENSE_CLAIM,
+                target_workflow="expense",
+                handler_id="expense.turn_router",
+                reason="P10_expense_correction",
+                matched_predicate="looks_like_expense_correction",
+                flags={"skip_llm_intent": True},
+            )
 
     if (
         snapshot.leave_review_pending
@@ -747,6 +778,7 @@ def route_session_turn(
         and snapshot.expense_active
         and str(snapshot.pending_expense_step or "").lower() != "clarify"
         and not snapshot.expense_delete_verify_pending
+        and not snapshot.expense_ordinal_amount_confirm_pending
         and not snapshot.expense_review_pending
         and snapshot.expense_stage != "review"
         and not confirm_target
@@ -900,7 +932,21 @@ def route_session_turn(
                     flags={"duplicate_prompt": dup_msg},
                 )
 
-    # --- Tier 8: balance / chitchat / OOS ---
+    # --- Tier 8: cold-start leave / balance / chitchat / OOS ---
+    if (
+        not snapshot.leave_active
+        and not snapshot.expense_active
+        and _leave_application_excluding_policy(msg)
+    ):
+        return _decision(
+            turn_kind=TurnKind.NEW_LEAVE,
+            intent=INTENT_LEAVE_REQUEST,
+            target_workflow="leave",
+            handler_id="leave_workflow",
+            reason="P50c_new_leave_cold_start",
+            matched_predicate="is_leave_application_message",
+        )
+
     if snapshot.balance_probe:
         return _decision(
             turn_kind=TurnKind.BALANCE_QUERY,

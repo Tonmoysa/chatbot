@@ -30,6 +30,7 @@ class CorrectionCommandPlan:
     has_transfer_pattern: bool = False
     has_partial_deduct_pattern: bool = False
     set_category_only: str = ""
+    bare_amount_set: float | None = None
 
     def has_any_correction(self) -> bool:
         return bool(
@@ -50,6 +51,7 @@ class CorrectionCommandPlan:
             or self.remove_by_index is not None
             or self.update_amount_by_index is not None
             or bool(self.set_category_only)
+            or self.bare_amount_set is not None
         )
 
 

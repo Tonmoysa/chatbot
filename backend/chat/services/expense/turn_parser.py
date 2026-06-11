@@ -270,6 +270,7 @@ def parse_turn_rules(
     stage: str,
     pending_step: str,
     has_pending_line: bool,
+    pending_line: dict[str, Any] | None = None,
     block: dict[str, Any] | None = None,
 ) -> TurnDecision:
     text = (message or "").strip()
@@ -321,6 +322,20 @@ def parse_turn_rules(
         )
 
     if has_pending_line and pending_step in ("category", "from_to"):
+        from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+
+        pending = pending_line if isinstance(pending_line, dict) else {}
+        if not pending and isinstance(block, dict):
+            raw_pending = block.get("pending_line")
+            pending = raw_pending if isinstance(raw_pending, dict) else {}
+        if looks_like_new_expense_during_pending_slot(
+            text, pending, items, block, pending_step=pending_step
+        ):
+            return TurnDecision(
+                turn_type=TURN_FILL_SLOT,
+                confidence=0.92,
+                source="rules",
+            )
         if looks_like_draft_edit_signal(text, items, block) and items is not None:
             plan = parse_correction_plan(text, item_count=len(items or []))
             if plan.has_any_correction():
@@ -432,6 +447,7 @@ def resolve_expense_turn(
         stage=stage,
         pending_step=pending_step,
         has_pending_line=has_pending_line,
+        pending_line=pending_line,
         block=block,
     )
 

@@ -245,6 +245,7 @@ def preprocess_expense_message(message: str) -> str:
     text = text.replace("লাঞ্চ", " lunch ")
     text = text.replace("কফি", " snack ")
     text = text.replace("নাস্তা", " snack ")
+    text = re.sub(r"\bnasta\b", " snack ", text, flags=re.I)
     text = re.sub(r"চা\s+snack", " snack ", text, flags=re.I)
     # \\b does not work on Bengali words — replace longest metro compounds first.
     text = text.replace("মেট্রোরেলে", " metro rail ")

@@ -30,7 +30,29 @@ def is_leave_application_message(message: str) -> bool:
     low = (message or "").lower()
     if re.search(
         r"(ছুটি|chuti|chhuti|chutti|leave|লিভ|সিক\s*লিভ).{0,40}"
-        r"(চাই|lagbe|lage|apply|নিতে|লাগবে|nit(e)?\s*chai|nite\s*chai)",
+        r"(চাই|chai|lagbe|lage|apply|নিতে|লাগবে|nit(e)?\s*chai|nite\s*chai)",
+        low,
+        re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"\bleave\s+chai\b",
+        low,
+    ):
+        return True
+    if re.search(
+        r"(?:agami|agamikal|next|coming|upcoming).{0,50}"
+        r"\bleave\b.{0,30}(?:chai|lagbe|lage|nit(e)?\s*chai|apply)",
+        low,
+        re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"(?:\d{1,2}\s+)?"
+        r"(?:january|february|march|april|may|june|july|august|september|october|november|december|"
+        r"jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec|"
+        r"জানু|ফেব|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|সেপ্ট|অক্ট|নভে|ডিস)"
+        r".{0,40}\bleave\b.{0,30}(?:chai|lagbe|lage|nit(e)?\s*chai|apply)",
         low,
         re.UNICODE,
     ):

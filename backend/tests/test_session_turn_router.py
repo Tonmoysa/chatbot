@@ -319,6 +319,55 @@ def test_g15_expense_correction_during_leave_collecting_not_leave():
     assert decision.target_workflow == "expense"
 
 
+def test_g16_lunch_during_from_to_pending_not_p10_correction():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "items": [],
+            "pending_step": "from_to",
+            "pending_line": {
+                "amount": 100.0,
+                "category": "Bus",
+                "from_location": "",
+                "to_location": "",
+            },
+        }
+    }
+    decision, _ = _route("lunch 150 taka", wf)
+    assert decision.turn_kind != TurnKind.CORRECTION
+    assert decision.turn_kind == TurnKind.SLOT_ANSWER
+    assert decision.reason.startswith("P81")
+
+
+def test_g17_new_leave_cold_start():
+    _assert_route(
+        "agami 15 august leave chai",
+        {},
+        turn_kind=TurnKind.NEW_LEAVE,
+        intent=INTENT_LEAVE_REQUEST,
+        reason_prefix="P50c",
+    )
+
+
+def test_g18_ordinal_amount_confirm_yes():
+    from chat.services.expense.expense_confirm import mark_ordinal_amount_confirm
+
+    block = {
+        "active": True,
+        "stage": "review",
+        "items": [{"amount": 100.0, "category": "Bus"}],
+    }
+    mark_ordinal_amount_confirm(block, index=0, amount=200.0)
+    _assert_route(
+        "ha",
+        {"expense_request": block},
+        turn_kind=TurnKind.CONFIRM_YES,
+        intent=INTENT_EXPENSE_CLAIM,
+        reason_prefix="P02b",
+    )
+
+
 # --- Snapshot invariants ---
 
 

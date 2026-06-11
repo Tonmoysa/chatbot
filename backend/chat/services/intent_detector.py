@@ -659,8 +659,12 @@ class IntentDetector:
             return INTENT_EXPENSE_STATUS
         if _strong_expense_day_summary(raw_message or text):
             return INTENT_EXPENSE_DAY_SUMMARY
+        from chat.services.workflow_navigation import is_leave_application_message
+
+        if is_leave_application_message(raw_message or text):
+            return INTENT_LEAVE_REQUEST
         if re.search(r"(ছুটি|chuti|chhuti|holiday)", text) and re.search(
-            r"(চাই|lagbe|lage|dorkar|need|apply|request)", text
+            r"(চাই|chai|lagbe|lage|dorkar|need|apply|request)", text
         ):
             return INTENT_LEAVE_REQUEST
         if re.search(r"(ছুটি|chuti|chhuti)", text) and re.search(
@@ -717,7 +721,9 @@ class IntentDetector:
         if re.search(
             r"\b(leave|pto|vacation|time off|sick day|day off|holiday)\b", text
         ):
-            if re.search(r"\b(request|apply|book|need|take)\b", text):
+            if re.search(
+                r"\b(request|apply|book|need|take|chai|lagbe|lage)\b", text
+            ):
                 return INTENT_LEAVE_REQUEST
             return INTENT_LEAVE_BALANCE
         return INTENT_UNKNOWN

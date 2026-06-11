@@ -38,6 +38,72 @@ from chat.services.expense.slots import STAGE_COLLECTING, STAGE_REVIEW, STAGE_SU
 from chat.services.expense_validation import validate_expense_items
 
 
+def _handle_ordinal_amount_confirm_turn(
+    *,
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    lang: str | None,
+) -> TurnRouteResult | None:
+    from chat.services.expense.expense_confirm import (
+        build_ordinal_amount_confirm_prompt,
+        clear_ordinal_amount_confirm,
+        has_ordinal_amount_confirm_pending,
+        is_confirmation_no,
+        is_confirmation_yes,
+        read_ordinal_amount_confirm,
+    )
+    from chat.services.expense.expense_fsm import set_expense_stage
+    from chat.services.expense_workflow import _pack, format_expense_summary
+
+    if not has_ordinal_amount_confirm_pending(block):
+        return None
+    parsed = read_ordinal_amount_confirm(block)
+    if not parsed:
+        return None
+    idx, new_amt = parsed
+    if is_confirmation_no(message):
+        block = clear_ordinal_amount_confirm(block)
+        q = "আপডেট **বাতিল** — draft **অপরিবর্তিত**।\n\n"
+        q += format_expense_summary(
+            items,
+            incurred_date_iso=inc_iso,
+            warnings=[],
+            line_flags=[],
+            lang=lang,
+        )
+        return TurnRouteResult(
+            handled=True,
+            pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+        )
+    if is_confirmation_yes(message):
+        items = [dict(x) for x in items]
+        if 0 <= idx < len(items):
+            items[idx]["amount"] = new_amt
+        block = clear_ordinal_amount_confirm(block)
+        set_expense_stage(block, STAGE_COLLECTING)
+        q = "আপডেট করা হয়েছে।\n\n" + format_expense_summary(
+            items,
+            incurred_date_iso=inc_iso,
+            warnings=[],
+            line_flags=[],
+            lang=lang,
+        )
+        return TurnRouteResult(
+            handled=True,
+            pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+        )
+    q = build_ordinal_amount_confirm_prompt(items, idx, new_amt, lang=lang)
+    return TurnRouteResult(
+        handled=True,
+        pack=_pack(wf, block, items=items, question=q, inc_iso=inc_iso),
+    )
+
+
 def _handle_delete_verify_turn(
     *,
     wf: dict[str, Any],
@@ -147,6 +213,19 @@ def route_expense_wizard_turn(
     )
     if delete_turn is not None:
         return delete_turn
+
+    ordinal_turn = _handle_ordinal_amount_confirm_turn(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if ordinal_turn is not None:
+        return ordinal_turn
 
     if stage not in (STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
         return TurnRouteResult(handled=False)
@@ -573,6 +652,48 @@ def _route_edit_draft(
         format_expense_summary,
     )
 
+    from chat.services.expense.command_parser import parse_ordinal_set_amount
+    from chat.services.expense.expense_confirm import (
+        build_ordinal_amount_confirm_prompt,
+        has_ordinal_amount_confirm_pending,
+        mark_ordinal_amount_confirm,
+    )
+
+    if not is_expense_delete_verify_pending(block) and not has_ordinal_amount_confirm_pending(
+        block
+    ):
+        ord_set = parse_ordinal_set_amount(message, item_count=len(items))
+        if ord_set and items:
+            idx, new_amt = ord_set
+            if 0 <= idx < len(items):
+                mark_ordinal_amount_confirm(block, index=idx, amount=new_amt)
+                q = build_ordinal_amount_confirm_prompt(items, idx, new_amt, lang=lang)
+                val = validate_expense_items(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    message=message,
+                )
+                q += "\n\n" + format_expense_summary(
+                    items,
+                    incurred_date_iso=inc_iso,
+                    warnings=val.warnings,
+                    line_flags=val.line_flags,
+                    lang=lang,
+                )
+                return TurnRouteResult(
+                    handled=True,
+                    pack=_pack(
+                        wf,
+                        block,
+                        items=items,
+                        question=q,
+                        warnings=val.warnings,
+                        inc_iso=inc_iso,
+                    ),
+                )
+
     if is_expense_delete_verify_pending(block):
         idx = read_expense_delete_verify_index(block)
         if is_confirmation_no(message):
@@ -665,7 +786,9 @@ def _route_edit_draft(
         parse_source = corr.parse_source
 
     if not corrected:
-        fail = build_correction_failure_notice(message, items, lang=lang)
+        fail = build_correction_failure_notice(
+            message, items, lang=lang, block=block
+        )
         if fail:
             val = validate_expense_items(
                 items,

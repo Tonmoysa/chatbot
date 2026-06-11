@@ -229,6 +229,8 @@ def is_decisive_router_decision(
 
             TurnKind.WORKFLOW_SWITCH,
 
+            TurnKind.NEW_LEAVE,
+
             TurnKind.DEFER_SUBMIT,
 
             TurnKind.SLOT_ANSWER,
@@ -442,6 +444,8 @@ def workflow_turn_from_router_decision(decision: SessionTurnDecision) -> str | N
         TurnKind.DUPLICATE_LEAVE: TURN_SLOT_ANSWER,
 
         TurnKind.WORKFLOW_SWITCH: TURN_NEW_WORKFLOW,
+
+        TurnKind.NEW_LEAVE: TURN_NEW_WORKFLOW,
 
         TurnKind.RESUME_SUSPENDED: TURN_SLOT_ANSWER,
 

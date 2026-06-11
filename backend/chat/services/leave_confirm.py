@@ -37,7 +37,7 @@ SLOT_EDIT_MENU = "edit_menu"
 
 _CONFIRM_YES_RE = re.compile(
 
-    r"^(yes|y|yep|yeah|ok|okay|confirm|submit|done|correct|right|"
+    r"^(yes|y|yep|yeah|ok|okay|confirm|submit|done|correct|right|ha|"
 
     r"হ্যাঁ|হ্যা|ঠিক\s*আছে|জমা\s*দিন|সাবমিট)([!.?\s]*)$",
 

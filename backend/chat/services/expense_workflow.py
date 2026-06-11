@@ -946,23 +946,11 @@ def _looks_like_new_categorized_claim_during_category_pending(
 
     Example: pending 200 Tk (no category) + ``lunch 100`` → new line, not slot answer.
     """
-    text = (message or "").strip()
-    if not text:
-        return False
-    ext = extract_expense_items(text)
-    if len(ext.items) != 1 or ext.malformed:
-        return False
-    item = ext.items[0]
-    if not str(item.category or "").strip():
-        return False
-    try:
-        pending_amt = round(float(pending.get("amount") or 0), 2)
-        new_amt = round(float(item.amount or 0), 2)
-    except (TypeError, ValueError):
-        return False
-    if new_amt <= 0:
-        return False
-    return abs(pending_amt - new_amt) >= 0.01
+    from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+
+    return looks_like_new_expense_during_pending_slot(
+        message, pending, [], None, pending_step="category"
+    )
 
 
 def _should_reset_pending_for_message(
@@ -997,6 +985,62 @@ def _should_reset_pending_for_message(
     if len(ext.items) + len(ext.malformed) > 1:
         return True
     return False
+
+
+def _ingest_new_claim_preserving_pending_from_to(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    pending: dict[str, Any],
+    message: str,
+    *,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    trace_id: str = "",
+    pipeline_result: ExpenseExtractionResult | None = None,
+) -> dict[str, Any]:
+    """Add a complete line while an incomplete travel route stays on pending_line."""
+    from chat.services.expense.session_action_memory import record_expense_lines_added
+
+    lang = lang_from_block(block)
+    ext = _extract_lines_from_message(message, pipeline_result=pipeline_result)
+    before_count = len(items)
+    items, blocked = _ingest_extracted_lines(
+        block,
+        items,
+        ext,
+        inc_iso=inc_iso,
+        message=message,
+        wf=wf,
+    )
+    if blocked:
+        return _pack_ingest_interrupt(wf, block, items, blocked, inc_iso=inc_iso)
+
+    block["pending_line"] = dict(pending)
+    block["pending_step"] = "from_to"
+    set_expense_stage(block, STAGE_COLLECTING)
+
+    if len(items) > before_count:
+        wf = record_expense_lines_added(
+            wf,
+            new_items=items[before_count:],
+            all_items=items,
+            incurred_date_iso=inc_iso,
+            stage=str(block.get("stage") or STAGE_COLLECTING),
+        )
+
+    cat = str(pending.get("category") or "Bus")
+    amt = float(pending.get("amount") or 0)
+    q, facts = _ask_from_to_prompt(block, items, cat, amt, lang=lang)
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=q,
+        inc_iso=inc_iso,
+        message_facts=facts,
+    )
 
 
 def _ingest_new_claim_preserving_pending_category(
@@ -2245,6 +2289,23 @@ def _handle_pending_line(
         )
 
     if step == "from_to":
+        from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+
+        if looks_like_new_expense_during_pending_slot(
+            message, pending, items, block, pending_step=step
+        ):
+            return _ingest_new_claim_preserving_pending_from_to(
+                wf,
+                block,
+                items,
+                pending,
+                message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                trace_id=trace_id,
+                pipeline_result=None,
+            )
         cat = str(pending.get("category") or "Bus")
         pair = parse_from_to_locations(message)
         if not pair and is_travel_category(cat):
@@ -2781,11 +2842,9 @@ def process_expense_turn(
 
     pending = block.get("pending_line")
     if isinstance(pending, dict) and pending.get("amount"):
-        if (
-            str(block.get("pending_step") or "") == "category"
-            and _looks_like_new_categorized_claim_during_category_pending(
-                message, pending
-            )
+        pending_step_now = str(block.get("pending_step") or "")
+        if pending_step_now == "category" and _looks_like_new_categorized_claim_during_category_pending(
+            message, pending
         ):
             return _ingest_new_claim_preserving_pending_category(
                 wf,
@@ -2799,6 +2858,24 @@ def process_expense_turn(
                 trace_id=trace_id,
                 pipeline_result=pipeline_result,
             )
+        if pending_step_now == "from_to":
+            from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+
+            if looks_like_new_expense_during_pending_slot(
+                message, pending, items, block, pending_step=pending_step_now
+            ):
+                return _ingest_new_claim_preserving_pending_from_to(
+                    wf,
+                    block,
+                    items,
+                    dict(pending),
+                    message,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    trace_id=trace_id,
+                    pipeline_result=pipeline_result,
+                )
         if _should_reset_pending_for_message(
             message, pending_step=str(block.get("pending_step") or "")
         ):

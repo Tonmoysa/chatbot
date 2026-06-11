@@ -12,6 +12,8 @@ from chat.services.expense.command_schema import (
 from chat.services.expense.expense_confirm import (
     _ADD_RE,
     _AMOUNT_INSTEAD_RE,
+    _CAT_ER_AMOUNT_KORO_RE,
+    parse_bare_amount_correction,
     _CAT_AMT_BAAD_RE,
     _CAT_ER_EXPENSE_AMOUNT_RE,
     _CAT_HOBE_RE,
@@ -74,6 +76,14 @@ _ORDINAL_AMOUNT_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_ORDINAL_SET_AMOUNT_RE = re.compile(
+    r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last|prothom|ditio)"
+    r"(?:\s+(?:ta|টা|entry|line|expense|খরচ))?"
+    r"\s+"
+    r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?",
+    re.I | re.UNICODE,
+)
+
 
 def _ordinal_index_from_message(low: str, *, item_count: int | None = None) -> int | None:
     """Map ordinal words; Bengali tokens skip ``\\b`` (unreliable with conjuncts)."""
@@ -88,6 +98,31 @@ def _ordinal_index_from_message(low: str, *, item_count: int | None = None) -> i
         elif re.search(re.escape(word), low, re.I | re.UNICODE):
             return idx
     return None
+
+
+def parse_ordinal_set_amount(
+    message: str, *, item_count: int | None = None
+) -> tuple[int, float] | None:
+    """``prothom ta 200 tk kore dao`` — ordinal index + new amount."""
+    low = _normalize_correction_message(message)
+    if not _ORDINAL_SET_AMOUNT_RE.search(low):
+        return None
+    if not re.search(
+        r"(?:kore\s*d(?:aw|e|ao|in)|hobe|habe|hoy|tk)\b",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return None
+    idx = _ordinal_index_from_message(low, item_count=item_count)
+    if idx is None:
+        return None
+    m = _ORDINAL_SET_AMOUNT_RE.search(low)
+    if not m:
+        return None
+    try:
+        return idx, float(str(m.group("amt")).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_ordinal_amount_update(
@@ -128,6 +163,10 @@ def parse_correction_plan(
     plan.update_amount_by_index = _parse_ordinal_amount_update(
         message, item_count=item_count
     )
+    if plan.update_amount_by_index is None:
+        plan.update_amount_by_index = parse_ordinal_set_amount(
+            message, item_count=item_count
+        )
 
     for m in _REPLACE_RE.finditer(low):
         plan.replacements.append(
@@ -282,6 +321,15 @@ def parse_correction_plan(
             continue
         plan.cat_er_amounts.append((normalize_category(m.group("cat")), amt))
 
+    for m in _CAT_ER_AMOUNT_KORO_RE.finditer(low):
+        try:
+            amt = float(m.group("amt").replace(",", "."))
+        except ValueError:
+            continue
+        pair = (normalize_category(m.group("cat")), amt)
+        if pair not in plan.cat_er_amounts:
+            plan.cat_er_amounts.append(pair)
+
     for m in _ADD_RE.finditer(low):
         cat_g = m.group("cat") or m.group("cat2")
         amt_g = m.group("amt") or m.group("amt2")
@@ -310,6 +358,10 @@ def parse_correction_plan(
         pair = (new_amt, old_amt)
         if pair not in plan.amount_replacements:
             plan.amount_replacements.append(pair)
+
+    bare = parse_bare_amount_correction(message)
+    if bare is not None and not plan.has_any_correction():
+        plan.bare_amount_set = bare
 
     return plan
 

@@ -12,7 +12,10 @@ from datetime import date
 from typing import Any
 
 from chat.constants import INTENT_UNKNOWN
-from chat.services.expense.expense_confirm import is_expense_delete_verify_pending
+from chat.services.expense.expense_confirm import (
+    has_ordinal_amount_confirm_pending,
+    is_expense_delete_verify_pending,
+)
 from chat.services.expense.expense_fsm import (
     is_expense_in_progress,
     is_expense_review,
@@ -48,6 +51,7 @@ class SessionSnapshot:
     # Pending UI states
     duplicate_leave_choice_pending: bool
     expense_delete_verify_pending: bool
+    expense_ordinal_amount_confirm_pending: bool
     leave_submit_confirm_pending: bool
     expense_submit_confirm_pending: bool
     # Pre-computed routing hints
@@ -194,6 +198,7 @@ def build_classifier_snapshot(
         has_leave_summary_context=False,
         duplicate_leave_choice_pending=False,
         expense_delete_verify_pending=False,
+        expense_ordinal_amount_confirm_pending=False,
         leave_submit_confirm_pending=leave_review_pending,
         expense_submit_confirm_pending=expense_review_pending,
         duplicate_leave_prompt=None,
@@ -272,6 +277,9 @@ def build_session_snapshot(
         has_leave_summary_context=leave_summary_ctx,
         duplicate_leave_choice_pending=is_duplicate_leave_choice_pending(wf),
         expense_delete_verify_pending=is_expense_delete_verify_pending(exp_block),
+        expense_ordinal_amount_confirm_pending=has_ordinal_amount_confirm_pending(
+            exp_block
+        ),
         leave_submit_confirm_pending=leave_review_pending,
         expense_submit_confirm_pending=bool(
             expense_active and is_expense_submit_confirm(exp_block)
