@@ -29,6 +29,13 @@ def is_leave_balance_query(message: str) -> bool:
         return False
     if _is_leave_application_message(raw):
         return False
+    try:
+        from chat.services.workflow_navigation import is_leave_navigation_phrase
+
+        if is_leave_navigation_phrase(raw):
+            return False
+    except Exception:
+        pass
 
     if re.search(
         r"(বছরে|প্রতি\s*বছর|per\s*year|yearly|each\s*year)",
@@ -84,6 +91,17 @@ def is_leave_balance_query(message: str) -> bool:
         return True
 
     if re.search(
+        r"\b(leave|chuti|chhuti|chutti|chuti|ছুটি)\b.{0,25}"
+        r"\b(koyta|koy\s*ta|koto\s*ta|kotota|koy|koto|kotodin|koydin|kondin)\b",
+        low,
+    ) or re.search(
+        r"\b(koyta|koy\s*ta|koto\s*ta|kotota|koy|koto|kotodin|koydin|kondin)\b.{0,25}"
+        r"\b(leave|chuti|chhuti|chutti|chuti|ছুটি)\b",
+        low,
+    ):
+        return True
+
+    if re.search(
         r"\b(leave|chuti|chhuti|chutti|chuti)\b.{0,25}\b(ache|ase|ase|baki|balance|remaining)\b",
         low,
     ) or re.search(
@@ -93,8 +111,15 @@ def is_leave_balance_query(message: str) -> bool:
         return True
 
     if re.search(r"\b(amar|amr|my)\b", low) and re.search(
-        r"\b(koy|koto|kotodin|koydin)\b", low
+        r"\b(koy|koto|kotodin|koydin|koyta|koy\s*ta)\b", low
     ) and re.search(r"\b(leave|chuti|chhuti|chutti|ছুটি)\b", low):
+        return True
+
+    if re.search(
+        r"\b(sick|annual|casual|medical)\b.{0,20}\b(leave|chuti|chhuti)\b.{0,20}"
+        r"\b(koyta|koy|koto|kotodin|koydin|ache|ase|baki|balance)\b",
+        low,
+    ):
         return True
 
     if re.search(r"\bhow\s+many\s+leave\b", low):

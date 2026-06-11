@@ -12,6 +12,9 @@ from datetime import date
 from typing import Any
 
 from chat.constants import INTENT_UNKNOWN
+from chat.services.expense.amount_correction_pending import (
+    has_amount_correction_pending,
+)
 from chat.services.expense.expense_confirm import (
     has_ordinal_amount_confirm_pending,
     is_expense_delete_verify_pending,
@@ -52,6 +55,7 @@ class SessionSnapshot:
     duplicate_leave_choice_pending: bool
     expense_delete_verify_pending: bool
     expense_ordinal_amount_confirm_pending: bool
+    expense_amount_correction_pending: bool
     leave_submit_confirm_pending: bool
     expense_submit_confirm_pending: bool
     # Pre-computed routing hints
@@ -64,10 +68,16 @@ class SessionSnapshot:
     context_lines: tuple[str, ...]
     is_greeting: bool
     is_cancel: bool
+    expense_submission_locked: bool
+    leave_submission_locked: bool
 
     @property
     def expense_domain_active(self) -> bool:
-        return self.expense_active or self.has_suspended_expense or self.has_expense_draft
+        """Active or suspended expense work — not stale drafts after CRM submit."""
+        base = self.expense_active or self.has_suspended_expense
+        if self.expense_submission_locked:
+            return base
+        return base or self.has_expense_draft
 
     @property
     def leave_domain_active(self) -> bool:
@@ -199,6 +209,7 @@ def build_classifier_snapshot(
         duplicate_leave_choice_pending=False,
         expense_delete_verify_pending=False,
         expense_ordinal_amount_confirm_pending=False,
+        expense_amount_correction_pending=False,
         leave_submit_confirm_pending=leave_review_pending,
         expense_submit_confirm_pending=expense_review_pending,
         duplicate_leave_prompt=None,
@@ -209,6 +220,8 @@ def build_classifier_snapshot(
         context_lines=(),
         is_greeting=_is_fresh_start_greeting(message),
         is_cancel=_is_cancel_form_request(message),
+        expense_submission_locked=False,
+        leave_submission_locked=False,
     )
 
 
@@ -255,6 +268,12 @@ def build_session_snapshot(
 
     leave_summary_ctx = session_has_leave_summary_context(wf)
 
+    from chat.services.expense.session_action_memory import has_expense_submission_lock
+    from chat.services.leave_fsm import is_leave_submission_locked
+
+    expense_submission_locked = has_expense_submission_lock(wf)
+    leave_submission_locked = is_leave_submission_locked(wf)
+
     leave_stage: str | None = None
     if leave_active:
         leave_stage = "review_pending" if leave_review_pending else "collecting"
@@ -280,6 +299,7 @@ def build_session_snapshot(
         expense_ordinal_amount_confirm_pending=has_ordinal_amount_confirm_pending(
             exp_block
         ),
+        expense_amount_correction_pending=has_amount_correction_pending(exp_block),
         leave_submit_confirm_pending=leave_review_pending,
         expense_submit_confirm_pending=bool(
             expense_active and is_expense_submit_confirm(exp_block)
@@ -294,4 +314,6 @@ def build_session_snapshot(
         context_lines=tuple(context_lines or []),
         is_greeting=is_greeting if is_greeting is not None else _is_fresh_start_greeting(msg),
         is_cancel=is_cancel if is_cancel is not None else _is_cancel_form_request(msg),
+        expense_submission_locked=expense_submission_locked,
+        leave_submission_locked=leave_submission_locked,
     )

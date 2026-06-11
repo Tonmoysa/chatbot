@@ -82,6 +82,7 @@ class ExpenseConversationManager:
 
             full = format_expense_summary(
                 items,
+                block=block,
                 incurred_date_iso=incurred_date_iso,
                 warnings=warnings,
                 lang=lang,
@@ -161,8 +162,8 @@ class ExpenseConversationManager:
 
         if (
             pending
-            and primary_slot == SLOT_FROM_TO
-            and pending.get("category")
+            and primary_slot
+            in (SLOT_FROM_TO, SLOT_MORE_LINES, SLOT_CATEGORY)
             and pending.get("amount")
         ):
             pending_row = {
@@ -171,9 +172,7 @@ class ExpenseConversationManager:
                 "from_location": pending.get("from_location") or "",
                 "to_location": pending.get("to_location") or "",
             }
-            pending_bullet = format_expense_line_bullet(pending_row, lang)
-            if pending_bullet not in bullets:
-                bullets.append(pending_bullet)
+            bullets.append(format_expense_line_bullet(pending_row, lang))
 
         queue_suffix = {
             "en": " (route next)",
@@ -196,9 +195,7 @@ class ExpenseConversationManager:
                 },
                 lang,
             )
-            marked = f"{queued_bullet}{queue_suffix}"
-            if marked not in bullets and queued_bullet not in bullets:
-                bullets.append(marked)
+            bullets.append(f"{queued_bullet}{queue_suffix}")
 
         show_date = bool(incurred_date_iso and SLOT_INCURRED_DATE not in missing_set)
         if not bullets and not show_date:

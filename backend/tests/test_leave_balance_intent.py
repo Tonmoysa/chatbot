@@ -19,6 +19,8 @@ COMPANY_ID = "company-a"
     [
         "amar koy ta leave ache?",
         "amar koyta leave ache",
+        "amar leave koyta?",
+        "amar sick leave koyta ache?",
         "kotodin chuti ache",
         "koy din leave baki",
         "how many leave days do I have",

@@ -13,8 +13,11 @@ import pytest
 from chat.constants import (
     INTENT_EXPENSE_CLAIM,
     INTENT_EXPENSE_DAY_SUMMARY,
+    INTENT_EXPENSE_STATUS,
     INTENT_HR_POLICY,
+    INTENT_LEAVE_BALANCE,
     INTENT_LEAVE_REQUEST,
+    INTENT_REQUEST_STATUS,
     INTENT_UNKNOWN,
 )
 from chat.services.leave_fsm import mark_submitted
@@ -78,13 +81,14 @@ def _leave_active_suspended_expense_wf(items: list[dict]) -> dict:
 
 
 def _route(message: str, wf: dict | None = None, **kwargs):
+    state = wf or {}
     snap = build_session_snapshot(
         message,
-        workflow_state=wf or {},
+        workflow_state=state,
         today=kwargs.pop("today", FIXED_TODAY),
         **kwargs,
     )
-    return route_session_turn(snap), snap
+    return route_session_turn(snap, workflow_state=state), snap
 
 
 def _assert_route(
@@ -544,3 +548,177 @@ def test_nav_rules_thread_state_n50_then_n55a():
 
 def test_nav_noop_on_empty_state():
     assert _plan("hello", {}) == []
+
+
+def _submitted_expense_wf(
+    items: list[dict],
+    *,
+    ref: str = "EXP-2026-BCA0E0",
+    stale_active_draft: bool = False,
+) -> dict:
+    wf: dict = {
+        "expense_last_submission": {
+            "reference_id": ref,
+            "items": items,
+            "incurred_date_iso": "2026-06-11",
+        },
+        "last_bot_action": {
+            "action_type": "expense_submitted",
+            "reference_id": ref,
+            "items": items,
+        },
+    }
+    if stale_active_draft:
+        wf["expense_request"] = {
+            "active": True,
+            "stage": "review",
+            "items": items,
+            "incurred_date_iso": "2026-06-11",
+        }
+    return wf
+
+
+def test_g22_post_submit_lunch_koro_blocked_by_p48():
+    items = [
+        {"category": "Lunch", "amount": 120},
+        {"category": "Bus", "amount": 100},
+    ]
+    _assert_route(
+        "lunch 200 taka koro",
+        _submitted_expense_wf(items),
+        turn_kind=TurnKind.META_QUESTION,
+        intent=INTENT_EXPENSE_STATUS,
+        reason_prefix="P48",
+    )
+
+
+def test_g23_post_submit_edit_question_meta_not_correction():
+    items = [{"category": "Lunch", "amount": 120}]
+    _assert_route(
+        "can i edit expense after submit?",
+        _submitted_expense_wf(items),
+        turn_kind=TurnKind.META_QUESTION,
+        intent=INTENT_EXPENSE_STATUS,
+        reason_prefix="P43",
+    )
+
+
+def test_g24_n56_purges_stale_draft_before_router_snapshot():
+    from chat.services.session_turn_router import plan_pre_router_navigation
+
+    items = [{"category": "Lunch", "amount": 120}]
+    wf = _submitted_expense_wf(items, stale_active_draft=True)
+    steps = plan_pre_router_navigation("lunch 200 taka koro", wf, is_cancel=False)
+    assert any(s.rule == "N56_purge_stale_expense_after_submit" for s in steps)
+    final = steps[-1].state if steps else wf
+    assert "expense_request" not in final
+    snap = build_session_snapshot("lunch 200 taka koro", workflow_state=final)
+    assert snap.expense_submission_locked
+    assert not snap.expense_active
+    assert not snap.expense_domain_active
+
+
+def test_g32_what_is_life_during_leave_is_out_of_scope():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "step": "leave_type",
+        "draft": {"start_date": "2026-07-10", "day_scope": "full"},
+    }
+    _assert_route(
+        "what is life?",
+        wf,
+        turn_kind=TurnKind.OUT_OF_SCOPE,
+        intent=INTENT_UNKNOWN,
+        reason_prefix="P73",
+    )
+
+
+def test_g26_post_submit_leave_nav_not_balance():
+    wf = mark_submitted(
+        {},
+        draft={
+            "leave_type": "annual",
+            "start_date": "2026-06-12",
+            "reason": "family program",
+        },
+        submission_id="PHP-LEAVE-881199F981DA",
+    )
+    _assert_route(
+        "leave e jao",
+        wf,
+        turn_kind=TurnKind.META_QUESTION,
+        intent=INTENT_REQUEST_STATUS,
+        reason_prefix="P49",
+    )
+
+
+def test_g25_n56_keeps_fresh_post_submit_draft_for_summary():
+    """Post-submit new claim must not be purged when user asks for expense summary."""
+    from chat.services.expense.session_action_memory import record_expense_lines_added
+    from chat.services.session_turn_router import plan_pre_router_navigation
+
+    items = [{"category": "Bus", "amount": 100, "from_location": "mirpur", "to_location": "motekheel"}]
+    wf = _submitted_expense_wf(items, ref="EXP-2026-EFD18D")
+    wf = record_expense_lines_added(
+        {
+            **wf,
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "incurred_date_iso": "2026-06-11",
+                "items": [{"category": "Lunch", "amount": 150}],
+            },
+        },
+        new_items=[{"category": "Lunch", "amount": 150}],
+        all_items=[{"category": "Lunch", "amount": 150}],
+        incurred_date_iso="2026-06-11",
+    )
+    steps = plan_pre_router_navigation("okay ekhon expense summery ta daw", wf, is_cancel=False)
+    assert not any(s.rule == "N56_purge_stale_expense_after_submit" for s in steps)
+    final = steps[-1].state if steps else wf
+    assert list((final.get("expense_request") or {}).get("items") or [])
+    snap = build_session_snapshot("okay ekhon expense summery ta daw", workflow_state=final)
+    assert snap.expense_submission_locked
+    assert snap.expense_active
+    assert snap.expense_domain_active
+
+
+def _leave_collecting_wf(*, step: str = "leave_type") -> dict:
+    return {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": {"start_date": "2026-08-15", "reason": "travel"},
+        "step": step,
+        "review_pending": False,
+    }
+
+
+def test_g19_balance_during_leave_collecting_not_slot():
+    _assert_route(
+        "amar leave koyta?",
+        _leave_collecting_wf(step="reason"),
+        turn_kind=TurnKind.BALANCE_QUERY,
+        intent=INTENT_LEAVE_BALANCE,
+        reason_prefix="P45",
+    )
+
+
+def test_g20_sick_balance_during_leave_type_not_slot():
+    _assert_route(
+        "amar sick leave koyta ache?",
+        _leave_collecting_wf(step="leave_type"),
+        turn_kind=TurnKind.BALANCE_QUERY,
+        intent=INTENT_LEAVE_BALANCE,
+        reason_prefix="P45",
+    )
+
+
+def test_g21_sick_token_alone_still_slot_answer():
+    _assert_route(
+        "sick leave",
+        _leave_collecting_wf(step="leave_type"),
+        turn_kind=TurnKind.SLOT_ANSWER,
+        intent=INTENT_LEAVE_REQUEST,
+        reason_prefix="P80",
+    )

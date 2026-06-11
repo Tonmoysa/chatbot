@@ -15,6 +15,38 @@ HALF_PERIOD_SECOND = "second"
 
 WIZARD_LEAVE_TYPES: frozenset[str] = frozenset({"sick", "annual", "unpaid"})
 
+KEY_STATED_LEAVE_TYPE = "_stated_leave_type"
+
+
+def resolve_explicit_wizard_leave_type(message: str) -> str | None:
+    """Leave type the user explicitly named (wizard token or phrase), if any."""
+    from chat.services.leave.normalization import parse_wizard_leave_type_answer
+    from chat.services.leave_slot_extraction import explicit_leave_type_from_message
+
+    raw = parse_wizard_leave_type_answer(message) or explicit_leave_type_from_message(
+        message
+    )
+    if not raw:
+        return None
+    lt = str(raw).strip().lower()
+    if lt == "casual":
+        return "annual"
+    if lt in WIZARD_LEAVE_TYPES:
+        return lt
+    return None
+
+
+def persist_stated_leave_type(draft: dict[str, Any], message: str) -> None:
+    """Remember an explicit leave-type choice across balance interrupts."""
+    lt = resolve_explicit_wizard_leave_type(message)
+    if lt:
+        draft[KEY_STATED_LEAVE_TYPE] = lt
+
+
+def stated_leave_type_from_draft(draft: dict[str, Any]) -> str | None:
+    lt = str(draft.get(KEY_STATED_LEAVE_TYPE) or "").strip().lower()
+    return lt if lt in WIZARD_LEAVE_TYPES else None
+
 _SICK_DOCUMENT_MIN_SPAN_DAYS = 3
 
 _REASON_SKIP_RE = re.compile(
@@ -38,6 +70,8 @@ _NON_SICK_LEAVE_REASON_RE = re.compile(
     r"travel|trip|tour|vacation|holiday|যাত্রা|"
     r"funeral|bereavement|শোক|"
     r"ceremon|program(?:me)?|event|অনুষ্ঠান|প্রোগ্রাম|"
+    r"personal(?:\s+work|\s+matter|\s+reason)?|"
+    r"ব্যক্তিগত(?:\s+কাজ)?|"
     r"annual\s+leave|casual\s+leave|maternity|paternity"
     r")",
     re.I | re.UNICODE,
@@ -159,15 +193,25 @@ def invalidate_leave_type_for_reselect(draft: dict[str, Any]) -> None:
     draft.pop("_reason_implied", None)
     draft.pop("_leave_bucket", None)
     draft.pop("_leave_bucket_confidence", None)
+    draft.pop(KEY_STATED_LEAVE_TYPE, None)
     draft["_leave_type_reselect_required"] = True
     clear_supporting_document_if_unneeded(draft)
 
 
 def is_non_sick_wizard_leave(draft: dict[str, Any]) -> bool:
     """Family/travel/etc. — user must pick annual vs leave without pay."""
+    if draft.get("_leave_type_reselect_required"):
+        return True
     reason = canonicalize_leave_reason(str(draft.get("reason") or ""))
     if reason_indicates_non_sick_leave(reason):
         return True
+    lt = str(draft.get("leave_type") or "").lower()
+    if lt == "sick":
+        return False
+    if not reason:
+        stated = stated_leave_type_from_draft(draft)
+        if stated == "sick":
+            return False
     return effective_leave_bucket(draft) == "other"
 
 
@@ -202,20 +246,32 @@ def reconcile_leave_type_from_reason(draft: dict[str, Any]) -> None:
     if reason != str(draft.get("reason") or "").strip():
         draft["reason"] = reason
     if reason_indicates_non_sick_leave(reason):
-        from chat.services.leave_slot_extraction import explicit_leave_type_from_message
-
         last = str(draft.get("_last_user_message") or "")
-        explicit = explicit_leave_type_from_message(last)
+        explicit = resolve_explicit_wizard_leave_type(last)
         lt = str(draft.get("leave_type") or "").lower()
-        if explicit == "casual":
+        if explicit in ("annual", "unpaid"):
+            draft["leave_type"] = explicit
+            draft[KEY_STATED_LEAVE_TYPE] = explicit
+            sync_payment_from_leave_type(draft)
+            draft.pop("_leave_type_reselect_required", None)
+        elif lt in {"annual", "unpaid"}:
+            sync_payment_from_leave_type(draft)
+            draft.pop("_leave_type_reselect_required", None)
+        elif lt == "casual":
             draft["leave_type"] = "annual"
+            draft[KEY_STATED_LEAVE_TYPE] = "annual"
             sync_payment_from_leave_type(draft)
-        elif explicit:
-            draft["leave_type"] = "unpaid" if explicit == "unpaid" else explicit
-            sync_payment_from_leave_type(draft)
+            draft.pop("_leave_type_reselect_required", None)
+        elif lt in ("sick", "medical", "health") or stated_leave_type_from_draft(draft) == "sick":
+            invalidate_leave_type_for_reselect(draft)
         elif lt:
             draft.pop("leave_type", None)
             draft.pop("leave_payment_category", None)
+            draft.pop(KEY_STATED_LEAVE_TYPE, None)
+            draft["_leave_type_reselect_required"] = True
+        else:
+            draft.pop(KEY_STATED_LEAVE_TYPE, None)
+            draft["_leave_type_reselect_required"] = True
         draft.pop("_reason_implied", None)
         clear_supporting_document_if_unneeded(draft)
         clear_leave_bucket_cache(draft)
@@ -389,8 +445,8 @@ def apply_leave_draft_defaults(draft: dict[str, Any], policy: Any) -> None:
     if lt == "casual":
         draft["leave_type"] = "annual"
     sync_payment_from_leave_type(draft)
-    if not draft.get("day_scope"):
-        draft["day_scope"] = DAY_SCOPE_FULL
+    # Single-day leave: day_scope must come from the user (workflow_schema SLOT_SCOPE).
+    # Multi-day spans auto-default to full via apply_multi_day_scope_default below.
     if not draft.get("leave_payment_category"):
         tr = policy.type_rule(str(draft.get("leave_type") or ""))
         if tr and not tr.paid:

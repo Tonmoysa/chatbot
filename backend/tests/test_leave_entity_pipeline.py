@@ -50,6 +50,20 @@ def test_llm_gate_confirm_off_slot_on():
 NOVEL_REASON_MSG = "kalke leave lagbe, ghore baper obostha kharap, tai paid full day"
 
 
+def test_llm_semantic_overlay_rejects_ungrounded_reason():
+    from chat.services.leave.entity_merge import overlay_llm_semantic_fields
+
+    msg = "amar kalke chuti lagbe"
+    parser = extract_leave_slots(msg, skip_leave_phrase_gate=True)
+    overlay_llm_semantic_fields(
+        parser,
+        {"reason": "family program"},
+        msg,
+        llm_used=True,
+    )
+    assert not parser.reason.value
+
+
 def test_llm_semantic_overlay_beats_parser_reason():
     from chat.services.leave.entity_merge import overlay_llm_semantic_fields
 

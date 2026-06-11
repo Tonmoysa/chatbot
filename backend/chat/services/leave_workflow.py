@@ -286,13 +286,32 @@ def merge_extractor_entities(
                 message
             ):
                 continue
+        if key == "reason":
+            from chat.services.leave.reason_value import is_boilerplate_leave_reason
+
+            if is_boilerplate_leave_reason(str(v)):
+                continue
+        if key == "leave_type":
+            from chat.services.leave_slot_extraction import explicit_leave_type_from_message
+
+            explicit = explicit_leave_type_from_message(message)
+            if explicit:
+                draft["leave_type"] = explicit
+                continue
+            from chat.services.leave.normalization import text_has_sick_signal
+
+            if not (str(v).strip().lower() == "sick" and text_has_sick_signal(message)):
+                continue
         if key == "date" and not draft.get("start_date"):
             draft["start_date"] = str(v).split("T")[0]
             continue
         draft[key] = v
     rs = entities.get("description")
     if rs and str(rs).strip() and (overwrite or not draft.get("reason")):
-        draft["reason"] = str(rs).strip()[:2000]
+        from chat.services.leave.reason_value import is_boilerplate_leave_reason
+
+        if not is_boilerplate_leave_reason(str(rs)):
+            draft["reason"] = str(rs).strip()[:2000]
 
 
 def _first_missing_step(draft: dict[str, Any]) -> str | None:
@@ -509,6 +528,9 @@ def process_leave_turn(
 
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
     draft["_last_user_message"] = message
+    from chat.services.leave_draft_utils import persist_stated_leave_type
+
+    persist_stated_leave_type(draft, message)
     had_scope = bool(draft.get("day_scope"))
 
     from chat.services.leave.date_correction import try_apply_leave_date_correction
@@ -552,12 +574,9 @@ def process_leave_turn(
         }
 
     from chat.services.leave_confirm import is_confirmation_yes, wants_leave_submit_command
+    from chat.services.leave.normalization import normalize_leave_draft
 
-    if (
-        wants_leave_submit_command(message)
-        and not is_awaiting_leave_confirmation(wf)
-        and not is_confirmation_yes(message)
-    ):
+    if wants_leave_submit_command(message) and not is_awaiting_leave_confirmation(wf):
         from chat.services.expense.expense_fsm import is_expense_in_progress
 
         if is_expense_in_progress(wf):
@@ -572,6 +591,14 @@ def process_leave_turn(
         if not missing:
             apply_leave_draft_defaults(draft, policy)
             wf = mark_review_pending(wf, draft)
+            if is_confirmation_yes(message):
+                return process_confirmation_turn(
+                    workflow_state=wf,
+                    message=message,
+                    draft=draft,
+                    entities=entities,
+                    trace_id=trace_id,
+                )
             from chat.services.leave_confirm import build_deferred_leave_return_prompt
 
             return {
@@ -607,7 +634,7 @@ def process_leave_turn(
     policy = get_company_leave_policy(company_id or "default")
     extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
 
-    from chat.services.leave.normalization import normalize_leave_draft, parse_day_scope_answer
+    from chat.services.leave.normalization import parse_day_scope_answer
     from chat.services.leave.reason_bucket_classifier import apply_leave_semantic_reconcile
     from chat.services.leave.reason_correction_parser import try_apply_reason_correction
 

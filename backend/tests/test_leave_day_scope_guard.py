@@ -85,6 +85,75 @@ def test_process_leave_turn_repeat_while_pending_scope(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_single_day_submit_command_does_not_invent_full_day(monkeypatch):
+    """G28 — one calendar day without full/half must stay in SLOT_SCOPE until user answers."""
+    fixed = dt.date(2026, 6, 11)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+
+    wf: dict = {}
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="agami 15 august leave chai",
+        entities={"start_date": "2026-08-15", "end_date": "2026-08-15"},
+        company_id="default",
+        trace_id="g28-1",
+    )
+    wf = pack["workflow_state"]
+    draft = read_leave_state(wf).get("draft") or {}
+    assert not draft.get("day_scope")
+    assert SLOT_SCOPE in get_missing_slots(draft)
+
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="reason personal work",
+        entities={},
+        company_id="default",
+        trace_id="g28-2",
+    )
+    wf = pack["workflow_state"]
+    draft = read_leave_state(wf).get("draft") or {}
+    assert draft.get("reason")
+    assert not draft.get("day_scope")
+    assert SLOT_SCOPE in get_missing_slots(draft)
+
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="agami 20 august leave chai",
+        entities={"start_date": "2026-08-20", "end_date": "2026-08-20"},
+        company_id="default",
+        trace_id="g28-3",
+    )
+    wf = pack["workflow_state"]
+    draft = read_leave_state(wf).get("draft") or {}
+    assert draft.get("start_date") == "2026-08-20"
+    assert not draft.get("day_scope")
+
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="leave submit koro",
+        entities={},
+        company_id="default",
+        trace_id="g28-4",
+    )
+    draft = read_leave_state(pack["workflow_state"]).get("draft") or {}
+    assert not draft.get("day_scope")
+    q = pack.get("question") or ""
+    assert "Full Day" in q or "Half Day" in q
+    assert "**Full day**" not in q
+
+
+def test_multi_day_leave_auto_full_day_without_prompt(monkeypatch):
+    fixed = dt.date(2026, 6, 11)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+
+    draft = {"days": 3.0, "start_date": "2026-08-15", "end_date": "2026-08-17"}
+    missing = get_missing_slots(draft)
+    assert SLOT_SCOPE not in missing
+    assert draft.get("day_scope") == "full"
+
+
 def test_orchestrator_repeat_compound_while_awaiting_scope(monkeypatch):
     fixed = dt.date(2026, 6, 6)
     monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)

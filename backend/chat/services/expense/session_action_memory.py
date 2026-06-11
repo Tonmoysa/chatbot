@@ -14,32 +14,155 @@ KEY_LAST_BOT_ACTION = "last_bot_action"
 KEY_BOT_ACTION_LOG = "bot_action_log"
 _MAX_ACTION_LOG = 8
 
+_POST_SUBMIT_EDIT_VERB_RE = re.compile(
+    r"\b(koro|kor|kore|dao|daw|de|din|update|change|correct|fix|modify|remove|delete|baad|bad|বাদ)\b",
+    re.I | re.UNICODE,
+)
+
+
+def has_expense_submission_lock(workflow_state: dict[str, Any] | None) -> bool:
+    """True when an expense batch was submitted in this session (no in-chat edits)."""
+    wf = workflow_state or {}
+    last_sub = wf.get("expense_last_submission") or {}
+    if str(last_sub.get("reference_id") or "").strip():
+        return True
+    action = read_last_bot_action(wf)
+    return action.get("action_type") == "expense_submitted" and bool(
+        str(action.get("reference_id") or "").strip()
+    )
+
+
+def _submitted_expense_categories(workflow_state: dict[str, Any] | None) -> set[str]:
+    from chat.services.expense_extraction import normalize_category
+
+    wf = workflow_state or {}
+    last_sub = wf.get("expense_last_submission") or {}
+    action = read_last_bot_action(wf)
+    items = list(last_sub.get("items") or action.get("items") or [])
+    return {
+        normalize_category(str(row.get("category") or ""))
+        for row in items
+        if str(row.get("category") or "").strip()
+    }
+
+
+_POST_SUBMIT_DRAFT_ACTIONS = frozenset(
+    {
+        "expense_line_added",
+        "expense_corrected",
+        "expense_pending_discarded",
+        "expense_total_check",
+        "expense_vague_add_prompt",
+    }
+)
+
+
+def is_fresh_post_submit_expense_draft(
+    workflow_state: dict[str, Any] | None,
+    *,
+    block: dict[str, Any] | None = None,
+) -> bool:
+    """
+    True when the active expense_request is a new claim after CRM submit.
+
+    N56 must only purge stale remnants (same lines as the last submission), not
+    intentional post-submit drafts — otherwise day summaries hide pending lines.
+    """
+    wf = workflow_state or {}
+    if not has_expense_submission_lock(wf):
+        return False
+    block = block if block is not None else read_expense_block(wf)
+    from chat.services.expense.session_ledger import draft_line_rows_for_block
+
+    rows = draft_line_rows_for_block(block)
+    if not rows:
+        return False
+    if block.get("post_submit_draft"):
+        return True
+
+    action = read_last_bot_action(wf)
+    if str(action.get("action_type") or "") in _POST_SUBMIT_DRAFT_ACTIONS:
+        return True
+
+    last_sub = wf.get("expense_last_submission") or {}
+    sub_items = list(last_sub.get("items") or [])
+    if not sub_items:
+        return True
+
+    from chat.services.expense.expense_draft_snapshots import items_fingerprint
+
+    return items_fingerprint(rows) != items_fingerprint(sub_items)
+
+
+def purge_stale_expense_draft_after_submit(
+    workflow_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Drop a leftover active draft once CRM submit is recorded."""
+    from chat.services.expense.expense_fsm import deactivate_expense_session
+
+    wf_in = workflow_state or {}
+    if not has_expense_submission_lock(wf_in):
+        return wf_in
+    block = read_expense_block(wf_in)
+    if not block.get("active") and not list(block.get("items") or []):
+        return wf_in
+    if is_fresh_post_submit_expense_draft(wf_in, block=block):
+        return wf_in
+    return deactivate_expense_session(wf_in)
+
+
+def looks_like_post_submit_expense_modification(
+    workflow_state: dict[str, Any] | None,
+    message: str,
+) -> bool:
+    """Detect edits to a submitted batch (including ``lunch 200 taka koro``)."""
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+    from chat.services.expense_extraction import extract_expense_items, normalize_category
+
+    raw = (message or "").strip()
+    if not raw or not has_expense_submission_lock(workflow_state):
+        return False
+    if wants_post_submit_edit_question(raw):
+        return False
+
+    wf = workflow_state or {}
+    block = read_expense_block(wf)
+    if block.get("active") and list(block.get("items") or []):
+        return True
+
+    if looks_like_expense_correction(raw):
+        return True
+
+    submitted_cats = _submitted_expense_categories(wf)
+    if not submitted_cats:
+        return False
+
+    low = raw.lower()
+    if _POST_SUBMIT_EDIT_VERB_RE.search(low):
+        for cat in submitted_cats:
+            if cat and re.search(rf"\b{re.escape(cat)}\b", low, re.I):
+                return True
+
+    ext = extract_expense_items(raw)
+    for item in ext.items:
+        cat = normalize_category(str(item.category or ""))
+        if cat in submitted_cats:
+            try:
+                if float(item.amount or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                return True
+    return False
+
 
 def looks_like_submitted_expense_correction_attempt(
     workflow_state: dict[str, Any] | None,
     message: str,
 ) -> bool:
-    """User tries to edit amounts/lines but only a submitted batch exists (no active draft)."""
-    from chat.services.expense.expense_confirm import looks_like_expense_correction
-
-    wf = workflow_state or {}
-    block = read_expense_block(wf)
-    if block.get("active") and list(block.get("items") or []):
+    """User tries to edit a submitted expense batch in chat."""
+    if not has_expense_submission_lock(workflow_state):
         return False
-    last_sub = wf.get("expense_last_submission") or {}
-    action = read_last_bot_action(wf)
-    has_submitted = bool(str(last_sub.get("reference_id") or action.get("reference_id") or ""))
-    if not has_submitted and action.get("action_type") != "expense_submitted":
-        return False
-    if not looks_like_expense_correction(message):
-        return False
-    if re.search(
-        r"\b(প্রথম|দ্বিতীয়|তৃতীয়|first|second|third)\b",
-        message or "",
-        re.I | re.UNICODE,
-    ):
-        return True
-    return looks_like_expense_correction(message)
+    return looks_like_post_submit_expense_modification(workflow_state, message)
 
 
 def format_submitted_expense_edit_blocked_answer(
@@ -177,11 +300,41 @@ def wants_expense_pre_submit_review(message: str) -> bool:
     )
 
 
+_EXPENSE_SUBMIT_STATUS_RE = re.compile(
+    r"(?:"
+    r"(?:ki|kono|any).{0,35}(?:expense|খরচ|kharcha|khoroch).{0,35}"
+    r"(?:submit|joma|জমা).{0,25}(?:korechi|korchi|kor[eo]chi|hoyeche|hoise|done|হয়েছে|হয়েছে)"
+    r"|"
+    r"(?:expense|খরচ|kharcha|khoroch).{0,35}"
+    r"(?:submit|joma|জমা).{0,25}(?:korechi|korchi|kor[eo]chi|hoyeche|hoise|done|হয়েছে|হয়েছে)"
+    r"|"
+    r"(?:submit|joma|জমা).{0,20}(?:hoyeche|hoise|হয়েছে|হয়েছে).{0,25}(?:expense|খরচ)"
+    r"|"
+    r"(?:amar|my).{0,20}(?:expense|খরচ|kharcha).{0,25}(?:submit|joma|জমা).{0,15}(?:hoyeche|hoise|হয়েছে)"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def wants_expense_submission_status(message: str) -> bool:
+    """User asks whether expense was already submitted in this session."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if re.search(r"\b(leave|chuti|chhuti|ছুটি)\b", raw, re.I | re.UNICODE):
+        return False
+    if wants_expense_pre_submit_review(message):
+        return False
+    return bool(_EXPENSE_SUBMIT_STATUS_RE.search(raw))
+
+
 def wants_expense_meta_question(message: str) -> bool:
     """User asks about the bot's last expense action (not a new claim line)."""
     raw = (message or "").strip()
     if not raw:
         return False
+    if wants_expense_submission_status(message):
+        return True
     if wants_expense_pre_submit_review(message):
         return True
     from chat.services.expense.expense_total_dispute import is_expense_total_check_query

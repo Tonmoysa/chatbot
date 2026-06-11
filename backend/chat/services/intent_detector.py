@@ -485,6 +485,27 @@ def _message_answers_wizard_step(message: str, step: str | None) -> bool:
             _WIZARD_DATES_RE.search(text)
             or _WIZARD_DATES_BN_RE.search(text)
         )
+    if step in ("leave_type",):
+        from chat.services.leave.normalization import (
+            looks_like_wizard_leave_type_answer,
+            parse_wizard_leave_type_answer,
+        )
+        from chat.services.leave.session_action_memory import wants_leave_meta_question
+
+        if wants_leave_meta_question(text):
+            return False
+        try:
+            from chat.services.expense.session_action_memory import (
+                wants_expense_meta_question,
+            )
+
+            if wants_expense_meta_question(text):
+                return False
+        except Exception:
+            pass
+        if looks_like_wizard_leave_type_answer(text) or parse_wizard_leave_type_answer(text):
+            return True
+        return False
     return True
 
 
@@ -546,6 +567,14 @@ class IntentDetector:
                 "intent": INTENT_EXPENSE_STATUS,
                 "confidence": 0.99,
                 "source": "rules_override_expense_meta",
+            }
+        from chat.services.leave.session_action_memory import wants_leave_meta_question
+
+        if wants_leave_meta_question(message):
+            return {
+                "intent": INTENT_REQUEST_STATUS,
+                "confidence": 0.99,
+                "source": "rules_override_leave_meta",
             }
         if strong_day_summary:
             return {
@@ -659,6 +688,10 @@ class IntentDetector:
             return INTENT_EXPENSE_STATUS
         if _strong_expense_day_summary(raw_message or text):
             return INTENT_EXPENSE_DAY_SUMMARY
+        from chat.services.leave.session_action_memory import wants_leave_meta_question
+
+        if wants_leave_meta_question(raw_message or text):
+            return INTENT_REQUEST_STATUS
         from chat.services.workflow_navigation import is_leave_application_message
 
         if is_leave_application_message(raw_message or text):
@@ -718,6 +751,15 @@ class IntentDetector:
 
         if wants_leave_session_summary(raw_message or text):
             return INTENT_LEAVE_REQUEST
+        from chat.services.leave_meta_queries import (
+            wants_leave_submission_status,
+            wants_submitted_leave_details,
+        )
+
+        if wants_leave_submission_status(raw_message or text) or wants_submitted_leave_details(
+            raw_message or text
+        ):
+            return INTENT_REQUEST_STATUS
         if re.search(
             r"\b(leave|pto|vacation|time off|sick day|day off|holiday)\b", text
         ):

@@ -71,6 +71,13 @@ class LeaveSubmissionService:
 
         idem = (idempotency_key or "").strip()
         if idem and st.get("idempotency_key") == idem and st.get("submission_id"):
+            from chat.services.leave.session_action_memory import record_leave_submitted
+
+            wf = record_leave_submitted(
+                wf,
+                submission_id=str(st.get("submission_id") or ""),
+                draft=dict(st.get("draft") or {}),
+            )
             return LeaveSubmissionResult(
                 ok=True,
                 submission_id=st["submission_id"],
@@ -91,6 +98,13 @@ class LeaveSubmissionService:
                     draft=dict(st.get("draft") or {}),
                     submission_id=prior_rid,
                     idempotency_key=str(st.get("idempotency_key") or idem),
+                )
+                from chat.services.leave.session_action_memory import record_leave_submitted
+
+                wf_locked = record_leave_submitted(
+                    wf_locked,
+                    submission_id=prior_rid,
+                    draft=dict(st.get("draft") or {}),
                 )
                 return LeaveSubmissionResult(
                     ok=True,
@@ -149,6 +163,13 @@ class LeaveSubmissionService:
             draft=draft,
             submission_id=submission_id,
             idempotency_key=idem,
+        )
+        from chat.services.leave.session_action_memory import record_leave_submitted
+
+        wf_locked = record_leave_submitted(
+            wf_locked,
+            submission_id=submission_id,
+            draft=draft,
         )
         logger.info(
             "leave_submission_complete trace_id=%s submission_id=%s idempotency=%s",

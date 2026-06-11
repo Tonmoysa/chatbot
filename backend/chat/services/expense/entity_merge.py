@@ -194,6 +194,26 @@ def _llm_line_matches_uncategorized_route(
     return False
 
 
+def _message_suggests_more_lines_than_parser(
+    message: str,
+    parser: ExtractionResult,
+) -> bool:
+    """Heuristic: user named more amounts/categories than regex extracted."""
+    from chat.services.expense.llm_extraction_trigger import (
+        count_distinct_amount_mentions,
+        looks_like_long_compound_expense_message,
+    )
+
+    if not (message or "").strip():
+        return False
+    amt_count = count_distinct_amount_mentions(message)
+    if amt_count >= 2 and len(parser.items) < amt_count:
+        return True
+    if looks_like_long_compound_expense_message(message) and len(parser.items) < 2:
+        return True
+    return False
+
+
 def parser_needs_llm_gap_fill(
     parser: ExtractionResult,
     llm_entities: dict[str, Any] | None = None,
@@ -202,15 +222,28 @@ def parser_needs_llm_gap_fill(
 ) -> bool:
     """True when regex output is incomplete and LLM should enrich it."""
     if not parser.items:
-        return bool(parser.malformed)
+        if parser.malformed:
+            return True
+        from chat.services.expense.llm_extraction_trigger import (
+            looks_like_long_compound_expense_message,
+        )
+
+        return looks_like_long_compound_expense_message(message)
 
     for item in parser.items:
         if _travel_line_needs_route(item):
             return True
         if item.amount > 0 and not item.category:
             return True
+        frm = str(item.from_location or "").strip()
+        to = str(item.to_location or "").strip()
+        if is_travel_category(str(item.category or "")) and (frm or to) and not (frm and to):
+            return True
 
     if parser.malformed:
+        return True
+
+    if _message_suggests_more_lines_than_parser(message, parser):
         return True
 
     if llm_entities:

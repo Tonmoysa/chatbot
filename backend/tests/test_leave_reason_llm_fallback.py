@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from chat.services.leave.reason_bucket_classifier import apply_leave_semantic_reconcile, classify_leave_bucket
 from chat.services.leave.reason_correction_parser import try_apply_reason_correction
-from chat.services.leave_slots import SLOT_DOCUMENT, get_missing_slots
+from chat.services.leave_slots import SLOT_DOCUMENT, SLOT_LEAVE_TYPE, get_missing_slots
 from chat.services.leave_workflow import process_leave_turn
 
 
@@ -23,7 +23,8 @@ def test_rules_reason_ta_tour_not_osusto() -> None:
     assert applied
     assert draft.get("reason") == "travel"
     apply_leave_semantic_reconcile(draft, message="reaon ta tour hobe osusto nah")
-    assert draft.get("leave_type") == "casual"
+    assert draft.get("leave_type") is None
+    assert SLOT_LEAVE_TYPE in get_missing_slots(draft)
 
 
 def test_llm_reason_correction_when_rules_miss_negation_wrapper() -> None:
@@ -94,7 +95,8 @@ def test_llm_bucket_typo_family_skips_doctor_document() -> None:
             use_llm=True,
         )
     assert result.bucket == "other"
-    assert draft.get("leave_type") == "casual"
+    assert draft.get("leave_type") is None
+    assert SLOT_LEAVE_TYPE in get_missing_slots(draft)
     assert SLOT_DOCUMENT not in get_missing_slots(draft)
 
 
@@ -118,7 +120,8 @@ def test_full_flow_tour_not_osusto_correction() -> None:
     )
     draft = (pack["workflow_state"].get("draft") or {})
     assert draft.get("reason") == "travel"
-    assert draft.get("leave_type") == "casual"
+    assert draft.get("leave_type") is None
+    assert SLOT_LEAVE_TYPE in get_missing_slots(draft)
     q = pack.get("question") or ""
     assert "travel" in q or "tour" in q.lower() or "কারণ" in q
     assert "reaon ta tour" not in q
@@ -160,7 +163,8 @@ def test_full_flow_typo_reason_llm_skips_doctor() -> None:
     wf = pack["workflow_state"]
     draft = wf.get("draft") or {}
     assert draft.get("reason") == "family program"
-    assert draft.get("leave_type") == "casual"
+    assert draft.get("leave_type") is None
+    assert SLOT_LEAVE_TYPE in get_missing_slots(draft)
 
     pack = process_leave_turn(
         workflow_state=wf,

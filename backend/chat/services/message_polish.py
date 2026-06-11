@@ -357,45 +357,47 @@ def polish_outbound_message(
                     review=review,
                 )
                 return polish_clarification_message(polished)
-        if (
-            intent == INTENT_EXPENSE_CLAIM
-            and trace_id
-            and _should_llm_polish_expense_wizard(rules)
-        ):
+        if intent == INTENT_EXPENSE_CLAIM and trace_id:
             expense_facts = entities.get("expense_message_facts")
-            if isinstance(expense_facts, dict) and (
+            _facts_polish_types = (
+                "expense_validation_block",
+                "expense_clarify",
+                "expense_clarify_praise_review",
+                "expense_review_praise",
+                "expense_submit_confirm",
+                "expense_disambiguation",
+                "expense_confirm_prompt",
+            )
+            has_facts_polish = isinstance(expense_facts, dict) and (
                 expense_facts.get("polishable_part")
                 or expense_facts.get("ask_envelope")
-                or expense_facts.get("message_type")
-                in (
-                    "expense_validation_block",
-                    "expense_clarify",
-                    "expense_clarify_praise_review",
-                    "expense_review_praise",
-                    "expense_submit_confirm",
-                )
-            ):
-                from chat.services.message_polish_llm import (
-                    polish_expense_message_with_envelope,
-                )
-
-                polished = polish_expense_message_with_envelope(
-                    expense_facts,
-                    user_message=user_message,
-                    trace_id=trace_id,
-                )
-                if polished:
-                    return polish_clarification_message(polished)
-            from chat.services.message_polish_llm import polish_template_message
-
-            polished = polish_template_message(
-                msg,
-                user_message=user_message,
-                message_type="expense_wizard",
-                trace_id=trace_id,
-                min_length=30,
+                or expense_facts.get("message_type") in _facts_polish_types
             )
-            return polish_clarification_message(polished)
+            wizard_polish = _should_llm_polish_expense_wizard(rules)
+            if has_facts_polish or wizard_polish:
+                if has_facts_polish:
+                    from chat.services.message_polish_llm import (
+                        polish_expense_message_with_envelope,
+                    )
+
+                    polished = polish_expense_message_with_envelope(
+                        expense_facts,
+                        user_message=user_message,
+                        trace_id=trace_id,
+                    )
+                    if polished:
+                        return polish_clarification_message(polished)
+                if wizard_polish:
+                    from chat.services.message_polish_llm import polish_template_message
+
+                    polished = polish_template_message(
+                        msg,
+                        user_message=user_message,
+                        message_type="expense_wizard",
+                        trace_id=trace_id,
+                        min_length=30,
+                    )
+                    return polish_clarification_message(polished)
         return polish_clarification_message(msg)
 
     if intent == INTENT_EXPENSE_DAY_SUMMARY and trace_id:

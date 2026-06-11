@@ -196,6 +196,9 @@ def try_apply_reason_correction(
         draft.pop("_reason_implied", None)
         draft.pop("_pending_reason_clarify", None)
         clear_leave_bucket_cache(draft)
+        from chat.services.leave_draft_utils import reconcile_leave_type_from_reason
+
+        reconcile_leave_type_from_reason(draft)
         return True
 
     if not use_llm or not looks_like_reason_correction(text):
@@ -209,4 +212,7 @@ def try_apply_reason_correction(
     draft.pop("_reason_implied", None)
     draft.pop("_pending_reason_clarify", None)
     clear_leave_bucket_cache(draft)
+    from chat.services.leave_draft_utils import reconcile_leave_type_from_reason
+
+    reconcile_leave_type_from_reason(draft)
     return True

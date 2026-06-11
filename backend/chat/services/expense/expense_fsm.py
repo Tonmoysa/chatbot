@@ -107,6 +107,31 @@ def deactivate_expense_session(workflow_state: dict[str, Any]) -> dict[str, Any]
     return wf
 
 
+def finalize_expense_submission(
+    workflow_state: dict[str, Any],
+    *,
+    reference_id: str,
+    items: list[dict[str, Any]],
+    incurred_date_iso: str = "",
+) -> dict[str, Any]:
+    """Persist submission archive and clear the in-chat draft (terminal lock)."""
+    from chat.services.expense.session_action_memory import record_expense_submitted
+
+    wf = save_expense_last_submission(
+        workflow_state,
+        reference_id=reference_id,
+        items=items,
+        incurred_date_iso=incurred_date_iso,
+    )
+    wf = record_expense_submitted(
+        wf,
+        items=items,
+        reference_id=reference_id,
+        incurred_date_iso=incurred_date_iso,
+    )
+    return deactivate_expense_session(wf)
+
+
 def set_expense_stage(block: dict[str, Any], stage: str) -> None:
     block["stage"] = normalize_expense_stage(stage)
 

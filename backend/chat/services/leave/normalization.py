@@ -151,7 +151,7 @@ _WIZARD_SICK_RE = re.compile(
     re.I | re.UNICODE,
 )
 _WIZARD_ANNUAL_RE = re.compile(
-    r"\b(annual|vacation|pto)\b|বার্ষিক|annual\s*leave",
+    r"\b(anual|anul|anuall?|annual|vacation|pto)\b|বার্ষিক|(?:anual|annual)\s*leave",
     re.I | re.UNICODE,
 )
 _WIZARD_UNPAID_RE = re.compile(
@@ -174,6 +174,11 @@ _HALF_SECOND_RE = re.compile(
 )
 
 
+def looks_like_wizard_leave_type_answer(message: str) -> bool:
+    """True when the message is a Select Leave slot answer (incl. common typos)."""
+    return parse_wizard_leave_type_answer(message) is not None
+
+
 def parse_wizard_leave_type_answer(message: str) -> str | None:
     """Parse sick / annual / unpaid wizard Select Leave answers."""
     text = (message or "").strip()
@@ -182,6 +187,8 @@ def parse_wizard_leave_type_answer(message: str) -> str | None:
     low = text.lower()
     if low in {"sick", "annual", "unpaid"}:
         return low
+    if re.fullmatch(r"anual(?:\s+leave)?", low):
+        return "annual"
     if _WIZARD_UNPAID_RE.search(text):
         return "unpaid"
     if _WIZARD_SICK_RE.search(text):

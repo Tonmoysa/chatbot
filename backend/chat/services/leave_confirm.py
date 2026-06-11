@@ -87,9 +87,41 @@ _DEFER_LEAVE_SUBMIT_RE = re.compile(
 )
 
 
+def _looks_like_generic_submit_command(message: str) -> bool:
+    """Bare submit/joma phrasing (submit koro, okay submit koro, joma daw)."""
+    from chat.services.expense.wizard_commands import (
+        _SUBMIT_CMD_RE,
+        _SUBMIT_QUESTION_RE,
+    )
+
+    t = (message or "").strip()
+    if not t or _SUBMIT_QUESTION_RE.search(t):
+        return False
+    return bool(_SUBMIT_CMD_RE.search(t))
+
+
 def wants_leave_submit_command(message: str) -> bool:
     """User wants to submit/finalize the current leave application."""
-    return wants_defer_expense_for_leave_submit(message)
+    t = (message or "").strip()
+    if not t:
+        return False
+    from chat.services.leave.session_action_memory import wants_leave_meta_question
+
+    if wants_leave_meta_question(t):
+        return False
+    if wants_defer_leave_for_expense_submit(t):
+        return False
+    if wants_defer_expense_for_leave_submit(t):
+        return True
+    if re.search(r"\b(expense|খরচ|kharcha|reimbursement)\b", t, re.I | re.UNICODE):
+        return False
+    if _looks_like_generic_submit_command(t):
+        return True
+    if is_confirmation_yes(t) and re.search(
+        r"\b(submit|জমা|joma)\b", t, re.I | re.UNICODE
+    ):
+        return True
+    return False
 
 
 
@@ -162,7 +194,7 @@ def build_deferred_leave_return_prompt(
 
 
 _AFFIRMATIVE_RE = re.compile(
-    r"(হ্যাঁ|হ্যা|yes|ঠিক\s*আছে|thik\s*ache)",
+    r"(হ্যাঁ|হ্যা|yes|okay|ok|ঠিক\s*আছে|thik\s*ache)",
     re.I | re.UNICODE,
 )
 

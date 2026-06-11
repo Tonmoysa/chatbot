@@ -23,14 +23,26 @@ def test_looks_like_expense_correction_bengali_na():
     assert looks_like_expense_correction("bus 50 না 70 হবে")
 
 
-def test_dedupe_expense_items():
+def test_dedupe_expense_items_keeps_identical_lines():
     items = [
         {"category": "Lunch", "amount": 100},
         {"category": "Lunch", "amount": 100},
         {"category": "Bus", "amount": 50},
     ]
     out = dedupe_expense_items(items)
-    assert len(out) == 2
+    assert len(out) == 3
+
+    exact_dupes = [
+        {"category": "Bus", "amount": 100, "from_location": "office", "to_location": "home"},
+        {"category": "Bus", "amount": 100, "from_location": "office", "to_location": "home"},
+    ]
+    assert len(dedupe_expense_items(exact_dupes)) == 2
+
+    two_trips = [
+        {"category": "Bus", "amount": 100, "from_location": "mirpur", "to_location": "motijheel"},
+        {"category": "Bus", "amount": 100, "from_location": "motijheel", "to_location": "mirpur"},
+    ]
+    assert len(dedupe_expense_items(two_trips)) == 2
 
 
 def test_apply_corrections_update_amount():
@@ -38,6 +50,39 @@ def test_apply_corrections_update_amount():
     out, changed = apply_corrections(items, "bus 70")
     assert changed
     assert out[0]["amount"] == 70.0
+
+
+def test_bus_hobe_nah_bki_hobe_swaps_pending_to_bike():
+    from chat.services.expense.command_executor import apply_message_corrections
+
+    items = [
+        {"category": "Lunch", "amount": 200},
+        {"category": "Snack", "amount": 50},
+    ]
+    block = {
+        "pending_line": {
+            "amount": 100,
+            "category": "Bus",
+            "from_location": "",
+            "to_location": "",
+        },
+        "pending_step": "from_to",
+    }
+    result = apply_message_corrections(
+        items,
+        "bus hobe nah bki hobe",
+        use_llm=False,
+        block=block,
+    )
+    assert result.changed
+    assert block["pending_line"]["category"] == "Bike"
+
+
+def test_wants_expense_draft_edit_intent():
+    from chat.services.expense.expense_confirm import wants_expense_draft_edit_intent
+
+    assert wants_expense_draft_edit_intent("bus update korte chacchi")
+    assert not wants_expense_draft_edit_intent("annual leave chai")
 
 
 def test_apply_corrections_remove_category():

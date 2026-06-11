@@ -18,6 +18,7 @@ from chat.services.expense.expense_confirm import (
     _CAT_ER_EXPENSE_AMOUNT_RE,
     _CAT_HOBE_RE,
     _CONTEXTUAL_CAT_AMOUNT_HOBE_RE,
+    _LINE_HINT_AMOUNT_HOBE_RE,
     _PARTIAL_DEDUCT_RE,
     _REMOVE_LOOSE_RE,
     _REMOVE_ONE_RE,
@@ -31,6 +32,7 @@ from chat.services.expense.expense_confirm import (
     _REPLACE_TA_CAT_RE,
     _REPLACE_KE_KORO_RE,
     _REPLACE_SETAKE_RE,
+    _REPLACE_HOBE_NA_RE,
     _SET_AMOUNT_RE,
     _TRANSFER_RE,
     _UPDATE_AMOUNT_RE,
@@ -91,6 +93,18 @@ def _ordinal_index_from_message(low: str, *, item_count: int | None = None) -> i
         if item_count is not None and item_count > 0:
             return item_count - 1
         return None
+    num_m = re.search(
+        r"\b(\d+)\s*(?:tatei|tite|te|number|no|টায়|টাই)\b",
+        low,
+        re.I | re.UNICODE,
+    )
+    if num_m:
+        try:
+            idx = int(num_m.group(1)) - 1
+        except (TypeError, ValueError):
+            idx = -1
+        if idx >= 0 and (item_count is None or idx < item_count):
+            return idx
     for word, idx in _ORDINAL_INDEX_MAP.items():
         if word.isascii():
             if re.search(rf"\b{re.escape(word)}\b", low, re.I):
@@ -198,6 +212,14 @@ def parse_correction_plan(
             plan.replacements.append(pair)
 
     for m in _REPLACE_SETAKE_RE.finditer(low):
+        pair = (
+            normalize_category(m.group("from_cat")),
+            normalize_category(m.group("to_cat")),
+        )
+        if pair not in plan.replacements:
+            plan.replacements.append(pair)
+
+    for m in _REPLACE_HOBE_NA_RE.finditer(low):
         pair = (
             normalize_category(m.group("from_cat")),
             normalize_category(m.group("to_cat")),
@@ -331,8 +353,8 @@ def parse_correction_plan(
             plan.cat_er_amounts.append(pair)
 
     for m in _ADD_RE.finditer(low):
-        cat_g = m.group("cat") or m.group("cat2")
-        amt_g = m.group("amt") or m.group("amt2")
+        cat_g = m.group("cat") or m.group("cat2") or m.group("cat3")
+        amt_g = m.group("amt") or m.group("amt2") or m.group("amt3")
         if not cat_g or not amt_g:
             continue
         try:
@@ -359,9 +381,30 @@ def parse_correction_plan(
         if pair not in plan.amount_replacements:
             plan.amount_replacements.append(pair)
 
+    for m in _LINE_HINT_AMOUNT_HOBE_RE.finditer(low):
+        try:
+            new_amt = float(str(m.group("new")).replace(",", "."))
+            old_amt = float(str(m.group("hint")).replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+        pair = (new_amt, old_amt)
+        if pair not in plan.amount_replacements:
+            plan.amount_replacements.append(pair)
+
     bare = parse_bare_amount_correction(message)
     if bare is not None and not plan.has_any_correction():
         plan.bare_amount_set = bare
+
+    if plan.set_amounts:
+        seen_cats: set[str] = set()
+        deduped: list[tuple[str, float]] = []
+        for cat, amt in plan.set_amounts:
+            key = cat.lower()
+            if key in seen_cats:
+                continue
+            seen_cats.add(key)
+            deduped.append((cat, amt))
+        plan.set_amounts = deduped
 
     return plan
 

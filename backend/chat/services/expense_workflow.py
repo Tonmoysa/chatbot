@@ -987,6 +987,41 @@ def _should_reset_pending_for_message(
     return False
 
 
+def _queue_travel_claim_behind_open_from_to(
+    block: dict[str, Any],
+    ext: Any,
+) -> bool:
+    """Queue a new travel line without replacing the active pending_line route slot."""
+    if len(ext.items) != 1:
+        return False
+    item = ext.items[0]
+    cat = str(getattr(item, "category", "") or "").strip()
+    if not cat or not is_travel_category(cat):
+        return False
+    if str(getattr(item, "from_location", "") or "").strip() and str(
+        getattr(item, "to_location", "") or ""
+    ).strip():
+        return False
+    try:
+        amt = float(getattr(item, "amount", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if amt <= 0:
+        return False
+    queue = list(block.get("pending_queue") or [])
+    queue.append(
+        {
+            "amount": amt,
+            "category": cat,
+            "from_location": str(getattr(item, "from_location", "") or ""),
+            "to_location": str(getattr(item, "to_location", "") or ""),
+            "source_clause": str(getattr(item, "notes", "") or ""),
+        }
+    )
+    block["pending_queue"] = queue
+    return True
+
+
 def _ingest_new_claim_preserving_pending_from_to(
     wf: dict[str, Any],
     block: dict[str, Any],
@@ -1005,6 +1040,22 @@ def _ingest_new_claim_preserving_pending_from_to(
 
     lang = lang_from_block(block)
     ext = _extract_lines_from_message(message, pipeline_result=pipeline_result)
+    if _queue_travel_claim_behind_open_from_to(block, ext):
+        block["pending_line"] = dict(pending)
+        block["pending_step"] = "from_to"
+        set_expense_stage(block, STAGE_COLLECTING)
+        cat = str(pending.get("category") or "Bus")
+        amt = float(pending.get("amount") or 0)
+        q, facts = _ask_from_to_prompt(block, items, cat, amt, lang=lang)
+        return _pack(
+            wf,
+            block,
+            items=items,
+            question=q,
+            inc_iso=inc_iso,
+            message_facts=facts,
+        )
+
     before_count = len(items)
     items, blocked = _ingest_extracted_lines(
         block,
@@ -1015,6 +1066,13 @@ def _ingest_new_claim_preserving_pending_from_to(
         wf=wf,
     )
     if blocked:
+        hijacked = dict(block.get("pending_line") or {})
+        if hijacked and hijacked != dict(pending):
+            queue = list(block.get("pending_queue") or [])
+            queue.append(hijacked)
+            block["pending_queue"] = queue
+        block["pending_line"] = dict(pending)
+        block["pending_step"] = "from_to"
         return _pack_ingest_interrupt(wf, block, items, blocked, inc_iso=inc_iso)
 
     block["pending_line"] = dict(pending)
@@ -1331,23 +1389,11 @@ def _ingest_extracted_lines(
             not str(d.get("from_location") or "").strip()
             or not str(d.get("to_location") or "").strip()
         ):
-            amt_key = round(float(d.get("amount") or 0), 2)
-            already_routed = any(
-                str(r.get("category") or "").lower() == cat.lower()
-                and round(float(r.get("amount") or 0), 2) == amt_key
-                and str(r.get("from_location") or "").strip()
-                and str(r.get("to_location") or "").strip()
-                for r in out
-            )
-            if not already_routed:
-                needs_route.append(ni)
+            needs_route.append(ni)
             continue
-        key = (cat.lower(), round(float(d.get("amount") or 0), 2))
-        if any(
-            (str(r.get("category") or "").lower(), round(float(r.get("amount") or 0), 2))
-            == key
-            for r in out
-        ):
+        from chat.services.expense.expense_confirm import expense_line_fingerprint
+
+        if any(expense_line_fingerprint(r) == expense_line_fingerprint(d) for r in out):
             continue
         out.append(d)
 
@@ -1362,16 +1408,10 @@ def _ingest_extracted_lines(
         }
         finalized = _finalize_route_as_bus(entry)
         if finalized:
-            key = (
-                str(finalized.get("category") or "").lower(),
-                round(float(finalized.get("amount") or 0), 2),
-            )
+            from chat.services.expense.expense_confirm import expense_line_fingerprint
+
             if not any(
-                (
-                    str(r.get("category") or "").lower(),
-                    round(float(r.get("amount") or 0), 2),
-                )
-                == key
+                expense_line_fingerprint(r) == expense_line_fingerprint(finalized)
                 for r in out
             ):
                 out.append(finalized)
@@ -1382,16 +1422,10 @@ def _ingest_extracted_lines(
         if entry:
             finalized = _finalize_route_as_bus(entry)
             if finalized:
-                key = (
-                    str(finalized.get("category") or "").lower(),
-                    round(float(finalized.get("amount") or 0), 2),
-                )
+                from chat.services.expense.expense_confirm import expense_line_fingerprint
+
                 if not any(
-                    (
-                        str(r.get("category") or "").lower(),
-                        round(float(r.get("amount") or 0), 2),
-                    )
-                    == key
+                    expense_line_fingerprint(r) == expense_line_fingerprint(finalized)
                     for r in out
                 ):
                     out.append(finalized)
@@ -1522,21 +1556,37 @@ def format_expense_day_summary_readonly(
     return "\n".join(lines)
 
 
+def expense_summary_items(
+    items: list[dict[str, Any]],
+    block: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Committed items plus open pending_line / pending_queue for display totals."""
+    if block is not None:
+        from chat.services.expense.session_ledger import draft_line_rows_for_block
+
+        merged = draft_line_rows_for_block(block)
+        if merged:
+            return merged
+    return items
+
+
 def format_expense_summary(
     items: list[dict[str, Any]],
     *,
+    block: dict[str, Any] | None = None,
     incurred_date_iso: str = "",
     warnings: list[str] | None = None,
     line_flags: dict[int, list[str]] | None = None,
     lang: str | None = None,
 ) -> str:
     reply_lang = normalize_reply_lang(lang)
-    total = sum(float(r.get("amount") or 0) for r in items)
+    display_items = expense_summary_items(items, block)
+    total = sum(float(r.get("amount") or 0) for r in display_items)
     head = review_head(incurred_date_iso, reply_lang)
-    flags = line_flags or {}
+    flags = line_flags or {} if display_items is items else {}
     body = "\n".join(
         _format_line_display(r, inline_flags=flags.get(idx))
-        for idx, r in enumerate(items)
+        for idx, r in enumerate(display_items)
     )
     warn = ""
     if warnings:
@@ -1692,14 +1742,8 @@ def _append_single_review_line_if_new(
         return items, False
     if amt <= 0:
         return items, False
-    cat = str(ni.category or "Other")
-    cat_l = cat.lower()
-    for row in items:
-        if (
-            str(row.get("category") or "").lower() == cat_l
-            and abs(float(row.get("amount") or 0) - amt) < 0.01
-        ):
-            return items, False
+    from chat.services.expense.expense_confirm import expense_line_fingerprint
+
     new_row = normalize_expense_line(
         {
             "category": cat,
@@ -1708,6 +1752,8 @@ def _append_single_review_line_if_new(
             "to_location": getattr(ni, "to_location", "") or "",
         }
     )
+    if any(expense_line_fingerprint(row) == expense_line_fingerprint(new_row) for row in items):
+        return items, False
     return items + [new_row], True
 
 
@@ -2001,6 +2047,7 @@ def _try_advance_to_review(
     )
     summary = format_expense_summary(
         items,
+        block=block,
         incurred_date_iso=inc_iso,
         warnings=val.warnings,
         line_flags=val.line_flags,
@@ -2489,7 +2536,30 @@ def process_expense_turn(
     Travel categories (Bus, Train, …) require From/To; Lunch/Snack do not.
     """
     del company_id, employee_id, session_id
-    wf = clone_workflow_state(workflow_state)
+    from chat.services.expense.session_action_memory import (
+        format_submitted_expense_edit_blocked_answer,
+        looks_like_post_submit_expense_modification,
+        purge_stale_expense_draft_after_submit,
+        wants_post_submit_edit_question,
+    )
+
+    wf = purge_stale_expense_draft_after_submit(clone_workflow_state(workflow_state))
+    if (
+        looks_like_post_submit_expense_modification(wf, message)
+        and not wants_post_submit_edit_question(message)
+    ):
+        blocked = format_submitted_expense_edit_blocked_answer(wf, lang=None)
+        return {
+            "workflow_state": wf,
+            "complete": False,
+            "submitted": False,
+            "question": blocked,
+            "items": list(read_expense_block(wf).get("items") or []),
+            "warnings": [],
+            "incurred_date_iso": str(read_expense_block(wf).get("incurred_date_iso") or ""),
+            "validation_blocked": True,
+        }
+
     block = wf.setdefault("expense_request", {})
     ensure_expense_block_active(block)
     _sync_reply_language(block, message)
@@ -2717,10 +2787,7 @@ def process_expense_turn(
         items, appended_line = _append_single_review_line_if_new(items, message)
         if appended_line:
             review_snapshot = [dict(x) for x in items]
-        elif (
-            not looks_like_expense_correction(message)
-            and (extract_expense_items(message).items or [])
-        ):
+        elif looks_like_duplicate_expense_reentry(message, items):
             return _pack(
                 wf,
                 block,

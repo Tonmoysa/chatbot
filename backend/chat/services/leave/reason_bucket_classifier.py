@@ -32,7 +32,8 @@ Return STRICT JSON only:
 RULES
 - sick: illness, fever, injury, medical, hospital, doctor — may need doctor note (3+ days)
 - other: family program/event, travel, wedding, funeral, personal — NO doctor note
-- Fix typos in normalized_reason (fmly progrm → family program)
+- Fix typos in normalized_reason (fmly progrm → family program) ONLY when that text appears in the user message
+- normalized_reason MUST be null when the user did not state a cause (e.g. only "kalke chuti lagbe")
 - clarify_question_bn: short Bangla question ONLY if truly unclear (medical vs personal)
 - If family/personal event even with typos → bucket "other"
 - If clearly medical/ill even with typos → bucket "sick"
@@ -157,7 +158,11 @@ def _llm_bucket(
     if confidence < CONFIDENCE_LLM_FALLBACK:
         return None
 
+    from chat.services.leave.reason_value import is_boilerplate_leave_reason
+
     norm = canonicalize_leave_reason(str(out.get("normalized_reason") or "").strip())
+    if norm and is_boilerplate_leave_reason(norm):
+        norm = ""
     clarify = str(out.get("clarify_question_bn") or "").strip()
 
     logger.info(
@@ -175,15 +180,52 @@ def _llm_bucket(
     )
 
 
-def _apply_bucket_to_draft(draft: dict[str, Any], result: LeaveBucketResult) -> None:
-    if result.normalized_reason and len(result.normalized_reason) >= 3:
-        draft["reason"] = result.normalized_reason[:2000]
+def _apply_bucket_to_draft(
+    draft: dict[str, Any],
+    result: LeaveBucketResult,
+    *,
+    message: str = "",
+) -> None:
+    from chat.services.leave.reason_value import (
+        extract_reason_value,
+        is_boilerplate_leave_reason,
+        reason_grounded_in_message,
+    )
+
+    norm = str(result.normalized_reason or "").strip()
+    user_reason = str(draft.get("reason") or "").strip() or str(
+        extract_reason_value(message) or ""
+    ).strip()
+    if user_reason and norm and reason_grounded_in_message(norm, message):
+        if len(norm) >= 3 and not is_boilerplate_leave_reason(norm):
+            draft["reason"] = norm[:2000]
+    elif user_reason and not is_boilerplate_leave_reason(user_reason):
+        draft["reason"] = user_reason[:2000]
 
     if result.bucket == "other":
         lt = str(draft.get("leave_type") or "").lower()
         if lt in ("sick", "medical", "health"):
-            from chat.services.leave_draft_utils import invalidate_leave_type_for_reselect
+            from chat.services.leave_draft_utils import (
+                invalidate_leave_type_for_reselect,
+                resolve_explicit_wizard_leave_type,
+                stated_leave_type_from_draft,
+            )
 
+            last = str(draft.get("_last_user_message") or "")
+            reason = canonicalize_leave_reason(str(draft.get("reason") or ""))
+            stated = (
+                stated_leave_type_from_draft(draft)
+                or resolve_explicit_wizard_leave_type(last)
+            )
+            if (
+                stated == "sick"
+                and not reason_indicates_non_sick_leave(reason)
+                and not draft.get("_leave_type_reselect_required")
+            ):
+                draft["_leave_bucket"] = "sick"
+                draft["_leave_bucket_confidence"] = max(result.confidence, 0.85)
+                draft.pop("_leave_type_reselect_required", None)
+                return
             invalidate_leave_type_for_reselect(draft)
         else:
             draft.pop("_reason_implied", None)
@@ -192,11 +234,24 @@ def _apply_bucket_to_draft(draft: dict[str, Any], result: LeaveBucketResult) -> 
             clear_supporting_document_if_unneeded(draft)
     elif result.bucket == "sick":
         from chat.services.leave.normalization import infer_leave_type_from_text
+        from chat.services.leave_draft_utils import (
+            resolve_explicit_wizard_leave_type,
+            stated_leave_type_from_draft,
+            sync_payment_from_leave_type,
+        )
 
         if not draft.get("leave_type"):
-            inferred = infer_leave_type_from_text(str(draft.get("reason") or ""))
-            if inferred == "sick":
-                draft["leave_type"] = inferred
+            stated = stated_leave_type_from_draft(draft) or resolve_explicit_wizard_leave_type(
+                str(draft.get("_last_user_message") or "")
+            )
+            if stated == "sick":
+                draft["leave_type"] = "sick"
+                sync_payment_from_leave_type(draft)
+            else:
+                inferred = infer_leave_type_from_text(str(draft.get("reason") or ""))
+                if inferred == "sick":
+                    draft["leave_type"] = inferred
+                    sync_payment_from_leave_type(draft)
 
     draft["_leave_bucket"] = result.bucket
     draft["_leave_bucket_confidence"] = result.confidence
@@ -224,16 +279,65 @@ def classify_leave_bucket(
             source="cache",
         )
 
+    from chat.services.leave.reason_value import extract_reason_value, is_boilerplate_leave_reason
+
+    reason = str(draft.get("reason") or "").strip()
+    if reason and is_boilerplate_leave_reason(reason):
+        draft.pop("reason", None)
+        clear_leave_bucket_cache(draft)
+        reason = ""
+
+    try:
+        from chat.services.leave_draft_utils import (
+            resolve_explicit_wizard_leave_type,
+            stated_leave_type_from_draft,
+        )
+        from chat.services.workflow_navigation import is_leave_application_message
+
+        stated_lt = stated_leave_type_from_draft(draft) or resolve_explicit_wizard_leave_type(
+            message
+        )
+        if (
+            not reason
+            and is_leave_application_message(message)
+            and not extract_reason_value(message)
+        ):
+            if stated_lt == "sick":
+                result = LeaveBucketResult(
+                    bucket="sick",
+                    confidence=0.88,
+                    source="rules_explicit_type",
+                )
+            elif stated_lt in ("annual", "unpaid"):
+                result = LeaveBucketResult(
+                    bucket="other",
+                    confidence=0.88,
+                    source="rules_explicit_type",
+                )
+            else:
+                result = LeaveBucketResult(
+                    bucket="other",
+                    confidence=0.5,
+                    source="rules_application_only",
+                )
+            _apply_bucket_to_draft(draft, result, message=message)
+            return result
+    except Exception:
+        pass
+
     rules = _rules_bucket(draft)
     needs_llm = rules.confidence < CONFIDENCE_LLM_FALLBACK or rules.source == "rules_low"
 
-    if use_llm and needs_llm and trace_id:
+    has_user_reason = bool(str(draft.get("reason") or "").strip()) or bool(
+        extract_reason_value(message)
+    )
+    if use_llm and needs_llm and trace_id and has_user_reason:
         llm = _llm_bucket(draft, message=message, trace_id=trace_id)
         if llm:
-            _apply_bucket_to_draft(draft, llm)
+            _apply_bucket_to_draft(draft, llm, message=message)
             return llm
 
-    _apply_bucket_to_draft(draft, rules)
+    _apply_bucket_to_draft(draft, rules, message=message)
     return rules
 
 
@@ -245,8 +349,12 @@ def apply_leave_semantic_reconcile(
     use_llm: bool = True,
 ) -> LeaveBucketResult:
     """Reconcile leave_type + bucket after reason normalization."""
+    from chat.services.leave.reason_value import is_boilerplate_leave_reason
     from chat.services.leave_draft_utils import reconcile_leave_type_from_reason
 
+    if draft.get("reason") and is_boilerplate_leave_reason(str(draft.get("reason"))):
+        draft.pop("reason", None)
+        clear_leave_bucket_cache(draft)
     reconcile_leave_type_from_reason(draft)
     result = classify_leave_bucket(
         draft,

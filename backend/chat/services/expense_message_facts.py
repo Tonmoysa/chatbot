@@ -24,6 +24,8 @@ ExpenseMessageType = Literal[
     "expense_review_praise",
     "expense_submit_confirm",
     "expense_submit_success",
+    "expense_disambiguation",
+    "expense_confirm_prompt",
 ]
 ExpensePromptKind = Literal["category", "from_to", "more_lines", "collect"]
 
@@ -108,6 +110,95 @@ def build_summary_envelope(
             "warnings": list(warnings or []),
         },
     }
+
+
+def build_disambiguation_envelope(
+    template: str,
+    *,
+    items: list[dict[str, Any]],
+    lang: ReplyLang,
+    prompt_kind: str = "correction",
+) -> dict[str, Any]:
+    """Disambiguation / correction-failure prompts (amount, delete, remove)."""
+    body = (template or "").strip()
+    return {
+        "message_type": "expense_disambiguation",
+        "lang": lang,
+        "polishable_part": body,
+        "template_fallback": body,
+        "facts": {
+            "prompt_kind": prompt_kind,
+            "lines": [_line_fact(row) for row in items],
+        },
+    }
+
+
+def build_confirm_prompt_envelope(
+    template: str,
+    *,
+    items: list[dict[str, Any]],
+    lang: ReplyLang,
+    prompt_kind: str = "ordinal_amount",
+    target_index: int | None = None,
+    target_amount: float | None = None,
+) -> dict[str, Any]:
+    """Ordinal amount / delete confirm — facts locked before polish."""
+    body = (template or "").strip()
+    facts: dict[str, Any] = {
+        "prompt_kind": prompt_kind,
+        "lines": [_line_fact(row) for row in items],
+    }
+    if target_index is not None:
+        facts["target_index"] = int(target_index)
+    if target_amount is not None:
+        facts["target_amount"] = float(target_amount)
+    return {
+        "message_type": "expense_confirm_prompt",
+        "lang": lang,
+        "polishable_part": body,
+        "template_fallback": body,
+        "facts": facts,
+    }
+
+
+def disambiguation_facts_preserved(envelope: dict[str, Any], polished: str) -> bool:
+    from chat.services.message_polish_llm import facts_preserved
+
+    template = str(envelope.get("template_fallback") or "")
+    text = (polished or "").strip()
+    if not text:
+        return False
+    for row in (envelope.get("facts") or {}).get("lines") or []:
+        if not isinstance(row, dict):
+            continue
+        amt = row.get("amount")
+        if amt is not None and str(amt) not in text and f"{float(amt):g}" not in text:
+            return False
+        cat = str(row.get("category") or "").strip()
+        if cat and cat.lower() not in text.lower():
+            return False
+    return facts_preserved(template, text) if template else True
+
+
+def confirm_prompt_facts_preserved(envelope: dict[str, Any], polished: str) -> bool:
+    from chat.services.message_polish_llm import facts_preserved
+
+    template = str(envelope.get("template_fallback") or "")
+    text = (polished or "").strip()
+    if not text:
+        return False
+    facts = envelope.get("facts") or {}
+    target_amt = facts.get("target_amount")
+    if target_amt is not None:
+        amt_s = f"{float(target_amt):g}"
+        if amt_s not in text and str(target_amt) not in text:
+            return False
+    idx = facts.get("target_index")
+    if idx is not None:
+        line_no = int(idx) + 1
+        if str(line_no) not in text:
+            return False
+    return facts_preserved(template, text) if template else True
 
 
 def build_review_praise_envelope(
@@ -444,6 +535,33 @@ def submit_success_facts_preserved(envelope: dict[str, Any], polished: str) -> b
     if template:
         return facts_preserved(template, text)
     return bool(text.strip())
+
+
+def message_meta_for_disambiguation_or_confirm(
+    question: str,
+    *,
+    items: list[dict[str, Any]],
+    lang: ReplyLang,
+    prompt_kind: str,
+    message_type: ExpenseMessageType = "expense_disambiguation",
+    target_index: int | None = None,
+    target_amount: float | None = None,
+) -> dict[str, Any]:
+    if message_type == "expense_confirm_prompt":
+        return build_confirm_prompt_envelope(
+            question,
+            items=items,
+            lang=lang,
+            prompt_kind=prompt_kind,
+            target_index=target_index,
+            target_amount=target_amount,
+        )
+    return build_disambiguation_envelope(
+        question,
+        items=items,
+        lang=lang,
+        prompt_kind=prompt_kind,
+    )
 
 
 def prompt_envelope_facts_preserved(envelope: dict[str, Any], polished: str) -> bool:

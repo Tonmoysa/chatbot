@@ -109,6 +109,53 @@ def test_done_intent_llm_cached_per_trace(monkeypatch):
     assert len(calls) == 1
 
 
+def test_lunch_koro_after_submit_blocked():
+    from chat.services.expense.expense_fsm import finalize_expense_submission
+    from chat.services.expense.session_action_memory import (
+        looks_like_post_submit_expense_modification,
+        purge_stale_expense_draft_after_submit,
+    )
+
+    items = [
+        {"category": "Lunch", "amount": 120},
+        {"category": "Bus", "amount": 100, "from_location": "office", "to_location": "motijheel"},
+    ]
+    wf = finalize_expense_submission(
+        {
+            "expense_request": {
+                "active": True,
+                "stage": "review",
+                "items": items,
+                "incurred_date_iso": "2026-06-11",
+            }
+        },
+        reference_id="EXP-2026-BCA0E0",
+        items=items,
+        incurred_date_iso="2026-06-11",
+    )
+    assert "expense_request" not in wf
+    assert looks_like_post_submit_expense_modification(wf, "lunch 200 taka koro")
+    purged = purge_stale_expense_draft_after_submit(
+        {
+            **wf,
+            "expense_request": {
+                "active": True,
+                "stage": "review",
+                "items": items,
+            },
+        }
+    )
+    assert "expense_request" not in purged
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="lunch 200 taka koro",
+        trace_id="post-submit-edit",
+    )
+    q = str(pack.get("question") or "").lower()
+    assert "edit" in q or "submit" in q or "জমা" in q
+    assert float((pack.get("items") or [{}])[0].get("amount") or 0) != 200
+
+
 def test_edit_after_submit_not_collecting_prompt(monkeypatch):
     fixed = __import__("datetime").date(2026, 6, 9)
 

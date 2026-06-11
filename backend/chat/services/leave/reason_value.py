@@ -75,7 +75,8 @@ _FAMILY_REASON_RE = re.compile(
 _COMPOUND_LEAVE_APPLICATION_RE = re.compile(
     r"(?:"
     r"apply\s+korte|chacchi|chacci|chuti\s+lagbe|leave\s+lagbe|leave\s+apply|"
-    r"ekta\s+leave|leave\s+nite|chuti\s+nite|"
+    r"leave\s+chai|chuti\s+chai|leave\s+nite|chuti\s+nite|"
+    r"ekta\s+leave|"
     r"\d+\s*(?:din|diner|days?|দিন)\s+jonno"
     r")",
     re.I | re.UNICODE,
@@ -95,16 +96,61 @@ _LEAVE_REQUEST_PREFIX_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_DATE_OR_MONTH_IN_REASON_RE = re.compile(
+    r"\b(?:"
+    r"\d{1,2}(?:st|nd|rd|th)?|agami|tomorrow|kal|kalke|"
+    r"january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec|"
+    r"জানু|ফেব|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|সেপ্ট|অক্ট|নভে|ডিস"
+    r")\b",
+    re.I | re.UNICODE,
+)
+
+_REAL_LEAVE_CAUSE_RE = re.compile(
+    r"(?:"
+    r"famil|family|wedding|travel|tour|program|problem|osusto|sick|fever|medical|doctor|"
+    r"অসুস্থ|পরিবার|marriage|funeral|emergency|personal|waz|matha|pet|ghur"
+    r")",
+    re.I | re.UNICODE,
+)
+
 _BARE_SLOT_LABEL_RE = re.compile(
     r"^(?:"
     r"reason|why|cause|kar[oa]n|karon|কারণ|"
     r"tarikh|tarik|date|dates|din|day|days|"
     r"paid|unpaid|payment|salary|lwop|select\s*leave|"
     r"full|half|scope|duration|"
-    r"type|leave\s*type|sick|casual|annual"
+    r"type|leave\s*type|sick|casual|annual|anual"
     r")$",
     re.I | re.UNICODE,
 )
+
+_WIZARD_SLOT_PHRASE_RE = re.compile(
+    r"^(?:"
+    r"(?:anual|anul|anuall?|annual|sick|casual|unpaid|lwop|medical)(?:\s+leave)?|"
+    r"leave\s+without\s+pay|without\s+pay|"
+    r"(?:full|half)(?:\s+day)?|"
+    r"পুরো\s*দিন|হাফ\s*দিন"
+    r")$",
+    re.I | re.UNICODE,
+)
+
+
+def looks_like_wizard_slot_label(text: str) -> bool:
+    """True when text is a wizard slot token — never a leave reason."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _BARE_SLOT_LABEL_RE.match(raw) or _WIZARD_SLOT_PHRASE_RE.match(raw):
+        return True
+    try:
+        from chat.services.leave.normalization import looks_like_wizard_leave_type_answer
+
+        if looks_like_wizard_leave_type_answer(raw):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _clean_reason_candidate(text: str) -> str:
@@ -170,9 +216,18 @@ def is_boilerplate_leave_reason(reason: str) -> bool:
     raw = (reason or "").strip()
     if not raw:
         return True
+    if looks_like_wizard_slot_label(raw):
+        return True
     low = raw.lower()
     if _BOILERPLATE_REASON_RE.search(low):
         return True
+    try:
+        from chat.services.workflow_navigation import is_leave_application_message
+
+        if is_leave_application_message(raw):
+            return True
+    except Exception:
+        pass
     if len(raw) < 20 and _COMPOUND_LEAVE_APPLICATION_RE.search(raw):
         return True
     if len(raw) >= 20 and _COMPOUND_LEAVE_APPLICATION_RE.search(raw):
@@ -181,6 +236,12 @@ def is_boilerplate_leave_reason(reason: str) -> bool:
     if _LEAVE_INTENT_RE.search(raw) and _HEALTH_REASON_RE.search(raw):
         return True
     if _LEAVE_INTENT_RE.search(raw) and len(raw.split()) > 8:
+        return True
+    if (
+        _LEAVE_INTENT_RE.search(raw)
+        and _DATE_OR_MONTH_IN_REASON_RE.search(raw)
+        and not _REAL_LEAVE_CAUSE_RE.search(raw)
+    ):
         return True
     return False
 
@@ -199,20 +260,46 @@ def _sanitize_causal_reason_capture(capture: str, full_message: str) -> str | No
     return None
 
 
+def reason_grounded_in_message(reason: str, message: str) -> bool:
+    """True when the reason text is supported by the user's message (no LLM invention)."""
+    from chat.services.leave_draft_utils import canonicalize_leave_reason
+
+    norm = canonicalize_leave_reason((reason or "").strip())
+    msg = (message or "").strip()
+    if not norm or not msg:
+        return False
+    msg_l = msg.lower()
+    reason_l = norm.lower()
+    if reason_l in msg_l:
+        return True
+    tokens = [
+        t
+        for t in re.findall(r"[a-zA-Z\u0980-\u09FF]+", reason_l)
+        if len(t) >= 3
+    ]
+    if not tokens:
+        return False
+    return all(t in msg_l for t in tokens)
+
+
 def strip_ungrounded_reason(
     entities: dict[str, Any],
     message: str,
 ) -> dict[str, Any]:
-    """Drop LLM-invented boilerplate reasons; rules re-extract from full message."""
+    """Drop LLM-invented or boilerplate reasons not supported by the user message."""
     if not entities:
         return entities
     reason = str(entities.get("reason") or entities.get("description") or "").strip()
-    if not reason or not is_boilerplate_leave_reason(reason):
+    if not reason:
         return entities
-    out = dict(entities)
-    out.pop("reason", None)
-    out.pop("description", None)
-    return out
+    if is_boilerplate_leave_reason(reason) or not reason_grounded_in_message(
+        reason, message
+    ):
+        out = dict(entities)
+        out.pop("reason", None)
+        out.pop("description", None)
+        return out
+    return entities
 
 
 def extract_compound_review_reason(message: str) -> str | None:
@@ -366,7 +453,7 @@ def extract_reason_value(message: str, *, edit_context: bool = False) -> str | N
             return None
     except Exception:
         pass
-    if _BARE_SLOT_LABEL_RE.match(raw):
+    if _BARE_SLOT_LABEL_RE.match(raw) or looks_like_wizard_slot_label(raw):
         return None
     if _SIDE_QUESTION_IN_REASON_RE.search(raw):
         return None

@@ -100,7 +100,7 @@ def build_review_summary_body(
         lines = [
             review_header(reply),
             f"• Select Leave: {select_leave_label}",
-            f"• Leave type: {scope_txt}",
+            f"• Duration: {scope_txt}",
             f"• Dates: {start}" + (f" → {end}" if end != start else ""),
             f"• Reason: {reason}",
         ]
@@ -108,7 +108,7 @@ def build_review_summary_body(
         lines = [
             review_header(reply),
             f"• Select Leave: {select_leave_label}",
-            f"• Leave type: {scope_txt}",
+            f"• Duration: {scope_txt}",
             f"• Date: {start}" + (f" → {end}" if end != start else ""),
             f"• Reason: {reason}",
         ]
@@ -116,7 +116,7 @@ def build_review_summary_body(
         lines = [
             review_header(reply),
             f"• Select Leave: {select_leave_label}",
-            f"• Leave Type: {scope_txt}",
+            f"• পুরো/হাফ দিন: {scope_txt}",
             f"• তারিখ: {start}" + (f" → {end}" if end != start else ""),
             f"• কারণ: {reason}",
         ]

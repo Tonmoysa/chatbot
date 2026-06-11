@@ -96,6 +96,8 @@ class SessionSnapshot:
     expense_delete_verify_pending: bool
     leave_submit_confirm_pending: bool
     expense_submit_confirm_pending: bool
+    expense_submission_locked: bool      # CRM submit recorded — terminal for in-chat edits
+    leave_submission_locked: bool        # leave submitted+locked in session
     # Probes (pre-computed once)
     balance_probe: bool
     policy_interrupt: bool
@@ -108,6 +110,7 @@ class SessionSnapshot:
 **Important flags (bug prevention):**
 
 - `expense_domain_active = expense_active or has_suspended_expense or has_expense_draft`
+- When `expense_submission_locked`, stale open drafts **do not** count toward `expense_domain_active` (N56 purges them pre-router)
 - `leave_domain_active = leave_active or has_suspended_leave`
 - Ordinal/correction rules **must** use `expense_domain_active`, not only `expense_active`
 
@@ -173,6 +176,21 @@ class SessionTurnDecision:
 | P00 | `is_cancel` | CANCEL | UNKNOWN | `workflow_cancel` |
 | P01 | `duplicate_leave_choice_pending` | SLOT_ANSWER | LEAVE_REQUEST | `leave.duplicate_choice` |
 | P02 | `expense_delete_verify_pending` + yes/no | DELETE_CONFIRM | EXPENSE_CLAIM | `expense.turn_router` |
+| P02b | `expense_ordinal_amount_confirm_pending` + yes/no | CONFIRM_YES/NO | EXPENSE_CLAIM | `expense.turn_router` |
+| P02c | `expense_amount_correction_pending` | CORRECTION | EXPENSE_CLAIM | `expense.turn_router` |
+| **P48** | `expense_submission_locked` + `looks_like_post_submit_expense_modification` | any | META_QUESTION | EXPENSE_STATUS | `expense.session_action_memory` |
+
+> **Invariant I7:** P48 always runs **before** P10 — submitted expense lines cannot re-enter the correction path.
+
+### Tier 0.9 — Session meta + dual submit (MUST beat P03/P04 and P80)
+
+| ID | Predicate | Context | TurnKind | Intent | Handler |
+|----|-----------|---------|----------|--------|---------|
+| P43 | `wants_leave_meta_question` | any | META_QUESTION | REQUEST_STATUS | `leave.session_action_memory` |
+| P43 | `wants_expense_meta_question` | any | META_QUESTION | EXPENSE_STATUS | `expense.session_action_memory` |
+| P54 | `wants_ambiguous_workflow_submit_command` | leave_domain + expense_domain | CONTEXT_CLARIFICATION | UNKNOWN | `workflow_navigation` |
+
+> **Invariant I8:** P43/P54 always run **before** P03/P04 — `amar leave ki submit hoyeche?` is status meta, not a submit command.
 
 ### Tier 1 — Explicit commands (high confidence)
 
@@ -187,7 +205,7 @@ class SessionTurnDecision:
 
 | ID | Predicate | Context | TurnKind | Intent | Handler | Notes |
 |----|-----------|---------|----------|--------|---------|-------|
-| **P10** | `looks_like_expense_correction` | `expense_domain_active` | CORRECTION | EXPENSE_CLAIM | `expense.turn_router` | **শেষ expense**, ordinal, amount replace |
+| **P10** | `looks_like_expense_correction` | `expense_domain_active` AND NOT `expense_submission_locked` | CORRECTION | EXPENSE_CLAIM | `expense.turn_router` | **শেষ expense**, ordinal, amount replace |
 | P11 | `looks_like_suspended_leave_correction` AND NOT P10 | `has_suspended_leave` | CORRECTION | LEAVE_REQUEST | `leave_workflow` | expense+ordinal excluded |
 | P12 | `looks_like_leave_review_update` AND NOT P10 | `leave_review_pending` | CORRECTION | LEAVE_REQUEST | `leave_workflow` | |
 | P13 | `parse_edit_slot` / `_looks_like_slot_correction` | leave_domain | CORRECTION | LEAVE_REQUEST | `leave_workflow` | |
@@ -223,6 +241,15 @@ class SessionTurnDecision:
 
 > **Invariant I3:** P41 uses suspended draft when `expense_active=False` but `has_expense_draft` (step 20).
 
+### Tier 5b — Leave informational interrupts (before P80)
+
+| ID | Predicate | Context | TurnKind | Intent | Handler |
+|----|-----------|---------|----------|--------|---------|
+| P45 | `balance_probe` | leave_active | BALANCE_QUERY | LEAVE_BALANCE | `leave_balance` |
+| P45b | `needs_leave_goal_clarification` | leave_active | CONTEXT_CLARIFICATION | UNKNOWN | `message_context_clarity` |
+
+> **Invariant I6:** P45 / P45b run **before** P80 leave slot tokens (balance/meta vs slot answer).
+
 ### Tier 6 — Workflow switch / resume
 
 | ID | Predicate | Context | TurnKind | Intent | Handler |
@@ -232,7 +259,7 @@ class SessionTurnDecision:
 | P52 | `wants_resume_suspended_leave` | has_suspended_leave | RESUME_SUSPENDED | LEAVE_REQUEST | `workflow_suspend` |
 | P53 | `wants_resume_or_show_expense` | expense_domain | RESUME_SUSPENDED | EXPENSE_CLAIM | `expense_workflow` |
 
-### Pre-router navigation rows (N50–N55)
+### Pre-router navigation rows (N50–N56)
 
 These run **before** P00–P99 via `plan_pre_router_navigation` so the snapshot
 the classifier sees already reflects resume/restore/switch. The orchestrator
@@ -248,6 +275,7 @@ only persists each planned step and logs `rule` + legacy `log_step` name.
 | N54 | suspended expense + nothing active + resume/show expense | `restore_suspended_expense` |
 | N55a | leave in progress + expense query | `suspend_leave_for_workflow_switch` |
 | N55b | leave in progress + misrouted leave clear | `clear_suspended_leave` + `deactivate_leave_session` |
+| N56 | `expense_submission_locked` + stale active `expense_request` (same fingerprint as last submit; not `is_fresh_post_submit_expense_draft`) | `purge_stale_expense_draft_after_submit` → `deactivate_expense_session` |
 
 ### Tier 7 — Done collecting (AFTER correction tier)
 
@@ -395,6 +423,19 @@ Router `intent` field set হলে orchestrator **LLM intent skip** করব�
 | G13 | `reimbursement policy` | EXPENSE_CLAIM |
 | G14 | `শেষ` (alone, collecting, no expense noun) | CORRECTION |
 | G15 | `বাস ভাড়া ৮০→১২০` during leave collecting + suspended expense | EXPENSE_CLAIM not LEAVE_REQUEST |
+| G26 | `leave e jao` | leave_submission_locked, no suspended leave | P49 META (NOT P71 balance) |
+| G27 | `amar kalke chuti lagbe` | leave collecting, no reason in message | reason slot asked (NOT auto family program) |
+| G28 | `agami 15 august leave chai` → reason → `leave submit koro` | single-day, no full/half stated | SLOT_SCOPE asked (NOT auto full day) |
+| G29 | `amar leave ki submit hoyeche?` | leave collecting | P43 META (NOT P03 submit) |
+| G30 | `amar expense ki submit hoyeche?` | leave+expense both active | P43 expense META (NOT P80 slot) |
+| G31 | `okay submit koro` | leave+expense both active | P54 disambiguation (NOT P03 leave) |
+| G32 | `what is life?` | leave collecting (e.g. leave_type step) | P73 OUT_OF_SCOPE only (NOT leave wizard resume or chips) |
+| G33 | `bus 100 taka` (again) | expense collecting, Bus 100 already pending or routed | TURN_ADD_LINES — queue/route second bus (NOT edit/no-op) |
+| G34 | `bus hobe nah bki hobe` | expense pending Bus 100 (from/to open) | P10 CORRECTION — pending → Bike (NOT LLM/generic unclear) |
+| G35 | `bus update korte chacchi` | leave active + suspended expense | P10 expense CORRECTION (NOT P13 leave edit / leave_type slot) |
+| G36 | `again bus 100` / `bus 100 add koro` | from_to pending Bus 100 | queue second/third bus — ack shows all Bus lines (NOT deduped to one) |
+| G37 | `delete koro` / review summary | 5 draft lines (3 items + 2 pending buses) | delete lists all 5; summary/total uses `draft_line_rows_for_block` (570 Tk); no partial review footer on delete |
+| G38 | `delete koro` → `lunch` → `lunch 200 baad` | duplicate Lunch lines + pending Bus | bare delete → category disambiguation → remove one line; `lunch-200 delete` must not trigger pending-bus discard |
 
 ---
 
@@ -405,6 +446,12 @@ Router `intent` field set হলে orchestrator **LLM intent skip** করব�
 | Expense amount/ordinal correction | `expense/expense_confirm.py` → `looks_like_expense_correction` | P10 |
 | Expense done/submit/cancel | `expense/wizard_commands.py` | P04, P06, P60 |
 | Expense summary/review/meta | `expense/session_action_memory.py`, `expense_workflow.py` | P40–P43 |
+| Post-submit expense edit block | `expense/session_action_memory.py` → `looks_like_post_submit_expense_modification` | P48 |
+| Post-submit leave navigation (`leave e jao`) | `workflow_navigation.py` → `is_leave_navigation_phrase` | P49 |
+| Leave reason grounding (no LLM invention) | `leave/reason_value.py` → `reason_grounded_in_message` | entity pipeline + bucket |
+| Single-day scope (no auto full day) | `leave_draft_utils.py` → `apply_multi_day_scope_default`, `workflow_schema` SLOT_SCOPE | R06 (workflow schema; not session router) |
+| Expense submit terminal lock | `expense/expense_fsm.py` → `finalize_expense_submission` | N56 + execution |
+| Leave balance during wizard | `leave_balance_intent.py`, `leave/user_goal.py` | P45, P45b |
 | Leave confirm/defer | `leave_confirm.py` | P30–P33 |
 | Leave duplicate/overlap | `leave_meta_queries.py` | P20 |
 | Parallel leave block (active wizard) | `leave_meta_queries.py` → `should_block_parallel_leave_application` | R04 (workflow gate; not session router) |

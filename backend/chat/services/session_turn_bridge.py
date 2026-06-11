@@ -78,6 +78,10 @@ _LEGACY_SOURCE_SUFFIX = {
     "P33_defer_expense_submit": "+defer_expense_submit",
     "P44_pending_leave_show": "+pending_leave_show",
     "P42_leave_summary": "+leave_summary",
+    "P43_leave_meta": "+leave_meta",
+    "P43_expense_meta": "+expense_meta",
+    "P54_dual_workflow_submit": "+dual_workflow_submit",
+    "P49_post_submit_leave_nav": "+post_submit_leave_nav",
     "P54_leave_nav_no_session": "+leave_nav_no_session",
 }
 
@@ -498,11 +502,9 @@ def pipeline_effects_from_router_decision(
         ) or None
 
     if decision.turn_kind == TurnKind.CONTEXT_CLARIFICATION:
-
-        effects.context_clarification_message = build_context_clarification_message(
-
+        custom = str(decision.flags.get("clarification_prompt") or "").strip()
+        effects.context_clarification_message = custom or build_context_clarification_message(
             message, context_lines
-
         )
 
     if decision.turn_kind == TurnKind.OUT_OF_SCOPE:
@@ -532,6 +534,8 @@ def router_overrides_cold_start_intent(decision: SessionTurnDecision) -> bool:
         TurnKind.POLICY_QUERY,
 
         TurnKind.BALANCE_QUERY,
+
+        TurnKind.META_QUESTION,
 
         TurnKind.NEW_LEAVE,
 

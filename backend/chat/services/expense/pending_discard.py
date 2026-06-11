@@ -47,6 +47,22 @@ def wants_discard_incomplete_pending(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    from chat.services.expense.command_parser import parse_correction_plan
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+    from chat.services.expense_extraction import parse_category_token
+
+    if looks_like_expense_correction(raw):
+        plan = parse_correction_plan(raw)
+        if (
+            plan.remove_by_amount
+            or plan.remove_verb_first
+            or plan.remove_loose
+            or plan.remove_one
+            or plan.remove_category_suffix
+        ):
+            return False
+    if parse_category_token(raw) and _DISCARD_AMOUNT_RE.search(raw):
+        return False
     if _DISCARD_INCOMPLETE_RE.search(raw):
         return True
     return bool(_DISCARD_AMOUNT_RE.search(raw))

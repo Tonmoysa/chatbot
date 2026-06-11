@@ -175,6 +175,38 @@ def build_delete_entry_disambiguation_prompt(
     )
 
 
+def build_category_replace_disambiguation_prompt(
+    targets: list[dict[str, Any]],
+    *,
+    from_category: str,
+    to_category: str,
+    lang: str | None = None,
+) -> str:
+    """Ask which line to recategorize when multiple share the source category."""
+    reply_lang = normalize_reply_lang(lang)
+    lines = [_format_amount_target_line(t, lang=reply_lang) for t in targets]
+    body = "\n".join(lines)
+    if reply_lang == "en":
+        return (
+            f"Multiple **{from_category}** lines — which should become **{to_category}**?\n\n"
+            f"{body}\n\n"
+            f"Reply e.g. **`{from_category.lower()} 100 bike hobe`** or "
+            f"**`prothom {from_category.lower()} bike`**."
+        )
+    if reply_lang == "banglish":
+        return (
+            f"**{from_category}** — {len(targets)} ta line ache. Kontake **{to_category}** korbo?\n\n"
+            f"{body}\n\n"
+            f"Bolen — e.g. **`{from_category.lower()} 100 bike hobe`** ba "
+            f"**`prothom {from_category.lower()} bike`**."
+        )
+    return (
+        f"**{from_category}** — {len(targets)} টা line আছে। কোনটাকে **{to_category}** করব?\n\n"
+        f"{body}\n\n"
+        f"লিখুন — যেমন: **`{from_category.lower()} 100 bike hobe`**।"
+    )
+
+
 def build_amount_correction_disambiguation_prompt(
     targets: list[dict[str, Any]],
     new_amount: float,

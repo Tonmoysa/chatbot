@@ -38,6 +38,30 @@ def _slot_source(sv: SlotValue) -> str:
     return str(sv.source or "parser")
 
 
+def _sanitize_llm_entity_overlay(
+    ext: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    """Drop ungrounded LLM reason/leave_type before parser merge."""
+    from chat.services.leave.reason_value import strip_ungrounded_reason
+    from chat.services.leave_slot_extraction import explicit_leave_type_from_message
+
+    out = strip_ungrounded_reason(dict(ext or {}), message)
+    lt = str(out.get("leave_type") or "").strip().lower()
+    if not lt:
+        return out
+    explicit = explicit_leave_type_from_message(message)
+    if explicit:
+        out["leave_type"] = explicit
+        return out
+    from chat.services.leave.normalization import text_has_sick_signal
+
+    if lt == "sick" and text_has_sick_signal(message):
+        return out
+    out.pop("leave_type", None)
+    return out
+
+
 def merge_parser_and_llm(
     parser: LeaveSlotExtraction,
     llm_entities: dict[str, Any],
@@ -52,7 +76,10 @@ def merge_parser_and_llm(
     sources: dict[str, str] = {}
     from chat.services.leave.normalization import strip_ungrounded_leave_dates
 
-    ext = strip_ungrounded_leave_dates(dict(llm_entities or {}), message)
+    ext = _sanitize_llm_entity_overlay(
+        strip_ungrounded_leave_dates(dict(llm_entities or {}), message),
+        message,
+    )
 
     # Do not let LLM override parser-high payment/scope.
     if parser.leave_payment_category.confidence == "high":
@@ -175,6 +202,7 @@ def overlay_llm_semantic_fields(
     from chat.services.leave.reason_value import (
         extract_reason_value,
         is_boilerplate_leave_reason,
+        reason_grounded_in_message,
     )
 
     reason = str(
@@ -182,7 +210,14 @@ def overlay_llm_semantic_fields(
     ).strip()
     if reason and is_boilerplate_leave_reason(reason):
         reason = str(extract_reason_value(message) or "").strip()
-    if reason and len(reason) >= 3 and not is_boilerplate_leave_reason(reason):
+    if reason and not reason_grounded_in_message(reason, message):
+        reason = str(extract_reason_value(message) or "").strip()
+    if (
+        reason
+        and len(reason) >= 3
+        and not is_boilerplate_leave_reason(reason)
+        and reason_grounded_in_message(reason, message)
+    ):
         _set(extraction.reason, reason[:2000], confidence="high", source="llm_primary")
         sources["reason"] = "llm_primary"
 

@@ -11,7 +11,10 @@ from chat.services.expense.entity_merge import (
     parser_needs_llm_gap_fill,
 )
 from chat.services.expense.entity_pipeline import ExpenseEntityPipeline
-from chat.services.expense.llm_gate import expense_wizard_should_use_llm
+from chat.services.expense.llm_gate import (
+    expense_extraction_should_use_llm,
+    expense_wizard_should_use_llm,
+)
 from chat.services.expense_extraction import (
     ExpenseLineItem,
     ExtractionResult,
@@ -66,6 +69,11 @@ def test_overlay_llm_lines_when_parser_empty():
 def test_llm_gate_confirm_off_slot_on():
     assert expense_wizard_should_use_llm("yes", workflow_turn=TURN_CONFIRM) is False
     assert expense_wizard_should_use_llm("bus 50", workflow_turn=TURN_SLOT_ANSWER) is True
+
+
+def test_extraction_gate_forces_llm_on_long_compound():
+    msg = "ajke bus 120, lunch 180, nasta 40 taka"
+    assert expense_extraction_should_use_llm(msg, workflow_turn=TURN_CONFIRM)
 
 
 def test_pipeline_regex_path_without_llm():

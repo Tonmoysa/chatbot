@@ -90,6 +90,106 @@ def test_family_program_process_leave_turn_does_not_auto_pick_annual() -> None:
     assert SLOT_LEAVE_TYPE in missing
 
 
+def test_agami_august_leave_chai_no_reason_no_annual(monkeypatch) -> None:
+    """Cold-start application phrase must not invent reason or annual leave type."""
+    import datetime as dt
+
+    from chat.constants import INTENT_LEAVE_REQUEST
+    from chat.services.entity_extractor import EntityExtractor
+    from chat.services.leave.entity_pipeline import LeaveEntityPipeline
+    from chat.services.leave_workflow import process_leave_turn
+    from chat.services.leave_fsm import read_leave_state
+
+    class _BadLeaveLLM:
+        def is_configured(self):
+            return True
+
+        def chat_json(self, *, system_prompt, user_prompt, trace_id):
+            return {
+                "reason": "15 august leave chai",
+                "leave_type": "annual",
+                "start_date": "2026-08-15",
+            }
+
+    fixed = dt.date(2026, 6, 11)
+    monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: fixed)
+
+    msg = "agami 15 august leave chai"
+    pipe = LeaveEntityPipeline(EntityExtractor(llm=_BadLeaveLLM()))
+    entities = pipe.extract(
+        msg,
+        intent=INTENT_LEAVE_REQUEST,
+        context_lines=[],
+        trace_id="aug-chai",
+        use_llm=True,
+    ).entities
+    assert not entities.get("reason")
+    assert not entities.get("leave_type")
+    assert entities.get("start_date") == "2026-08-15"
+
+    pack = process_leave_turn(
+        workflow_state={},
+        message=msg,
+        entities=entities,
+        company_id="default",
+        trace_id="aug-chai",
+    )
+    draft = dict(read_leave_state(pack["workflow_state"]).get("draft") or {})
+    assert not draft.get("reason")
+    assert draft.get("leave_type") is None
+    question = str(pack.get("question") or "").lower()
+    assert "annual leave" in question or "leave without pay" in question
+    assert "15 august leave chai" not in question
+    missing = get_missing_slots(draft)
+    assert SLOT_LEAVE_TYPE in missing
+
+
+def test_sick_leave_nite_chai_after_balance_interrupt_keeps_sick_type() -> None:
+    """Explicit sick choice must survive semantic reconcile (not reset to annual/LWOP)."""
+    from chat.services.leave.reason_bucket_classifier import apply_leave_semantic_reconcile
+    from chat.services.leave_slots import SLOT_LEAVE_TYPE, SLOT_SCOPE
+    from chat.services.leave_workflow import apply_leave_state, process_leave_turn
+    from chat.services.leave_fsm import STATUS_ACTIVE, read_leave_state
+
+    wf = apply_leave_state(
+        {},
+        draft={
+            "start_date": "2026-06-12",
+            "_last_user_message": "amar kalke leave lagbe",
+        },
+        step=SLOT_LEAVE_TYPE,
+        status=STATUS_ACTIVE,
+    )
+    msg = "acch ami sick leave nite chai"
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message=msg,
+        entities={},
+        company_id="default",
+        trace_id="sick-nite-chai",
+    )
+    draft = dict(read_leave_state(pack["workflow_state"]).get("draft") or {})
+    assert draft.get("leave_type") == "sick"
+    assert draft.get("_stated_leave_type") == "sick"
+    assert draft.get("_leave_bucket") == "sick"
+    missing = get_missing_slots(draft)
+    assert SLOT_LEAVE_TYPE not in missing
+    assert SLOT_SCOPE in missing
+    question = str(pack.get("question") or "").lower()
+    assert "annual leave" not in question or "full day" in question
+    assert "full day" in question or "half day" in question
+
+    draft_only = {
+        "start_date": "2026-06-12",
+        "leave_type": "sick",
+        "_stated_leave_type": "sick",
+        "_last_user_message": msg,
+    }
+    apply_leave_semantic_reconcile(draft_only, message=msg, use_llm=False)
+    assert draft_only.get("leave_type") == "sick"
+
+
 def test_bengali_route_strips_amount_from_destination() -> None:
     msg = "আজকে উত্তরা থেকে আগারগাঁও ৭০ টাকা"
     pre = preprocess_expense_message(msg)

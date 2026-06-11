@@ -105,6 +105,19 @@ _CAT_HOBE_RE = re.compile(
     re.I,
 )
 
+# "Lunch · 120 Tk eta 200 hobe" — user echoes a disambiguation line
+_LINE_HINT_AMOUNT_HOBE_RE = re.compile(
+    rf"(?P<cat>{_CATEGORY_TOKEN})"
+    r"\s*[·•]\s*"
+    r"(?:—|–|-)?\s*"
+    r"(?P<hint>\d+(?:[.,]\d{1,2})?)\s*(?:Tk|টাকা|taka|tk)?"
+    r".{0,28}?"
+    r"(?:eta|eita|এটা|seta|se|that)\s*"
+    r"(?P<new>\d+(?:[.,]\d{1,2})?)\s*(?:Tk|টাকা|taka|tk)?\s*"
+    r"(?:hobe|habe|hoy|kor\w*)",
+    re.I | re.UNICODE,
+)
+
 # "ekhon je lunch ta ache eta 155 hobe" / "je lunch ache seta 150 hobe"
 _CONTEXTUAL_CAT_AMOUNT_HOBE_RE = re.compile(
     rf"(?P<cat>{_CATEGORY_TOKEN}|bos|bas)"
@@ -116,7 +129,7 @@ _CONTEXTUAL_CAT_AMOUNT_HOBE_RE = re.compile(
 )
 
 _CAT_AMT_BAAD_RE = re.compile(
-    rf"(?P<cat>{_CATEGORY_TOKEN}|rtain|rtrain|tran|trin)\s+"
+    rf"(?P<cat>{_CATEGORY_TOKEN}|rtain|rtrain|tran|trin)[-\s]+"
     r"(?P<amt>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*"
     r"(?:baad|bad|বাদ|remove|delete)",
     re.I,
@@ -168,8 +181,12 @@ _ADD_RE = re.compile(
     r"|"
     rf"(?P<cat2>{_CATEGORY_TOKEN})\s+"
     r"(?:add|যোগ|jog)\s+"
-    r"(?P<amt2>\d+(?:[.,]\d{1,2})?))"
-    ,
+    r"(?P<amt2>\d+(?:[.,]\d{1,2})?)"
+    r"|"
+    rf"(?P<cat3>{_CATEGORY_TOKEN})\s+e\s+"
+    r"(?P<amt3>\d+(?:[.,]\d{1,2})?)\s*(?:টাকা|taka|tk)?\s*"
+    r"(?:add|যোগ|jog)"
+    r")",
     re.I,
 )
 
@@ -238,6 +255,15 @@ _REPLACE_SETAKE_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+# "bus hobe na bike hobe" / "bus hobe nah bki hobe" — category swap with negation
+_REPLACE_HOBE_NA_RE = re.compile(
+    rf"(?P<from_cat>{_CATEGORY_TOKEN}|bos|bas)\s+"
+    r"(?:hobe|habe|hoy|হবে|হয়)\s+"
+    r"(?:na|nah|না|নাহ)\s+"
+    rf"(?P<to_cat>{_CATEGORY_TOKEN}|bos|bas|bki|baik|baike|bike)\b",
+    re.I | re.UNICODE,
+)
+
 # "use 400 instead of 4000" / "400 instead of 4000" — amount-only swap on draft lines.
 _AMOUNT_INSTEAD_RE = re.compile(
     r"(?:"
@@ -254,6 +280,7 @@ _CATEGORY_REPLACE_PATTERNS = (
     _REPLACE_TA_CAT_RE,
     _REPLACE_KE_KORO_RE,
     _REPLACE_SETAKE_RE,
+    _REPLACE_HOBE_NA_RE,
 )
 
 
@@ -271,6 +298,9 @@ def _normalize_correction_message(message: str) -> str:
     text = re.sub(r"(?<!\w)বাস(?!\w)", "bus", text, flags=re.UNICODE)
     text = re.sub(r"মেট্রো\s*রেল", "metro rail", text, flags=re.I | re.UNICODE)
     text = re.sub(r"নাস্তা", "snack", text, flags=re.UNICODE)
+    text = re.sub(r"\bbki\b", "bike", text, flags=re.I)
+    text = re.sub(r"\bbaik\b", "bike", text, flags=re.I)
+    text = re.sub(r"\bbaike\b", "bike", text, flags=re.I)
     return _CORRECTION_TYPO_RE.sub("bus", text)
 
 
@@ -347,7 +377,6 @@ def looks_like_new_expense_during_pending_slot(
 
     Example: pending Bus 100 (route open) + ``lunch 150`` → new line, not correction.
     """
-    del block, items
     step = (pending_step or "").strip().lower()
     if step not in ("category", "from_to"):
         return False
@@ -357,6 +386,13 @@ def looks_like_new_expense_during_pending_slot(
     if step == "from_to" and _looks_like_route_answer(text):
         return False
     if looks_like_expense_correction(text):
+        return False
+    from chat.services.expense.command_parser import parse_correction_plan
+
+    plan = parse_correction_plan(text, item_count=len(items or []))
+    if plan.add_amounts or plan.update_amounts or plan.amount_replacements:
+        return False
+    if plan.set_amounts and not _is_bare_fresh_category_amount_claim(text):
         return False
     ext = extract_expense_items(text)
     if len(ext.items) != 1 or ext.malformed:
@@ -378,7 +414,14 @@ def looks_like_new_expense_during_pending_slot(
         return abs(pending_amt - new_amt) >= 0.01
     pending_cat = str(pending.get("category") or "").strip().lower()
     new_cat = str(item.category or "").strip().lower()
-    return bool(new_cat and new_cat != pending_cat)
+    if not new_cat:
+        return False
+    if re.search(r"\b(again|abar|arobar|another|extra|new|add|যোগ|jog)\b", text, re.I):
+        return True
+    if new_cat != pending_cat:
+        return True
+    # Same category while route slot is open — fresh ``bus 100`` adds another line.
+    return _is_bare_fresh_category_amount_claim(text)
 
 
 def parse_category_slot_answer(message: str) -> str | None:
@@ -440,11 +483,48 @@ def _is_fresh_multi_category_expense_claim(message: str) -> bool:
     return True
 
 
+def wants_expense_draft_edit_intent(message: str) -> bool:
+    """
+  User wants to edit the expense draft (not leave slots).
+
+  Examples: ``bus update korte chacchi``, ``lunch change korte chai``.
+  """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = _normalize_correction_message(raw)
+    has_edit_verb = bool(
+        re.search(
+            r"\b(edit|change|update|modify|correct|fix|badl|poriborto|আপডেট|সংশোধন|ঠিক\s*কর)\b",
+            low,
+            re.I | re.UNICODE,
+        )
+        or re.search(
+            r"\b(korte\s+chacchi|korte\s+chai|korbo|korben|chacci|lagbe)\b",
+            low,
+            re.I | re.UNICODE,
+        )
+    )
+    if not has_edit_verb:
+        return False
+    if re.search(
+        rf"\b({_CATEGORY_TOKEN}|bos|bas|expense|খরচ|kharcha|khoroch|line|entry)\b",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return True
+    return bool(
+        re.search(r"\b(expense|খরচ|kharcha|khoroch)\b", low, re.I | re.UNICODE)
+    )
+
+
 def looks_like_expense_correction(message: str) -> bool:
     """Inline review edits (amount change, remove line, add line)."""
     low = _normalize_correction_message(message)
     if not low.strip():
         return False
+    if wants_expense_draft_edit_intent(message):
+        return True
     if _is_bare_fresh_category_amount_claim(message):
         return False
     if parse_bare_amount_correction(message) is not None:
@@ -459,6 +539,7 @@ def looks_like_expense_correction(message: str) -> bool:
         or _REPLACE_TA_CAT_RE.search(low)
         or _REPLACE_KE_KORO_RE.search(low)
         or _REPLACE_SETAKE_RE.search(low)
+        or _REPLACE_HOBE_NA_RE.search(low)
         or _AMOUNT_INSTEAD_RE.search(low)
     ):
         return True
@@ -762,23 +843,24 @@ def is_confirmation_no(message: str) -> bool:
     return False
 
 
+def expense_line_fingerprint(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Identity for one draft line — allows multiple same category/amount with different routes."""
+    try:
+        amt = round(float(row.get("amount") or 0), 2)
+    except (TypeError, ValueError):
+        amt = 0.0
+    return (
+        str(row.get("category") or "").strip().lower(),
+        amt,
+        str(row.get("from_location") or "").strip().lower(),
+        str(row.get("to_location") or "").strip().lower(),
+        str(row.get("notes") or "").strip().lower(),
+    )
+
+
 def dedupe_expense_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop accidental duplicate lines (same category + amount)."""
-    seen: set[tuple[str, float]] = set()
-    out: list[dict[str, Any]] = []
-    for row in items:
-        cat = str(row.get("category") or "").lower()
-        try:
-            amt = round(float(row.get("amount") or 0), 2)
-        except (TypeError, ValueError):
-            out.append(dict(row))
-            continue
-        key = (cat, amt)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(dict(row))
-    return out
+    """Shallow copy only — identical lines are allowed (unlimited entries per category)."""
+    return [dict(row) for row in items]
 
 
 def duplicate_reentry_notice(lang: str | None = None) -> str:
@@ -1028,16 +1110,13 @@ def build_correction_failure_notice(
         from chat.services.expense.confusion_handler import (
             build_delete_entry_disambiguation_prompt,
         )
-        from chat.services.expense_workflow import format_expense_summary
+        from chat.services.expense.delete_disambiguation_pending import (
+            mark_delete_disambiguation_pending,
+        )
 
-        prompt = build_delete_entry_disambiguation_prompt(items, block, lang=lang)
-        if block:
-            inc = str(block.get("incurred_date_iso") or "")
-            if inc and items:
-                prompt += "\n\n" + format_expense_summary(
-                    items, incurred_date_iso=inc, lang=lang
-                )
-        return prompt
+        if block is not None:
+            mark_delete_disambiguation_pending(block)
+        return build_delete_entry_disambiguation_prompt(items, block, lang=lang)
 
     bare_amt = parse_bare_amount_correction(message)
     if bare_amt is not None:
@@ -1056,7 +1135,37 @@ def build_correction_failure_notice(
     from chat.services.expense.command_parser import parse_correction_plan
 
     plan = parse_correction_plan(message, item_count=len(items))
-    for cat in plan.remove_verb_first:
+    for cat, rm_amt in plan.remove_by_amount:
+        from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+        target_amt = round(float(rm_amt), 2)
+        matches = [
+            t
+            for t in list_amount_correction_targets(items, block)
+            if str(t.get("category") or "").strip().lower() == cat.lower()
+            and abs(round(float(t.get("amount") or 0), 2) - target_amt) < 0.01
+        ]
+        if len(matches) > 1:
+            from chat.services.expense.confusion_handler import (
+                build_remove_disambiguation_prompt,
+            )
+            from chat.services.expense.delete_disambiguation_pending import (
+                mark_delete_disambiguation_pending,
+            )
+
+            rows = [
+                {
+                    "category": str(t.get("category") or ""),
+                    "amount": float(t.get("amount") or 0),
+                    "from_location": str(t.get("from_location") or ""),
+                    "to_location": str(t.get("to_location") or ""),
+                }
+                for t in matches
+            ]
+            if block is not None:
+                mark_delete_disambiguation_pending(block)
+            return build_remove_disambiguation_prompt(cat, rows, lang=lang)
+    for cat in plan.remove_verb_first + plan.remove_loose:
         matches = [
             row
             for row in items
@@ -1066,15 +1175,69 @@ def build_correction_failure_notice(
             from chat.services.expense.confusion_handler import (
                 build_remove_disambiguation_prompt,
             )
+            from chat.services.expense.delete_disambiguation_pending import (
+                mark_delete_disambiguation_pending,
+            )
 
+            if block is not None:
+                mark_delete_disambiguation_pending(block)
             return build_remove_disambiguation_prompt(cat, matches, lang=lang)
+    from chat.services.expense.confusion_handler import list_amount_correction_targets
+
     for pattern in _CATEGORY_REPLACE_PATTERNS:
         m = pattern.search(low)
         if not m or "from_cat" not in m.groupdict():
             continue
         from_cat = normalize_category(m.group("from_cat"))
-        if not _category_present(items, from_cat):
+        to_cat = normalize_category(m.group("to_cat")) if m.groupdict().get("to_cat") else ""
+        targets = [
+            t
+            for t in list_amount_correction_targets(items, block)
+            if str(t.get("category") or "").strip().lower() == from_cat.lower()
+        ]
+        if len(targets) > 1 and to_cat:
+            from chat.services.expense.confusion_handler import (
+                build_category_replace_disambiguation_prompt,
+            )
+
+            return build_category_replace_disambiguation_prompt(
+                targets,
+                from_category=from_cat,
+                to_category=to_cat,
+                lang=lang,
+            )
+        if not targets and not _category_present(items, from_cat):
             return replace_not_found_notice(from_cat, lang=lang)
+    if wants_expense_draft_edit_intent(message):
+        from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+        targets = list_amount_correction_targets(items, block)
+        if targets:
+            lines = [
+                f"- **{t.get('category')}** · **{float(t.get('amount') or 0):g} Tk**"
+                for t in targets
+            ]
+            body = "\n".join(lines)
+            if lang == "en":
+                return (
+                    "Which expense line should I update?\n\n"
+                    f"{body}\n\n"
+                    "Examples: **`bus 100 bike hobe`**, **`lunch ta snack hobe`**, "
+                    "**`remove snack`**."
+                )
+            if lang == "banglish":
+                return (
+                    "Kon expense line update korbo?\n\n"
+                    f"{body}\n\n"
+                    "Example: **`bus 100 bike hobe`**, **`lunch ta snack hobe`**, "
+                    "**`snack baad daw`**."
+                )
+            return (
+                "কোন expense line আপডেট করব?\n\n"
+                f"{body}\n\n"
+                "উদাহরণ: **`bus 100 bike hobe`**, **`lunch ta snack hobe`**, "
+                "**`snack baad daw`**।"
+            )
     return correction_unclear_notice(lang)
 
 

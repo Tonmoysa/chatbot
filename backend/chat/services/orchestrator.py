@@ -404,7 +404,7 @@ def _apply_pre_router_navigation(
     is_cancel_now: bool,
     trace_id: str,
 ) -> dict[str, Any]:
-    """Execute the router-owned pre-router navigation plan (rows N50–N55).
+    """Execute the router-owned pre-router navigation plan (rows N50–N56).
 
     Pattern matching + priority live in
     ``session_turn_router.plan_pre_router_navigation`` — this seam only
@@ -421,10 +421,16 @@ def _apply_pre_router_navigation(
 
 
 def _attach_ui_actions(
-    envelope: dict[str, Any], workflow_state: dict[str, Any] | None
+    envelope: dict[str, Any],
+    workflow_state: dict[str, Any] | None,
+    *,
+    suppress_wizard_actions: bool = False,
 ) -> dict[str, Any]:
     resp = envelope.setdefault("response", {})
-    resp["actions"] = build_ui_actions(workflow_state)
+    if suppress_wizard_actions:
+        resp["actions"] = []
+    else:
+        resp["actions"] = build_ui_actions(workflow_state)
     return envelope
 
 
@@ -550,6 +556,46 @@ class ChatOrchestrator:
                 "_session_id": sid,
             }
 
+        if "post_submit_leave_nav" in src:
+            from chat.services.workflow_navigation import format_post_submit_leave_locked_message
+
+            msg = format_post_submit_leave_locked_message(wf)
+            return {
+                "intent": INTENT_REQUEST_STATUS,
+                "decision": {"outcome": "INFORMATIONAL", "reason": msg},
+                "response": {"message": msg, "status": "success", "request_id": ""},
+                "status": "success",
+                "_session_id": sid,
+            }
+
+        if "leave_meta" in src:
+            from chat.services.leave.session_action_memory import format_leave_meta_answer
+
+            msg = format_leave_meta_answer(wf, message)
+            return {
+                "intent": INTENT_REQUEST_STATUS,
+                "decision": {"outcome": "INFORMATIONAL", "reason": msg},
+                "response": {"message": msg, "status": "success", "request_id": ""},
+                "status": "success",
+                "_session_id": sid,
+            }
+
+        if "expense_meta" in src:
+            from chat.services.expense.session_action_memory import format_meta_question_answer
+            from chat.services.translator import detect_user_language
+
+            msg = format_meta_question_answer(
+                wf, message, lang=detect_user_language(message)
+            )
+            if msg:
+                return {
+                    "intent": INTENT_EXPENSE_STATUS,
+                    "decision": {"outcome": "INFORMATIONAL", "reason": msg},
+                    "response": {"message": msg, "status": "success", "request_id": ""},
+                    "status": "success",
+                    "_session_id": sid,
+                }
+
         if "cancel_expense_verify" in src:
             from chat.services.expense.expense_confirm import is_confirmation_yes
 
@@ -634,9 +680,6 @@ class ChatOrchestrator:
             from chat.services.leave_policies import get_company_leave_policy
             from chat.services.leave_slots import generate_question, get_missing_slots
 
-            if is_confirmation_yes(message):
-                return None
-
             st = read_leave_state(wf)
             draft = dict(st.get("draft") or {})
             policy = get_company_leave_policy(
@@ -669,6 +712,8 @@ class ChatOrchestrator:
             wf = mark_review_pending(wf, draft)
             session.workflow_state = wf
             session.save(update_fields=["workflow_state", "updated_at"])
+            if is_confirmation_yes(message):
+                return None
             msg = build_deferred_leave_return_prompt(draft, message=message)
             return {
                 "intent": INTENT_LEAVE_REQUEST,
@@ -840,11 +885,6 @@ class ChatOrchestrator:
 
         from chat.services.expense.wizard_commands import wants_cancel_expense_command
 
-        from chat.services.expense.session_action_memory import (
-            format_submitted_expense_edit_blocked_answer,
-            looks_like_submitted_expense_correction_attempt,
-        )
-
         if is_duplicate_leave_choice_pending(wf_state):
             dup_pack = handle_duplicate_leave_choice_turn(wf_state, message)
             if dup_pack and dup_pack.get("duplicate_choice") == "continue":
@@ -926,33 +966,6 @@ class ChatOrchestrator:
                     },
                     "response": {
                         "message": msg_early,
-                        "status": "success",
-                        "request_id": "",
-                    },
-                    "status": "success",
-                    "_session_id": session.session_id,
-                },
-                wf_state,
-            )
-
-        if looks_like_submitted_expense_correction_attempt(wf_state, message):
-            msg_block = format_submitted_expense_edit_blocked_answer(
-                wf_state, lang=detect_user_language(message)
-            )
-            self.memory.append(session, "user", message)
-            self.memory.append(session, "assistant", msg_block)
-            return _attach_ui_actions(
-                {
-                    "trace_id": trace_id,
-                    "intent": INTENT_EXPENSE_CLAIM,
-                    "entities": {},
-                    "decision": {
-                        "outcome": "INFORMATIONAL",
-                        "reason": msg_block,
-                        "rules_applied": ["EXPENSE_SUBMITTED_NO_EDIT"],
-                    },
-                    "response": {
-                        "message": msg_block,
                         "status": "success",
                         "request_id": "",
                     },
@@ -1044,9 +1057,14 @@ class ChatOrchestrator:
                 wf_state,
             )
 
+        from chat.services.workflow_navigation import is_leave_navigation_phrase
+
         if (
             is_leave_submission_locked(wf_state)
-            and _should_short_circuit_submitted_leave(message)
+            and (
+                _should_short_circuit_submitted_leave(message)
+                or is_leave_navigation_phrase(message)
+            )
             and not is_expense_in_progress(wf_state)
         ):
             st_locked = read_leave_state(wf_state)
@@ -1436,6 +1454,14 @@ class ChatOrchestrator:
                     log_step(trace_id, "leave_wizard_paused_for_policy", {})
                 leave_workflow_interrupt = True
             elif intent == INTENT_LEAVE_BALANCE:
+                if (
+                    is_leave_collecting(wf_state)
+                    or is_awaiting_leave_confirmation(wf_state)
+                ) and not is_leave_paused(wf_state):
+                    session.workflow_state = pause_leave_session(wf_state)
+                    session.save(update_fields=["workflow_state", "updated_at"])
+                    wf_state = session.workflow_state or {}
+                    log_step(trace_id, "leave_wizard_paused_for_balance", {})
                 leave_workflow_interrupt = True
             elif intent == INTENT_UNKNOWN:
                 if not policy_complaint and (
@@ -1615,10 +1641,15 @@ class ChatOrchestrator:
             or _submitted_edit_block(wf_gate, message)
         )
 
-        from chat.services.leave_confirm import is_confirmation_yes as leave_is_confirmation_yes
+        from chat.services.leave_confirm import (
+            is_confirmation_yes as leave_is_confirmation_yes,
+            wants_leave_submit_command,
+        )
 
         leave_confirm_turn = (
             is_awaiting_leave_confirmation(wf_gate) and leave_is_confirmation_yes(message)
+        ) or (
+            is_leave_in_progress(wf_gate) and wants_leave_submit_command(message)
         )
         if leave_confirm_turn:
             intent = INTENT_LEAVE_REQUEST
@@ -1790,10 +1821,7 @@ class ChatOrchestrator:
                     session.save(update_fields=["workflow_state", "updated_at"])
                     wf_state = wf_dup
                     log_step(trace_id, "duplicate_leave_choice_pending_marked", {})
-        elif (
-            session_router_effects.context_clarification_message
-            and not wizard_active_for_router
-        ):
+        elif session_router_effects.context_clarification_message:
             context_clarification_msg = (
                 session_router_effects.context_clarification_message
             )
@@ -1852,9 +1880,9 @@ class ChatOrchestrator:
             and not _is_policy_interrupt_message(message)
         )
         from chat.services.expense.entity_pipeline import ExpenseEntityPipeline
-        from chat.services.expense.llm_gate import expense_wizard_should_use_llm
+        from chat.services.expense.llm_gate import expense_extraction_should_use_llm
         from chat.services.leave.entity_pipeline import LeaveEntityPipeline
-        from chat.services.leave.llm_gate import leave_wizard_should_use_llm
+        from chat.services.leave.llm_gate import leave_extraction_should_use_llm
 
         expense_pipe_result = None
         leave_pipeline_active = (
@@ -1894,12 +1922,8 @@ class ChatOrchestrator:
             )
         )
         if leave_pipeline_active:
-            use_llm = not (
-                is_leave_in_progress(wf_ent)
-                and workflow_turn is not None
-                and not leave_wizard_should_use_llm(
-                    message, workflow_turn=workflow_turn
-                )
+            use_llm = leave_extraction_should_use_llm(
+                message, workflow_turn=workflow_turn
             )
             pipe_result = LeaveEntityPipeline(self.entities).extract(
                 message,
@@ -1920,12 +1944,8 @@ class ChatOrchestrator:
                 {"use_llm": use_llm, "field_sources": pipe_result.field_sources},
             )
         elif expense_pipeline_active:
-            use_llm = not (
-                is_expense_in_progress(wf_ent)
-                and workflow_turn is not None
-                and not expense_wizard_should_use_llm(
-                    message, workflow_turn=workflow_turn
-                )
+            use_llm = expense_extraction_should_use_llm(
+                message, workflow_turn=workflow_turn
             )
             expense_pipe_result = ExpenseEntityPipeline(self.entities).extract(
                 message,
@@ -2037,20 +2057,23 @@ class ChatOrchestrator:
         leave_collecting_blocked = False
         expense_collecting_blocked = False
         wf_leave = getattr(session, "workflow_state", None) or {}
-        run_leave_turn = (
-            intent == INTENT_LEAVE_REQUEST and not leave_workflow_interrupt
-        ) or (
-            is_leave_in_progress(wf_leave)
-            and workflow_turn is not None
-            and is_workflow_continuation_turn(workflow_turn)
-            and intent
-            not in (
-                INTENT_EXPENSE_DAY_SUMMARY,
-                INTENT_EXPENSE_STATUS,
-                INTENT_REQUEST_STATUS,
+        run_leave_turn = not general_out_of_scope and (
+            (
+                intent == INTENT_LEAVE_REQUEST and not leave_workflow_interrupt
             )
-            and not leave_workflow_interrupt
-            and not leave_side_interrupt
+            or (
+                is_leave_in_progress(wf_leave)
+                and workflow_turn is not None
+                and is_workflow_continuation_turn(workflow_turn)
+                and intent
+                not in (
+                    INTENT_EXPENSE_DAY_SUMMARY,
+                    INTENT_EXPENSE_STATUS,
+                    INTENT_REQUEST_STATUS,
+                )
+                and not leave_workflow_interrupt
+                and not leave_side_interrupt
+            )
         )
         if (
             not run_leave_turn
@@ -2095,7 +2118,11 @@ class ChatOrchestrator:
             leave_collecting_blocked = not bool(lv_pack.get("confirmed_submit"))
             if lv_pack.get("confirmed_submit"):
                 entities["leave_workflow_confirmed"] = True
-        elif is_leave_in_progress(wf_leave) and not leave_workflow_interrupt:
+        elif (
+            is_leave_in_progress(wf_leave)
+            and not leave_workflow_interrupt
+            and not general_out_of_scope
+        ):
             leave_collecting_blocked = True
         log_step(
             trace_id,
@@ -2529,6 +2556,7 @@ class ChatOrchestrator:
             if (
                 leave_collecting_blocked
                 and not leave_workflow_interrupt
+                and not general_out_of_scope
                 and intent
                 not in (INTENT_EXPENSE_DAY_SUMMARY, INTENT_EXPENSE_STATUS)
             ):
@@ -2809,20 +2837,12 @@ class ChatOrchestrator:
                     ),
                 )
                 rstatus = "success"
-                wf_submitted = save_expense_last_submission(
+                from chat.services.expense.expense_fsm import finalize_expense_submission
+
+                wf_submitted = finalize_expense_submission(
                     getattr(session, "workflow_state", None) or {},
                     reference_id=sub_ref,
                     items=list(entities.get("expense_items") or []),
-                    incurred_date_iso=str(entities.get("expense_incurred_date") or ""),
-                )
-                from chat.services.expense.session_action_memory import (
-                    record_expense_submitted,
-                )
-
-                wf_submitted = record_expense_submitted(
-                    wf_submitted,
-                    items=list(entities.get("expense_items") or []),
-                    reference_id=sub_ref,
                     incurred_date_iso=str(entities.get("expense_incurred_date") or ""),
                 )
                 if should_restore_leave_after_expense_submit(
@@ -3126,6 +3146,7 @@ class ChatOrchestrator:
                 and not response_finalized
                 and not leave_terminal_turn
                 and not policy_complaint
+                and not general_out_of_scope
                 and is_leave_in_progress(getattr(session, "workflow_state", None) or {})
             ):
                 from chat.services.policy_intent_helpers import (
@@ -3164,6 +3185,7 @@ class ChatOrchestrator:
                 not leave_terminal_turn
                 and leave_side_interrupt
                 and not policy_complaint
+                and not general_out_of_scope
                 and is_leave_in_progress(getattr(session, "workflow_state", None) or {})
                 and (
                     not leave_workflow_interrupt
@@ -3213,6 +3235,7 @@ class ChatOrchestrator:
         self.memory.append(session, "user", message)
         self.memory.append(session, "assistant", msg)
 
+        oos_only = "OUT_OF_SCOPE_GENERAL" in list(decision.get("rules_applied") or [])
         return _attach_ui_actions(
             {
                 "trace_id": trace_id,
@@ -3229,6 +3252,7 @@ class ChatOrchestrator:
                 "_session_id": session.session_id,
             },
             getattr(session, "workflow_state", None) or {},
+            suppress_wizard_actions=oos_only,
         )
 
     @staticmethod
@@ -3513,6 +3537,14 @@ def _asks_recent_leave_submission(message: str) -> bool:
         or re.search(r"\bki\s+(submit|joma)\b", low)
         or re.search(r"(leave|chuti|chhuti|ছুটি|request).{0,35}(submit|joma)\s+hoyeche", low)
         or re.search(r"(submit|joma)\s+hoyeche", low)
+        or re.search(
+            r"(?:apply|submit|joma|জমা).{0,20}(?:korechi|korchi|kor[eo]chi)",
+            low,
+        )
+        or re.search(
+            r"(?:ki|kono).{0,30}(?:leave|chuti|chhuti|ছুটি).{0,30}(?:apply|submit|joma)",
+            low,
+        )
     )
 
 

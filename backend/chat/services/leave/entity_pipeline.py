@@ -179,9 +179,12 @@ class LeaveEntityPipeline:
             strip_ungrounded_payment_category,
         )
 
+        from chat.services.leave.reason_value import strip_ungrounded_reason
+
         ent = strip_ungrounded_payment_category(ent, message)
         ent = strip_ungrounded_day_scope(ent, message)
         ent = strip_ungrounded_leave_dates(ent, message)
+        ent = strip_ungrounded_reason(ent, message)
         preserve_dates = overwrite and not message_explicitly_states_leave_date(message)
         if preserve_dates and message_mentions_leave_duration(message):
             preserve_dates = False
@@ -294,8 +297,12 @@ class LeaveEntityPipeline:
             is_boilerplate_leave_reason,
         )
 
+        from chat.services.leave.reason_value import reason_grounded_in_message
+
         reason = str(entities.get("reason") or entities.get("description") or "").strip()
         if reason and is_boilerplate_leave_reason(reason):
+            reason = str(extract_reason_value(message) or "").strip()
+        if reason and not reason_grounded_in_message(reason, message):
             reason = str(extract_reason_value(message) or "").strip()
         existing = str(draft.get("reason") or "").strip()
         if existing and is_boilerplate_leave_reason(existing):
@@ -303,8 +310,11 @@ class LeaveEntityPipeline:
         generic_implied = bool(draft.get("_reason_implied")) or existing.startswith(
             "অসুস্থতা"
         )
-        if reason and len(reason) >= 3 and (
-            overwrite or not existing or generic_implied
+        if (
+            reason
+            and len(reason) >= 3
+            and reason_grounded_in_message(reason, message)
+            and (overwrite or not existing or generic_implied)
         ):
             draft["reason"] = reason[:2000]
             draft.pop("_reason_implied", None)

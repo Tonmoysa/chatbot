@@ -321,6 +321,28 @@ def parse_turn_rules(
             source="rules",
         )
 
+    from chat.services.expense.amount_correction_pending import (
+        has_amount_correction_pending,
+    )
+
+    if isinstance(block, dict) and has_amount_correction_pending(block):
+        return TurnDecision(
+            turn_type=TURN_EDIT_DRAFT,
+            confidence=0.95,
+            source="rules_amount_pending",
+        )
+
+    from chat.services.expense.delete_disambiguation_pending import (
+        has_delete_disambiguation_pending,
+    )
+
+    if isinstance(block, dict) and has_delete_disambiguation_pending(block):
+        return TurnDecision(
+            turn_type=TURN_EDIT_DRAFT,
+            confidence=0.95,
+            source="rules_delete_pending",
+        )
+
     if has_pending_line and pending_step in ("category", "from_to"):
         from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
 
@@ -369,6 +391,14 @@ def parse_turn_rules(
 
     plan = parse_correction_plan(text, item_count=len(items or []))
     if plan.has_any_correction():
+        from chat.services.expense.expense_confirm import _is_bare_fresh_category_amount_claim
+
+        if _is_bare_fresh_category_amount_claim(text):
+            return TurnDecision(
+                turn_type=TURN_ADD_LINES,
+                confidence=0.92,
+                source="rules_fresh_line",
+            )
         existing_cats = {
             str(row.get("category") or "").lower() for row in items
         }
@@ -458,6 +488,20 @@ def resolve_expense_turn(
         and pending_step in ("category", "from_to")
         and looks_like_draft_edit_signal(message, items, block)
     ):
+        from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+
+        pending = pending_line if isinstance(pending_line, dict) else {}
+        if not pending and isinstance(block, dict):
+            raw_pending = block.get("pending_line")
+            pending = raw_pending if isinstance(raw_pending, dict) else {}
+        if looks_like_new_expense_during_pending_slot(
+            message,
+            pending,
+            items,
+            block,
+            pending_step=pending_step,
+        ):
+            return rules
         plan = parse_correction_plan(message, item_count=len(items or []))
         if plan.has_any_correction():
             return TurnDecision(

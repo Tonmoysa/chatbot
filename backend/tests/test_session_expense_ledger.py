@@ -475,3 +475,61 @@ def test_ajker_expense_list_intent_still_works():
     from chat.services.intent_detector import _strong_expense_day_summary
 
     assert _strong_expense_day_summary("amake ajker expense er list ta daw")
+
+
+def test_n56_keeps_post_submit_fresh_draft_for_day_summary():
+    """After CRM submit, a new lunch line must survive N56 and appear in summary."""
+    from chat.services.expense.expense_fsm import finalize_expense_submission
+    from chat.services.expense.session_action_memory import (
+        purge_stale_expense_draft_after_submit,
+        record_expense_lines_added,
+    )
+    from chat.services.session_turn_router import plan_pre_router_navigation
+
+    submitted = [
+        {
+            "category": "Bus",
+            "amount": 100,
+            "from_location": "mirpur",
+            "to_location": "motekheel",
+        }
+    ]
+    wf = finalize_expense_submission(
+        {},
+        reference_id="EXP-2026-EFD18D",
+        items=submitted,
+        incurred_date_iso="2026-06-11",
+    )
+    wf = record_expense_lines_added(
+        {
+            **wf,
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "incurred_date_iso": "2026-06-11",
+                "items": [{"category": "Lunch", "amount": 150}],
+            },
+        },
+        new_items=[{"category": "Lunch", "amount": 150}],
+        all_items=[{"category": "Lunch", "amount": 150}],
+        incurred_date_iso="2026-06-11",
+    )
+    steps = plan_pre_router_navigation("okay ekhon expense summery ta daw", wf, is_cancel=False)
+    final = steps[-1].state if steps else wf
+    assert list((final.get("expense_request") or {}).get("items") or [])
+    purged = purge_stale_expense_draft_after_submit(final)
+    assert list((purged.get("expense_request") or {}).get("items") or [])
+
+    ledger = build_session_expense_ledger(
+        purged,
+        crm_breakdown={
+            "expense_day_logged_total": 100,
+            "expense_daily_cap_bdt": 300,
+        },
+        incurred_date_iso="2026-06-11",
+    )
+    msg = format_session_expense_ledger_message(ledger)
+    assert "EXP-2026-EFD18D" in msg
+    assert "Pending" in msg
+    assert "150" in msg
+    assert ledger["pending_total"] == 150

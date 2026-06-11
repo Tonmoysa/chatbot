@@ -62,6 +62,17 @@ def _set_amount_on_pending(
     return changed
 
 
+def _target_row_index(target: dict[str, Any], *, key: str = "index") -> int:
+    """Row index; ``0`` is valid — never use ``or -1`` on index fields."""
+    raw = target.get(key)
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _apply_bare_amount_to_target(
     items: list[dict[str, Any]],
     block: dict[str, Any] | None,
@@ -70,7 +81,7 @@ def _apply_bare_amount_to_target(
 ) -> bool:
     kind = str(target.get("kind") or "")
     if kind == "item":
-        idx = int(target.get("index") or -1)
+        idx = _target_row_index(target)
         if 0 <= idx < len(items):
             items[idx]["amount"] = new_amt
             return True
@@ -84,7 +95,7 @@ def _apply_bare_amount_to_target(
             return True
         return False
     if kind == "pending_queue":
-        qi = int(target.get("index") or -1)
+        qi = _target_row_index(target)
         queue = block.get("pending_queue") or []
         if 0 <= qi < len(queue) and isinstance(queue[qi], dict):
             queue[qi]["amount"] = new_amt
@@ -116,6 +127,80 @@ def _replace_category_in_pending(
     return changed
 
 
+def _remove_pending_by_cat_amount(
+    block: dict[str, Any],
+    cat: str,
+    amount: float,
+) -> bool:
+    """Remove one open pending line matching category + amount."""
+    cat_l = cat.lower()
+    target_amt = round(float(amount), 2)
+    pending = block.get("pending_line")
+    if isinstance(pending, dict) and pending.get("amount"):
+        if (
+            str(pending.get("category") or "").strip().lower() == cat_l
+            and abs(round(float(pending.get("amount") or 0), 2) - target_amt) < 0.01
+        ):
+            from chat.services.expense.pending_discard import remove_pending_entry_by_amount
+
+            remove_pending_entry_by_amount(block, target_amt)
+            return True
+    queue = list(block.get("pending_queue") or [])
+    for qi, row in enumerate(queue):
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("category") or "").strip().lower() == cat_l
+            and abs(round(float(row.get("amount") or 0), 2) - target_amt) < 0.01
+        ):
+            del queue[qi]
+            block["pending_queue"] = queue
+            return True
+    return False
+
+
+def _replace_category_targets(
+    items: list[dict[str, Any]],
+    block: dict[str, Any] | None,
+    from_cat: str,
+    to_cat: str,
+) -> bool:
+    """Replace exactly one matching draft line (item or pending); skip if ambiguous."""
+    from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+    from_l = from_cat.lower()
+    targets = [
+        t
+        for t in list_amount_correction_targets(items, block)
+        if str(t.get("category") or "").strip().lower() == from_l
+    ]
+    if len(targets) != 1:
+        return False
+    target = targets[0]
+    kind = str(target.get("kind") or "")
+    if kind == "item":
+        idx = _target_row_index(target)
+        if 0 <= idx < len(items):
+            items[idx]["category"] = to_cat
+            return True
+        return False
+    if block is None:
+        return False
+    if kind == "pending":
+        pending = block.get("pending_line")
+        if isinstance(pending, dict):
+            pending["category"] = to_cat
+            return True
+        return False
+    if kind == "pending_queue":
+        qi = _target_row_index(target)
+        queue = block.get("pending_queue") or []
+        if 0 <= qi < len(queue) and isinstance(queue[qi], dict):
+            queue[qi]["category"] = to_cat
+            return True
+    return False
+
+
 def execute_correction_plan(
     items: list[dict[str, Any]],
     plan: CorrectionCommandPlan,
@@ -126,9 +211,7 @@ def execute_correction_plan(
     out = [dict(x) for x in items]
 
     for from_cat, to_cat in plan.replacements:
-        if _replace_category(out, from_cat, to_cat):
-            changed = True
-        if block is not None and _replace_category_in_pending(block, from_cat, to_cat):
+        if _replace_category_targets(out, block, from_cat, to_cat):
             changed = True
 
     if plan.remove_travel_group:
@@ -157,24 +240,36 @@ def execute_correction_plan(
                 break
 
     for cat in plan.remove_loose:
-        for i, row in enumerate(out):
-            if str(row.get("category") or "").lower() == cat.lower():
-                del out[i]
-                changed = True
-                break
+        matches = [
+            i
+            for i, row in enumerate(out)
+            if str(row.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) != 1:
+            continue
+        del out[matches[0]]
+        changed = True
 
     for cat, rm_amt in plan.remove_by_amount:
         target_amt = round(float(rm_amt), 2)
-        before = len(out)
-        out = [
-            r
-            for r in out
-            if not (
-                str(r.get("category") or "").lower() == cat.lower()
-                and round(float(r.get("amount") or 0), 2) == target_amt
-            )
+        from chat.services.expense.confusion_handler import list_amount_correction_targets
+
+        matches = [
+            t
+            for t in list_amount_correction_targets(out, block)
+            if str(t.get("category") or "").strip().lower() == cat.lower()
+            and abs(round(float(t.get("amount") or 0), 2) - target_amt) < 0.01
         ]
-        if len(out) < before:
+        if len(matches) != 1:
+            continue
+        target = matches[0]
+        kind = str(target.get("kind") or "")
+        if kind == "item":
+            idx = _target_row_index(target)
+            if 0 <= idx < len(out):
+                del out[idx]
+                changed = True
+        elif block is not None and _remove_pending_by_cat_amount(block, cat, target_amt):
             changed = True
 
     for cat in plan.remove_verb_first:
@@ -209,10 +304,24 @@ def execute_correction_plan(
         changed = True
 
     for cat, new_amt in plan.update_amounts:
+        matches = [
+            r
+            for r in out
+            if str(r.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            continue
         if _set_category_amount(out, cat, new_amt):
             changed = True
 
     for cat, new_amt in plan.set_amounts:
+        matches = [
+            r
+            for r in out
+            if str(r.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            continue
         if _set_category_amount(out, cat, new_amt):
             changed = True
         elif block is not None and _set_amount_on_pending(block, cat, new_amt):
@@ -250,18 +359,28 @@ def execute_correction_plan(
             changed = True
 
     for cat, new_amt in plan.cat_er_amounts:
+        matches = [
+            r
+            for r in out
+            if str(r.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            continue
         if _set_category_amount(out, cat, new_amt):
             changed = True
 
     for cat, new_amt in plan.add_amounts:
-        found = False
-        for row in out:
-            if str(row.get("category") or "").lower() == cat.lower():
-                row["amount"] = float(row.get("amount") or 0) + new_amt
-                found = True
-                changed = True
-                break
-        if not found:
+        matches = [
+            (i, row)
+            for i, row in enumerate(out)
+            if str(row.get("category") or "").lower() == cat.lower()
+        ]
+        if len(matches) > 1:
+            continue
+        if len(matches) == 1:
+            matches[0][1]["amount"] = float(matches[0][1].get("amount") or 0) + new_amt
+            changed = True
+        else:
             out.append(ExpenseLineItem(category=cat, amount=new_amt).to_dict())
             changed = True
 

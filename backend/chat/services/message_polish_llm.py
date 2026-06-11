@@ -27,6 +27,8 @@ MessagePolishType = Literal[
     "expense_review_praise",
     "expense_submit_confirm",
     "expense_submit_success",
+    "expense_disambiguation",
+    "expense_confirm_prompt",
     "leave_wizard",
     "leave_review",
     "leave_submitted",
@@ -202,6 +204,27 @@ RULES
 - Do NOT invent dates or change field values.
 - Output ONLY the success card text."""
 
+_EXPENSE_DISAMBIGUATION_SYSTEM = """You rephrase an expense correction disambiguation prompt.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS.lines lists every draft entry — every category and amount must stay visible.
+- Same intent: ask which line to update/delete; keep examples the user can copy.
+- Warm colleague tone — not scolding.
+- Preserve **bold** on amounts and categories.
+- Do NOT invent lines or change amounts.
+- Output ONLY the disambiguation prompt."""
+
+_EXPENSE_CONFIRM_PROMPT_SYSTEM = """You rephrase an expense update/delete confirmation prompt.
+
+RULES
+- Same language as REPLY_LANGUAGE (Bangla script for bn/banglish, English for en).
+- FACTS.target_amount and line index (if present) must appear exactly.
+- Same intent: confirm before applying change; yes/no options unchanged in meaning.
+- Preserve **bold** on amounts and categories.
+- Do NOT change the target amount or line identity.
+- Output ONLY the confirmation prompt."""
+
 _EXPENSE_WIZARD_PROMPT_SYSTEM = """You rephrase ONE expense wizard follow-up question.
 
 RULES
@@ -328,6 +351,18 @@ def leave_facts_preserved(original: str, polished: str) -> bool:
     if "সংযুক্তি" in orig and "সংযুক্তি" not in pol:
         return False
 
+    _invented_field_markers = (
+        "payment status",
+        "supporting documents",
+        "scope of work",
+        "urgent tasks",
+        "completely unavailable",
+        "attached to your application",
+    )
+    for marker in _invented_field_markers:
+        if marker in low_p and marker not in low_o:
+            return False
+
     return True
 
 
@@ -366,6 +401,10 @@ def _system_prompt(message_type: MessagePolishType) -> str:
         return _EXPENSE_SUBMIT_CONFIRM_SYSTEM
     if message_type == "expense_submit_success":
         return _EXPENSE_SUBMIT_SUCCESS_SYSTEM
+    if message_type == "expense_disambiguation":
+        return _EXPENSE_DISAMBIGUATION_SYSTEM
+    if message_type == "expense_confirm_prompt":
+        return _EXPENSE_CONFIRM_PROMPT_SYSTEM
     if message_type == "leave_submitted":
         return _LEAVE_SUBMITTED_SYSTEM
     return _OUT_OF_SCOPE_SYSTEM
@@ -491,6 +530,14 @@ def _envelope_facts_guard_ok(envelope: dict[str, Any], polished: str) -> bool:
         return clarify_praise_facts_preserved(envelope, polished)
     if message_type == "expense_submit_success":
         return submit_success_facts_preserved(envelope, polished)
+    if message_type == "expense_disambiguation":
+        from chat.services.expense_message_facts import disambiguation_facts_preserved
+
+        return disambiguation_facts_preserved(envelope, polished)
+    if message_type == "expense_confirm_prompt":
+        from chat.services.expense_message_facts import confirm_prompt_facts_preserved
+
+        return confirm_prompt_facts_preserved(envelope, polished)
     template = str(envelope.get("template_fallback") or "")
     if template:
         return facts_preserved(template, polished)
@@ -516,9 +563,11 @@ def polish_envelope_message(
         "expense_validation_block",
         "expense_clarify",
         "expense_clarify_praise_review",
-    "expense_review_praise",
+        "expense_review_praise",
         "expense_submit_confirm",
         "expense_submit_success",
+        "expense_disambiguation",
+        "expense_confirm_prompt",
     ):
         return template
 
@@ -597,9 +646,11 @@ def _polish_body_from_envelope(
         "expense_validation_block",
         "expense_clarify",
         "expense_clarify_praise_review",
-    "expense_review_praise",
+        "expense_review_praise",
         "expense_submit_confirm",
         "expense_submit_success",
+        "expense_disambiguation",
+        "expense_confirm_prompt",
     ):
         return polish_envelope_message(
             polishable,

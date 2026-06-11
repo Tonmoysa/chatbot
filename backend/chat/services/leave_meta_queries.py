@@ -20,7 +20,33 @@ _PENDING_LEAVE_SHOW_RE = re.compile(
 )
 _LEAVE_SUMMARY_RE = re.compile(
     r"(?:leave|ছুটি|chuti|chhuti).{0,25}(?:summary|summery|সারাংশ|review|পর্যালোচনা)"
-    r"|(?:summary|summery|সারাংশ).{0,25}(?:leave|ছুটি|chuti|chhuti)",
+    r"|(?:summary|summery|সারাংশ).{0,25}(?:leave|ছুটি|chuti|chhuti)"
+    r"|(?:leave|ছুটি|chuti|chhuti).{0,20}(?:summery|summary|সারাংশ).{0,15}(?:daw|dao|দাও|দেখাও|dekhao|bolo)",
+    re.I | re.UNICODE,
+)
+_LEAVE_SUBMIT_STATUS_RE = re.compile(
+    r"(?:"
+    r"(?:ki|kono|any).{0,35}(?:leave|chuti|chhuti|chutti|ছুটি).{0,35}"
+    r"(?:apply|submit|joma|জমা|request).{0,25}(?:korechi|korchi|kor[eo]chi|hoyeche|hoise|hoise|done|হয়েছে|হয়েছে)"
+    r"|"
+    r"(?:leave|chuti|chhuti|chutti|ছুটি|request).{0,35}"
+    r"(?:apply|submit|joma|জমা).{0,25}(?:korechi|korchi|kor[eo]chi|hoyeche|hoise|done|হয়েছে|হয়েছে)"
+    r"|"
+    r"(?:submit|joma|জমা).{0,20}(?:hoyeche|hoise|হয়েছে|হয়েছে).{0,25}(?:leave|chuti|chhuti|ছুটি)"
+    r"|"
+    r"(?:amar|my).{0,20}(?:leave|chuti|chhuti).{0,25}(?:submit|joma|জমা).{0,15}(?:hoyeche|hoise|হয়েছে)"
+    r")",
+    re.I | re.UNICODE,
+)
+_SUBMITTED_LEAVE_DETAILS_RE = re.compile(
+    r"(?:"
+    r"(?:sei|that|last|submitted|joma|জমা).{0,30}(?:leave|chuti|chhuti|chutti|ছুটি|request)"
+    r".{0,35}(?:info|information|details|summary|summery|তথ্য|সারাংশ|dekhao|দেখাও|daw|dao|দাও|bolo)"
+    r"|"
+    r"(?:leave|chuti|chhuti|chutti|ছুটি).{0,25}(?:info|information|details|তথ্য).{0,20}(?:daw|dao|দাও|dekhao|দেখাও|bolo)"
+    r"|"
+    r"(?:ref|reference|রেফারেন্স).{0,20}(?:leave|chuti|chhuti|ছুটি)"
+    r")",
     re.I | re.UNICODE,
 )
 _CANCEL_LEAVE_RE = re.compile(
@@ -43,6 +69,26 @@ def wants_leave_session_summary(message: str) -> bool:
     if re.search(r"\bexpense\b|খরচ", raw, re.I):
         return False
     return bool(_LEAVE_SUMMARY_RE.search(raw))
+
+
+def wants_leave_submission_status(message: str) -> bool:
+    """User asks whether they already applied/submitted leave in this session."""
+    raw = normalize_message_for_parsing(message)
+    if re.search(r"\bexpense\b|খরচ", raw, re.I):
+        return False
+    if wants_leave_session_summary(raw) or wants_submitted_leave_details(raw):
+        return False
+    return bool(_LEAVE_SUBMIT_STATUS_RE.search(raw))
+
+
+def wants_submitted_leave_details(message: str) -> bool:
+    """User wants details of a leave already submitted in session."""
+    raw = normalize_message_for_parsing(message)
+    if re.search(r"\bexpense\b|খরচ", raw, re.I):
+        return False
+    if wants_leave_session_summary(raw):
+        return False
+    return bool(_SUBMITTED_LEAVE_DETAILS_RE.search(raw))
 
 
 def session_has_leave_summary_context(workflow_state: dict[str, Any] | None) -> bool:

@@ -65,6 +65,62 @@ def test_r03_sick_to_family_clears_leave_type() -> None:
     assert "leave_type" in get_missing_slots(draft)
 
 
+def test_r03_sick_to_personal_work_clears_stated_sick_and_asks_select_leave() -> None:
+    from chat.services.leave.conversation_manager import LeaveConversationManager
+    from chat.services.leave_slots import SLOT_LEAVE_TYPE
+    from chat.services.leave_workflow import apply_leave_state, process_leave_turn
+    from chat.services.leave_fsm import STATUS_ACTIVE, read_leave_state
+    from chat.services.leave_slots import SLOT_REASON
+
+    draft = {
+        "start_date": "2026-06-12",
+        "leave_type": "sick",
+        "_stated_leave_type": "sick",
+        "reason": "fever",
+        "day_scope": "full",
+    }
+    reconcile_leave_type_from_reason({**draft, "reason": "personal work"})
+    draft["reason"] = "personal work"
+    reconcile_leave_type_from_reason(draft)
+    apply_leave_semantic_reconcile(draft, message="personal work", use_llm=False)
+    assert draft.get("leave_type") is None
+    assert draft.get("_stated_leave_type") is None
+    assert draft.get("_leave_type_reselect_required") is True
+    assert SLOT_LEAVE_TYPE in get_missing_slots(draft)
+
+    wf = apply_leave_state(
+        {},
+        draft={
+            "start_date": "2026-06-12",
+            "leave_type": "sick",
+            "_stated_leave_type": "sick",
+            "reason": "fever",
+            "day_scope": "full",
+        },
+        step=SLOT_REASON,
+        status=STATUS_ACTIVE,
+    )
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="personal work",
+        entities={},
+        company_id="default",
+    )
+    out = dict(read_leave_state(pack["workflow_state"]).get("draft") or {})
+    assert out.get("leave_type") is None
+    assert out.get("reason") == "personal work"
+    question = str(pack.get("question") or "").lower()
+    assert "annual leave" in question
+    assert "sick leave" not in question or "select leave" in question
+    prompt = LeaveConversationManager().build_follow_up(
+        out,
+        primary_slot=SLOT_LEAVE_TYPE,
+        missing=get_missing_slots(out),
+    ).lower()
+    assert "annual leave" in prompt
+    assert "sick leave" not in prompt
+
+
 def test_date_range_span_two_days() -> None:
     draft = {"start_date": "2026-06-10", "end_date": "2026-06-10", "days": 1.0}
     changed = try_apply_leave_date_correction(
