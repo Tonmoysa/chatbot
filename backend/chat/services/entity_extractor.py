@@ -405,10 +405,15 @@ class EntityExtractor:
             e["leave_type"] = e.get("leave_type") or "emergency"
         if re.search(r"\b(compensatory|comp\s*off)\b", low):
             e["leave_type"] = e.get("leave_type") or "compensatory"
-        if re.search(r"\bfull\s*day\b|পুরো\s*দিন", low):
-            e["day_scope"] = e.get("day_scope") or "full"
-        if re.search(r"\bhalf\b|হাফ|অর্ধ", low):
-            e["day_scope"] = e.get("day_scope") or "half"
+        from chat.services.leave.normalization import (
+            message_explicitly_states_day_scope,
+            parse_day_scope_answer,
+        )
+
+        if message_explicitly_states_day_scope(message):
+            scope = parse_day_scope_answer(message)
+            if scope:
+                e["day_scope"] = scope
 
         if looks_like_leave:
             inferred_start = _infer_leave_calendar_start(low)

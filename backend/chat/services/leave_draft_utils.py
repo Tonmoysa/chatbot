@@ -152,6 +152,26 @@ def apply_multi_day_scope_default(draft: dict[str, Any]) -> None:
         draft.pop("half_day_period", None)
 
 
+def apply_single_day_scope_default(draft: dict[str, Any]) -> None:
+    """Single calendar-day leave defaults to full day when scope was never asked."""
+    if draft.get("day_scope") or is_multi_day_leave(draft):
+        return
+    start = str(draft.get("start_date") or "").strip()
+    if not start:
+        return
+    end = str(draft.get("end_date") or start).strip()
+    if end != start:
+        return
+    try:
+        days = float(draft.get("days") or 0)
+    except (TypeError, ValueError):
+        days = 0.0
+    if days and days != 1.0:
+        return
+    draft["day_scope"] = DAY_SCOPE_FULL
+    draft.pop("half_day_period", None)
+
+
 def needs_half_day_period(draft: dict[str, Any]) -> bool:
     return (
         str(draft.get("day_scope") or "").lower() == DAY_SCOPE_HALF

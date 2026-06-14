@@ -285,5 +285,7 @@ def clear_leave_flow(workflow_state: dict[str, Any]) -> dict[str, Any]:
     ):
         wf.pop(key, None)
     wf.pop("leave_request", None)
-    return wf
+    from chat.services.leave.intent_buffer import clear_leave_intent_buffer
+
+    return clear_leave_intent_buffer(wf)
 

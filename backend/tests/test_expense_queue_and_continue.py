@@ -42,6 +42,34 @@ def test_snack_while_bus_from_to_pending():
     assert any(r.get("category") == "Snack" and float(r.get("amount") or 0) == 50 for r in items)
 
 
+def test_lunch_and_nasta_compound_while_bus_from_to_pending():
+    """``lunch 150 taka.,nasta 50 taka.`` must add both — not correction LLM path."""
+    pack = _start_bus_from_to_pending()
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="lunch 150 taka.,nasta 50 taka.",
+    )
+    items = pack["items"]
+    block = pack["workflow_state"]["expense_request"]
+    q = pack.get("question") or ""
+    assert any(r.get("category") == "Lunch" and float(r.get("amount") or 0) == 150 for r in items)
+    assert any(r.get("category") == "Snack" and float(r.get("amount") or 0) == 50 for r in items)
+    assert "পর্যালোচনা" not in q or "Saved" in q or "Lunch" in q
+    assert block.get("pending_step") == "from_to"
+    assert float((block.get("pending_line") or {}).get("amount") or 0) == 100.0
+
+
+def test_explicit_add_phrase_compound_while_bus_from_to_pending():
+    pack = _start_bus_from_to_pending()
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="lunch 150 taka.,nasta 50 taka. etao expense e add koro",
+    )
+    items = pack["items"]
+    assert any(r.get("category") == "Lunch" for r in items)
+    assert any(r.get("category") == "Snack" for r in items)
+
+
 def test_bare_amount_correction_single_pending_target():
     pack = _start_bus_from_to_pending()
     pack = process_expense_turn(
@@ -447,10 +475,76 @@ def test_g38_delete_koro_then_lunch_asks_which_line():
         message="lunch",
     )
     q = pack.get("question") or ""
-    assert "Multiple" in q or "multiple" in q.lower() or "ekadhik" in q.lower()
+    assert "1. Lunch" in q or "1. lunch" in q.lower()
+    assert ("2. Lunch" in q or "2. lunch" in q.lower()) or (
+        "200" in q and "120" in q
+    )
     assert "200" in q and "120" in q
+    block = pack["workflow_state"]["expense_request"]
+    prompt = block.get("active_prompt") or {}
+    assert prompt.get("kind") == "delete_pick"
+    assert prompt.get("numbered_mode") == "local"
     items = pack["items"]
     assert sum(1 for r in items if str(r.get("category") or "").lower() == "lunch") == 2
+
+
+def test_g38_delete_koro_lunch_200_direct_without_category_step():
+    pack = _build_five_line_draft_with_pending_buses()
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="delete koro",
+    )
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="lunch 200",
+    )
+    items = pack["items"]
+    lunches = sorted(
+        float(r.get("amount") or 0)
+        for r in items
+        if str(r.get("category") or "").lower() == "lunch"
+    )
+    assert lunches == [120.0]
+    q = pack.get("question") or ""
+    assert "Removed" in q or "মুছে ফেলা" in q
+
+
+def test_g38_delete_duplicate_lunch_200_numbered_pick():
+    from chat.services.expense.draft_view import ensure_line_ids
+
+    items = ensure_line_ids(
+        [
+            {"category": "lunch", "amount": 200.0},
+            {"category": "lunch", "amount": 200.0},
+        ]
+    )
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "review",
+            "items": items,
+            "incurred_date_iso": "2026-06-11",
+            "reply_language": "en",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="delete koro")
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="lunch 200",
+    )
+    q = pack.get("question") or ""
+    assert "1. Lunch" in q or "1. lunch" in q.lower()
+    assert "2. Lunch" in q or "2. lunch" in q.lower()
+    block = pack["workflow_state"]["expense_request"]
+    prompt = block.get("active_prompt") or {}
+    assert prompt.get("pick_scope") == "duplicate"
+    pack = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="2",
+    )
+    items = pack["items"]
+    assert len(items) == 1
+    assert float(items[0].get("amount") or 0) == 200.0
 
 
 def test_g38_delete_lunch_200_after_disambiguation():
@@ -475,7 +569,12 @@ def test_g38_delete_lunch_200_after_disambiguation():
     )
     assert lunches == [120.0]
     q = pack.get("question") or ""
-    assert "Removed" in q or "removed" in q.lower() or "মুছ" in q
+    assert (
+        "Removed" in q
+        or "removed" in q.lower()
+        or "মুছ" in q
+        or "মুছে ফেলা" in q
+    )
 
 
 def test_g38_lunch_200_delete_not_pending_bus_discard():

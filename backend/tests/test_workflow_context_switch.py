@@ -44,6 +44,40 @@ RESUME_EXPENSE_MSGS = (
 )
 
 
+def _advance_leave_to_review(orch, sid, emp, *, trace_prefix="adv"):
+    """Reach leave review when type re-select is required after a rich first message."""
+    session = orch.memory.get_or_create_session(
+        company_id=COMPANY_ID,
+        employee_id=emp,
+        session_id=sid,
+    )
+    session.refresh_from_db()
+    st = read_leave_state(session.workflow_state)
+    if st.get("review_pending"):
+        return session
+    draft = st.get("draft") or {}
+    if draft.get("_leave_type_reselect_required") or not draft.get("leave_type"):
+        orch.run_chat(
+            company_id=COMPANY_ID,
+            message="annual leave",
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"{trace_prefix}-leave-type",
+        )
+        session.refresh_from_db()
+        st = read_leave_state(session.workflow_state)
+    if not st.get("review_pending"):
+        orch.run_chat(
+            company_id=COMPANY_ID,
+            message="full",
+            session_id=sid,
+            employee_id=emp,
+            trace_id=f"{trace_prefix}-leave-full",
+        )
+        session.refresh_from_db()
+    return session
+
+
 def test_defer_leave_submit_phrase_detected():
     assert wants_defer_expense_for_leave_submit(DEFER_LEAVE_SUBMIT)
     assert not wants_defer_expense_for_leave_submit("expense ta age submit koro")
@@ -113,27 +147,12 @@ def test_expense_during_leave_review_suspends_draft_and_keeps_tomorrow_date(
         trace_id="wf-exp-leave-start",
     )
     sid = r1["_session_id"]
-    session = orch.memory.get_or_create_session(
-        company_id=COMPANY_ID,
-        employee_id=emp,
-        session_id=sid,
+    session = _advance_leave_to_review(
+        orch, sid, emp, trace_prefix="wf-exp-leave"
     )
     st = read_leave_state(session.workflow_state)
-    r1_msg = r1["response"]["message"] or ""
-    assert st.get("review_pending") or "জমা দেবেন" in r1_msg or "জমা দিন" in r1_msg
+    assert st.get("review_pending")
     draft_before = dict(st.get("draft") or {})
-    if not st.get("review_pending"):
-        r_full = orch.run_chat(
-            company_id=COMPANY_ID,
-            message="full",
-            session_id=sid,
-            employee_id=emp,
-            trace_id="wf-exp-leave-full",
-        )
-        session.refresh_from_db()
-        draft_before = dict(read_leave_state(session.workflow_state).get("draft") or {})
-        r_full_msg = r_full["response"]["message"] or ""
-        assert "জমা দেবেন" in r_full_msg or "জমা দিন" in r_full_msg
     assert draft_before.get("start_date") == "2026-06-04"
 
     r_exp = orch.run_chat(
@@ -178,6 +197,7 @@ def test_policy_during_leave_review_then_expense_preserves_leave(monkeypatch, se
         trace_id="wf-pol-leave-start",
     )
     sid = r1["_session_id"]
+    _advance_leave_to_review(orch, sid, emp, trace_prefix="wf-pol-leave")
 
     with patch(
         "chat.services.orchestrator.try_hr_policy_rag",
@@ -253,6 +273,7 @@ def test_defer_leave_submit_during_expense_shows_review_not_auto_submit(monkeypa
         trace_id="defer-leave-1",
     )
     sid = r1["_session_id"]
+    _advance_leave_to_review(orch, sid, emp, trace_prefix="defer-leave")
 
     r2 = orch.run_chat(
         company_id=COMPANY_ID,
@@ -308,6 +329,7 @@ def test_resume_expense_after_leave_submit_shows_pending_amount(monkeypatch):
         trace_id="resume-exp-1",
     )
     sid = r1["_session_id"]
+    _advance_leave_to_review(orch, sid, emp, trace_prefix="resume-exp")
     orch.run_chat(
         company_id=COMPANY_ID,
         message="amar ajke 100 taka cost hoyeche",
@@ -374,19 +396,7 @@ def test_leave_expense_leave_expense_preserves_pending_amount(monkeypatch):
         trace_id="ds-1",
     )
     sid = r1["_session_id"]
-    session = orch.memory.get_or_create_session(
-        company_id=COMPANY_ID, employee_id=emp, session_id=sid
-    )
-    session.refresh_from_db()
-    st = read_leave_state(session.workflow_state)
-    if not st.get("review_pending"):
-        orch.run_chat(
-            company_id=COMPANY_ID,
-            message="full",
-            session_id=sid,
-            employee_id=emp,
-            trace_id="ds-1b",
-        )
+    session = _advance_leave_to_review(orch, sid, emp, trace_prefix="ds")
 
     r2 = orch.run_chat(
         company_id=COMPANY_ID,

@@ -341,7 +341,7 @@ def test_g16_lunch_during_from_to_pending_not_p10_correction():
     decision, _ = _route("lunch 150 taka", wf)
     assert decision.turn_kind != TurnKind.CORRECTION
     assert decision.turn_kind == TurnKind.SLOT_ANSWER
-    assert decision.reason.startswith("P81")
+    assert decision.reason.startswith(("P79", "P81"))
 
 
 def test_g17_new_leave_cold_start():
@@ -720,5 +720,5 @@ def test_g21_sick_token_alone_still_slot_answer():
         _leave_collecting_wf(step="leave_type"),
         turn_kind=TurnKind.SLOT_ANSWER,
         intent=INTENT_LEAVE_REQUEST,
-        reason_prefix="P80",
+        reason_prefix="P79",
     )

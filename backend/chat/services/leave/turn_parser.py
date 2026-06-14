@@ -259,7 +259,16 @@ def resolve_leave_turn(
     entities: dict[str, Any] | None = None,
     trace_id: str = "",
     use_llm: bool = True,
+    router_turn: LeaveTurnDecision | None = None,
 ) -> LeaveTurnDecision:
+    if router_turn is not None and router_turn.is_handled():
+        if router_turn.turn_type == TURN_EDIT_FIELD and not (
+            router_turn.field_update and router_turn.field_update.value
+        ):
+            pass
+        else:
+            return router_turn
+
     rules = parse_turn_rules(message, draft=draft, review_pending=review_pending)
 
     if rules.turn_type == TURN_EDIT_FIELD and rules.field_update:

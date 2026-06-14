@@ -63,7 +63,7 @@ def test_review_inline_reason_edit_returns_summary_not_reask():
     d = read_leave_state(out["workflow_state"]).get("draft") or {}
     assert "pet betha" in str(d.get("reason") or "").lower()
     q = out.get("question") or ""
-    assert "জমা দেবেন" in q
+    assert "জমা দেবেন" in q or "জমা দিন" in q
     assert "Reason টা এক লাইনে" not in q
 
 
@@ -104,7 +104,7 @@ def test_edit_menu_reason_inline_same_message():
     )
     d = read_leave_state(out["workflow_state"]).get("draft") or {}
     assert "pet betha" in str(d.get("reason") or "").lower()
-    assert "জমা দেবেন" in (out.get("question") or "")
+    assert "জমা দেবেন" in (out.get("question") or "") or "জমা দিন" in (out.get("question") or "")
 
 
 def test_llm_fallback_reason_edit():

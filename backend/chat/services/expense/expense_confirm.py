@@ -385,6 +385,8 @@ def looks_like_new_expense_during_pending_slot(
         return False
     if step == "from_to" and _looks_like_route_answer(text):
         return False
+    if _is_fresh_multi_category_expense_claim(text):
+        return True
     if looks_like_expense_correction(text):
         return False
     from chat.services.expense.command_parser import parse_correction_plan
@@ -394,6 +396,13 @@ def looks_like_new_expense_during_pending_slot(
         return False
     if plan.set_amounts and not _is_bare_fresh_category_amount_claim(text):
         return False
+    if re.search(
+        r"\b(again|abar|arobar|another|extra|new|add|যোগ|jog|etao|e\s*tao)\b",
+        text,
+        re.I | re.UNICODE,
+    ):
+        ext = extract_expense_items(text)
+        return bool(ext.items)
     ext = extract_expense_items(text)
     if len(ext.items) != 1 or ext.malformed:
         return False
@@ -444,12 +453,42 @@ def parse_category_slot_answer(message: str) -> str | None:
 
 def _is_fresh_multi_category_expense_claim(message: str) -> bool:
     """
-    Fresh multi-line ingest such as ``lunch 100, bus 200, rail 400``.
+    Fresh multi-line ingest such as ``lunch 100, bus 200, rail 400`` or
+    ``lunch 150 taka.,nasta 50 taka`` (nasta → Snack via parser).
+
     Must not be classified as a review correction (bare cat+amount matches _SET_AMOUNT_RE).
     """
     low = (message or "").lower().strip()
     if not low:
         return False
+    try:
+        ext = extract_expense_items(message)
+        parsed_count = len(ext.items)
+    except Exception:
+        parsed_count = 0
+    if parsed_count >= 2:
+        if (
+            _REMOVE_TRAVEL_GROUP_RE.search(low)
+            or _REMOVE_TRAVEL_GROUP_ALT_RE.search(low)
+            or _REPLACE_RE.search(low)
+            or _REPLACE_KORE_DAW_RE.search(low)
+            or _REPLACE_TA_CAT_RE.search(low)
+            or _REPLACE_KE_KORO_RE.search(low)
+            or _REPLACE_SETAKE_RE.search(low)
+            or _TRANSFER_RE.search(low)
+            or _PARTIAL_DEDUCT_RE.search(low)
+            or _UPDATE_AMOUNT_RE.search(low)
+        ):
+            return False
+        if re.search(
+            r"\b(remove|delete|baad|bad|বাদ|poriborte|replace|transfer)\b", low, re.I
+        ):
+            return False
+        if re.search(r"\b(hobe|hoy|হবে|হয়)\b", low, re.I) and re.search(
+            r"\b(and|&,|na|না|update|change)\b", low, re.I
+        ):
+            return False
+        return True
     cat_tokens = re.findall(rf"\b({_CATEGORY_TOKEN}|rail)\b", low, re.I)
     unique_cats = {normalize_category(c) for c in cat_tokens if c}
     amounts = re.findall(r"\d+(?:[.,]\d{1,2})?", low)
@@ -1107,16 +1146,16 @@ def build_correction_failure_notice(
         return None
     low = message or ""
     if looks_like_bare_delete_request(message):
-        from chat.services.expense.confusion_handler import (
-            build_delete_entry_disambiguation_prompt,
+        from chat.services.expense.delete_flow import (
+            build_numbered_delete_prompt,
+            start_numbered_delete,
         )
-        from chat.services.expense.delete_disambiguation_pending import (
-            mark_delete_disambiguation_pending,
-        )
+        from chat.services.expense.draft_view import ExpenseDraftView
 
         if block is not None:
-            mark_delete_disambiguation_pending(block)
-        return build_delete_entry_disambiguation_prompt(items, block, lang=lang)
+            start_numbered_delete(block)
+        view = ExpenseDraftView(items, block)
+        return build_numbered_delete_prompt(view, lang=lang)
 
     bare_amt = parse_bare_amount_correction(message)
     if bare_amt is not None:

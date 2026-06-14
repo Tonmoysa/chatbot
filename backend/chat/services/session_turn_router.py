@@ -10,6 +10,7 @@ See ``docs/TURN_ROUTER_SPEC.md`` for the full matrix (P00–P99).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -308,11 +309,84 @@ def _wizard_interrupt_decision(
     return None
 
 
+def _expense_interactive_clear_flags(snapshot: SessionSnapshot, msg: str) -> dict[str, Any]:
+    """P02e — abandon stale expense prompts when user starts a new command."""
+    from chat.services.expense.prompt_routing import (
+        message_abandons_expense_prompt,
+        snapshot_has_expense_interactive_prompt,
+    )
+
+    if snapshot_has_expense_interactive_prompt(snapshot) and message_abandons_expense_prompt(
+        msg
+    ):
+        return {"clear_expense_interactive": True}
+    return {}
+
+
+def _decision_from_in_scope_utterance(
+    utterance: Any,
+    snapshot: SessionSnapshot,
+    msg: str,
+) -> SessionTurnDecision | None:
+    """Tier U02 — in-scope HR acts from TUL map directly to router decisions."""
+    from chat.services.turn_understanding.utterance_router_map import (
+        utterance_maps_to_router_decision,
+        utterance_router_act,
+    )
+
+    if not utterance_maps_to_router_decision(utterance):
+        return None
+
+    act_kind = utterance_router_act(utterance)
+    if not act_kind:
+        return None
+
+    conf = float(getattr(utterance, "confidence", 0) or 0)
+    clear_flags = _expense_interactive_clear_flags(snapshot, msg) or None
+
+    if act_kind == "policy_query":
+        return _decision(
+            turn_kind=TurnKind.POLICY_QUERY,
+            intent=INTENT_HR_POLICY,
+            target_workflow=None,
+            handler_id="policy_kb",
+            reason="U02_policy_from_utterance",
+            matched_predicate="resolve_utterance",
+            confidence=conf,
+            flags=clear_flags,
+        )
+
+    if act_kind == "balance_query":
+        return _decision(
+            turn_kind=TurnKind.BALANCE_QUERY,
+            intent=INTENT_LEAVE_BALANCE,
+            target_workflow=None,
+            handler_id="leave_balance",
+            reason="U02_balance_from_utterance",
+            matched_predicate="resolve_utterance",
+            confidence=conf,
+        )
+
+    if act_kind == "summary":
+        return _decision(
+            turn_kind=TurnKind.SUMMARY,
+            intent=INTENT_EXPENSE_DAY_SUMMARY,
+            target_workflow="expense",
+            handler_id="expense_workflow",
+            reason="U02_expense_summary_from_utterance",
+            matched_predicate="resolve_utterance",
+            confidence=conf,
+        )
+
+    return None
+
+
 def route_session_turn(
     snapshot: SessionSnapshot,
     *,
     workflow_state: dict[str, Any] | None = None,
     trace_id: str = "",
+    utterance: Any | None = None,
 ) -> SessionTurnDecision:
     """
     Evaluate P00–P99 priority matrix; first match wins.
@@ -326,6 +400,74 @@ def route_session_turn(
             handler_id="global_intent",
             reason="P99_empty_message",
         )
+
+    # --- Tier U: Turn Understanding Layer (before wizard traps) ---
+    if utterance is not None:
+        from chat.services.turn_understanding.schemas import (
+            ACT_NEEDS_CLARIFY,
+            ACT_OUT_OF_SCOPE,
+        )
+        from chat.services.session_expected_answer import (
+            message_plausibly_answers_prompt,
+            snapshot_has_pending_prompt,
+        )
+
+        _leave_wizard_slot_answer = (
+            (snapshot.leave_active or snapshot.leave_domain_active)
+            and not snapshot.leave_review_pending
+            and (
+                (
+                    snapshot_has_pending_prompt(snapshot)
+                    and message_plausibly_answers_prompt(msg, snapshot)
+                )
+                or (
+                    (snapshot.pending_leave_step or "") == "reason"
+                    and re.search(r"^(?:কারণ|reason)\b", msg.strip(), re.I | re.UNICODE)
+                )
+                or re.search(r"^(?:কারণ|reason)\b", msg.strip(), re.I | re.UNICODE)
+            )
+        )
+
+        if (
+            getattr(utterance, "primary_act", "") == ACT_OUT_OF_SCOPE
+            and float(getattr(utterance, "confidence", 0) or 0) >= 0.85
+            and not getattr(utterance, "in_scope", True)
+            and not _leave_wizard_slot_answer
+        ):
+            return _decision(
+                turn_kind=TurnKind.OUT_OF_SCOPE,
+                intent=INTENT_UNKNOWN,
+                target_workflow=None,
+                handler_id="policy_intent_helpers",
+                reason="U00_out_of_scope",
+                matched_predicate="resolve_utterance",
+                confidence=float(utterance.confidence),
+            )
+        if getattr(utterance, "needs_clarify", False) and float(
+            getattr(utterance, "confidence", 0) or 0
+        ) >= 0.65:
+            from chat.services.turn_understanding.resolver import (
+                resolution_clarification_message,
+            )
+
+            return _decision(
+                turn_kind=TurnKind.CONTEXT_CLARIFICATION,
+                intent=INTENT_UNKNOWN,
+                target_workflow=None,
+                handler_id="message_context_clarity",
+                reason="U01_utterance_clarify",
+                matched_predicate="resolve_utterance",
+                confidence=float(utterance.confidence),
+                flags={
+                    "clarification_prompt": resolution_clarification_message(
+                        msg, utterance, snapshot=snapshot
+                    ),
+                },
+            )
+
+        u02 = _decision_from_in_scope_utterance(utterance, snapshot, msg)
+        if u02 is not None:
+            return u02
 
     # --- Tier 0: hard guards ---
     from chat.services.leave_meta_queries import wants_cancel_leave_command
@@ -408,11 +550,70 @@ def route_session_turn(
             matched_predicate="expense_amount_correction_pending",
         )
 
+    # P02d — unified expense active_prompt (delete pick/confirm) beats from_to slot tokens
+    if snapshot.expense_active_prompt_kind and workflow_state:
+        from chat.services.expense.active_prompt import (
+            KIND_DELETE_CONFIRM,
+            KIND_DELETE_PICK,
+        )
+        from chat.services.expense.interactive_pending import (
+            message_answers_expense_interactive_pending,
+        )
+        from chat.services.session_snapshot import _read_expense_block_for_routing
+
+        exp_block = _read_expense_block_for_routing(workflow_state)
+        prompt_kind = str(snapshot.expense_active_prompt_kind or "")
+        if message_answers_expense_interactive_pending(msg, exp_block):
+            if prompt_kind == KIND_DELETE_CONFIRM and (
+                _is_confirmation_yes(msg) or _is_confirmation_no(msg)
+            ):
+                return _decision(
+                    turn_kind=TurnKind.DELETE_CONFIRM,
+                    intent=INTENT_EXPENSE_CLAIM,
+                    target_workflow="expense",
+                    handler_id="expense.turn_router",
+                    reason="P02d_delete_confirm_prompt",
+                    matched_predicate="expense_active_prompt_delete_confirm",
+                )
+            if prompt_kind == KIND_DELETE_PICK:
+                return _decision(
+                    turn_kind=TurnKind.SLOT_ANSWER,
+                    intent=INTENT_EXPENSE_CLAIM,
+                    target_workflow="expense",
+                    handler_id="expense.turn_router",
+                    reason="P02d_delete_pick_prompt",
+                    matched_predicate="expense_active_prompt_delete_pick",
+                )
+
+    # P41 early — expense summary beats slot collection (from_to / category open)
+    from chat.services.expense.wizard_commands import wants_expense_done_command_rules
+    from chat.services.expense.slots import STAGE_COLLECTING
+    from chat.services.expense_workflow import wants_expense_summary
+
+    if wants_expense_summary(msg) and (
+        snapshot.expense_domain_active
+        or snapshot.leave_review_pending
+        or snapshot.has_suspended_expense
+    ) and not (
+        snapshot.expense_active
+        and snapshot.expense_stage == STAGE_COLLECTING
+        and wants_expense_done_command_rules(msg)
+    ):
+        return _decision(
+            turn_kind=TurnKind.SUMMARY,
+            intent=INTENT_EXPENSE_DAY_SUMMARY,
+            target_workflow="expense",
+            handler_id="expense_workflow",
+            reason="P41b_expense_summary_early",
+            matched_predicate="wants_expense_summary",
+        )
+
     # P49 — post-submit leave navigation (MUST beat P71 balance / LLM misroute)
     if (
         snapshot.leave_submission_locked
         and not snapshot.has_suspended_leave
         and not snapshot.leave_active
+        and not snapshot.duplicate_leave_prompt
     ):
         from chat.services.workflow_navigation import is_leave_navigation_phrase
 
@@ -450,6 +651,7 @@ def route_session_turn(
     )
     from chat.services.expense.session_action_memory import (
         wants_expense_meta_question,
+        wants_expense_pre_submit_review,
         wants_post_submit_edit_question,
     )
 
@@ -486,14 +688,18 @@ def route_session_turn(
         )
 
     if wants_expense_meta_question(msg) or wants_post_submit_edit_question(msg):
-        return _decision(
-            turn_kind=TurnKind.META_QUESTION,
-            intent=INTENT_EXPENSE_STATUS,
-            target_workflow="expense",
-            handler_id="expense.session_action_memory",
-            reason="P43_expense_meta",
-            matched_predicate="wants_expense_meta_question",
-        )
+        if not (
+            wants_expense_pre_submit_review(msg)
+            and snapshot.expense_submit_confirm_pending
+        ):
+            return _decision(
+                turn_kind=TurnKind.META_QUESTION,
+                intent=INTENT_EXPENSE_STATUS,
+                target_workflow="expense",
+                handler_id="expense.session_action_memory",
+                reason="P43_expense_meta",
+                matched_predicate="wants_expense_meta_question",
+            )
 
     # P54 — dual leave+expense submit disambiguation
     from chat.services.workflow_navigation import (
@@ -505,6 +711,10 @@ def route_session_turn(
         snapshot.leave_domain_active
         and snapshot.expense_domain_active
         and wants_ambiguous_workflow_submit_command(msg)
+        and not snapshot.leave_submit_confirm_pending
+        and not snapshot.leave_review_pending
+        and not snapshot.expense_submit_confirm_pending
+        and not snapshot.expense_review_pending
     ):
         return _decision(
             turn_kind=TurnKind.CONTEXT_CLARIFICATION,
@@ -534,10 +744,21 @@ def route_session_turn(
             matched_predicate="wants_leave_submit_command",
         )
 
+    from chat.services.expense.wizard_commands import (
+        message_has_ingestible_claim_body,
+        strip_expense_submit_tail_for_parse,
+    )
+
+    _submit_claim_body = strip_expense_submit_tail_for_parse(msg)
+    _submit_mixed_with_claims = wants_expense_submit_command(
+        msg
+    ) and message_has_ingestible_claim_body(_submit_claim_body, original=msg)
+
     if (
         wants_expense_submit_command(msg)
         and snapshot.expense_domain_active
         and not (snapshot.leave_active and wants_leave_submit_command(msg))
+        and not _submit_mixed_with_claims
     ):
         return _decision(
             turn_kind=TurnKind.SUBMIT_COMMAND,
@@ -546,6 +767,7 @@ def route_session_turn(
             handler_id="expense.turn_router",
             reason="P04_expense_submit_command",
             matched_predicate="wants_expense_submit_command",
+            flags=_expense_interactive_clear_flags(snapshot, msg) or None,
         )
 
     # --- Tier 1b: policy (before correction false-positives on ``policy`` / ``ta``) ---
@@ -557,6 +779,7 @@ def route_session_turn(
             handler_id="policy_kb",
             reason="P70_policy_query",
             matched_predicate="_is_policy_query",
+            flags=_expense_interactive_clear_flags(snapshot, msg) or None,
         )
 
     # --- Tier 2: corrections (before done / suspended-leave) ---
@@ -567,11 +790,22 @@ def route_session_turn(
     from chat.services.wizard_turn_gate import looks_like_leave_review_update
     from chat.services.leave_confirm import parse_edit_slot, _looks_like_slot_correction
     from chat.services.intent_detector import _strong_expense_claim
+    from chat.services.workflow_suspend import wants_resume_suspended_leave
+
+    from chat.services.wizard_turn_gate import is_leave_collecting_slot_answer
+
     if (
         snapshot.has_suspended_leave
         and looks_like_suspended_leave_correction(msg)
         and not looks_like_expense_correction(msg)
         and not _strong_expense_claim(msg)
+        and not wants_resume_suspended_leave(msg)
+        and not is_leave_collecting_slot_answer(
+            msg,
+            pending_leave_step=snapshot.pending_leave_step,
+            leave_active=snapshot.leave_active,
+            leave_review_pending=snapshot.leave_review_pending,
+        )
     ):
         return _decision(
             turn_kind=TurnKind.CORRECTION,
@@ -581,6 +815,92 @@ def route_session_turn(
             reason="P11_suspended_leave_correction",
             matched_predicate="looks_like_suspended_leave_correction",
         )
+
+    # --- Tier 2c: resume suspended workflow (before slot-first binding) ---
+    from chat.services.expense_workflow import wants_resume_or_show_expense
+    from chat.services.workflow_suspend import wants_resume_suspended_leave
+
+    if snapshot.has_suspended_leave and wants_resume_suspended_leave(msg):
+        return _decision(
+            turn_kind=TurnKind.RESUME_SUSPENDED,
+            intent=INTENT_LEAVE_REQUEST,
+            target_workflow="leave",
+            handler_id="workflow_suspend",
+            reason="P52_resume_suspended_leave",
+            matched_predicate="wants_resume_suspended_leave",
+        )
+
+    if snapshot.expense_domain_active and wants_resume_or_show_expense(msg):
+        return _decision(
+            turn_kind=TurnKind.RESUME_SUSPENDED,
+            intent=INTENT_EXPENSE_CLAIM,
+            target_workflow="expense",
+            handler_id="expense_workflow",
+            reason="P53_resume_or_show_expense",
+            matched_predicate="wants_resume_or_show_expense",
+        )
+
+    # --- Tier 5a: slot-first binding (MUST beat balance/meta/clarify heuristics) ---
+    from chat.services.session_expected_answer import (
+        message_plausibly_answers_prompt,
+        snapshot_has_pending_prompt,
+    )
+    from chat.services.expense.session_action_memory import wants_expense_meta_question
+    from chat.services.leave.session_action_memory import wants_leave_meta_question
+
+    from chat.services.workflow_navigation import is_leave_application_message
+
+    if (
+        snapshot_has_pending_prompt(snapshot)
+        and message_plausibly_answers_prompt(msg, snapshot)
+        and not snapshot.balance_probe
+        and not _is_policy_query(msg)
+        and not is_leave_application_message(msg)
+        and not wants_leave_meta_question(msg)
+        and not wants_expense_meta_question(msg)
+        and not looks_like_expense_correction(msg)
+    ):
+        from chat.services.leave_balance_intent import is_leave_balance_query
+        from chat.services.expense_workflow import wants_expense_summary
+        from chat.services.leave_meta_queries import wants_leave_session_summary
+        from chat.services.expense.session_action_memory import (
+            wants_expense_pre_submit_review,
+        )
+
+        if is_leave_balance_query(msg):
+            pass
+        elif wants_expense_summary(msg) or wants_leave_session_summary(msg):
+            pass
+        elif wants_expense_pre_submit_review(msg):
+            pass
+        else:
+            domain = snapshot.active_prompt_domain
+            if domain == "leave":
+                return _decision(
+                    turn_kind=TurnKind.SLOT_ANSWER,
+                    intent=INTENT_LEAVE_REQUEST,
+                    target_workflow="leave",
+                    handler_id="leave_workflow",
+                    reason="P79_slot_first_leave",
+                    matched_predicate="message_plausibly_answers_prompt",
+                    flags={
+                        "active_prompt_slot": snapshot.active_prompt_slot,
+                        "expected_answer_kind": snapshot.expected_answer_kind,
+                    },
+                )
+            if domain == "expense":
+                return _decision(
+                    turn_kind=TurnKind.SLOT_ANSWER,
+                    intent=INTENT_EXPENSE_CLAIM,
+                    target_workflow="expense",
+                    handler_id="expense.turn_router",
+                    reason="P79_slot_first_expense",
+                    matched_predicate="message_plausibly_answers_prompt",
+                    flags={
+                        "active_prompt_slot": snapshot.active_prompt_slot,
+                        "expected_answer_kind": snapshot.expected_answer_kind,
+                    },
+                )
 
     # --- Tier 5b: informational interrupts (MUST beat P80 slot tokens) ---
     from chat.services.leave.user_goal import (
@@ -641,6 +961,10 @@ def route_session_turn(
         and looks_like_date_only_message(msg)
         and not looks_like_expense_correction(msg)
         and not _strong_expense_claim(msg)
+        and not (
+            snapshot.leave_active
+            and not snapshot.leave_review_pending
+        )
     ):
         return _decision(
             turn_kind=TurnKind.CORRECTION,
@@ -779,6 +1103,8 @@ def route_session_turn(
             leave_active=snapshot.leave_active,
             expense_active=snapshot.expense_active,
             workflow_continuation=snapshot.workflow_continuation,
+            pending_prompt_snapshot=snapshot if snapshot.has_pending_prompt else None,
+            workflow_state=workflow_state,
         )
     ):
         return _decision(
@@ -844,26 +1170,6 @@ def route_session_turn(
             handler_id="expense_workflow",
             reason="P41_expense_summary",
             matched_predicate="wants_expense_summary",
-        )
-
-    if snapshot.has_suspended_leave and wants_resume_suspended_leave(msg):
-        return _decision(
-            turn_kind=TurnKind.RESUME_SUSPENDED,
-            intent=INTENT_LEAVE_REQUEST,
-            target_workflow="leave",
-            handler_id="workflow_suspend",
-            reason="P52_resume_suspended_leave",
-            matched_predicate="wants_resume_suspended_leave",
-        )
-
-    if snapshot.expense_domain_active and wants_resume_or_show_expense(msg):
-        return _decision(
-            turn_kind=TurnKind.RESUME_SUSPENDED,
-            intent=INTENT_EXPENSE_CLAIM,
-            target_workflow="expense",
-            handler_id="expense_workflow",
-            reason="P53_resume_or_show_expense",
-            matched_predicate="wants_resume_or_show_expense",
         )
 
     # --- Tier 4: confirm / deny / defer ---
@@ -955,6 +1261,8 @@ def route_session_turn(
     from chat.services.workflow_navigation import is_leave_application_message
 
     if snapshot.expense_active and is_leave_application_message(msg):
+        p50_flags = {"suspend_expense": True}
+        p50_flags.update(_expense_interactive_clear_flags(snapshot, msg))
         return _decision(
             turn_kind=TurnKind.WORKFLOW_SWITCH,
             intent=INTENT_LEAVE_REQUEST,
@@ -962,7 +1270,7 @@ def route_session_turn(
             handler_id="workflow_suspend",
             reason="P50_switch_to_leave",
             matched_predicate="is_leave_application_message",
-            flags={"suspend_expense": True},
+            flags=p50_flags,
         )
 
     if (
@@ -987,6 +1295,7 @@ def route_session_turn(
     if (
         snapshot.expense_active
         and is_leave_navigation_phrase(msg)
+        and not is_leave_application_message(msg)
         and not snapshot.has_suspended_leave
         and not snapshot.leave_active
     ):
@@ -1055,7 +1364,6 @@ def route_session_turn(
 
     if workflow_state and snapshot.expense_active:
         from chat.services.workflow_navigation import is_leave_application_message
-        import re
 
         if is_leave_application_message(msg):
             from chat.services.leave_meta_queries import check_duplicate_tomorrow_leave
@@ -1157,7 +1465,7 @@ def route_session_turn(
 
     if snapshot.expense_active and looks_like_expense_wizard_continuation(msg):
         return _decision(
-            turn_kind=TurnKind.SLOT_ANSWER,
+            turn_kind=TurnKind.CONTINUE_WIZARD,
             intent=INTENT_EXPENSE_CLAIM,
             target_workflow="expense",
             handler_id="expense.turn_router",

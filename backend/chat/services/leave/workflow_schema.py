@@ -56,10 +56,10 @@ class LeaveWorkflowSchema:
 
     ask_order: tuple[str, ...] = (
         SLOT_DATE_CLARIFY,
+        SLOT_DATES,
         SLOT_LEAVE_TYPE,
         SLOT_SCOPE,
         SLOT_HALF_PERIOD,
-        SLOT_DATES,
         SLOT_REASON,
         SLOT_DOCUMENT,
     )
@@ -114,8 +114,8 @@ class LeaveWorkflowSchema:
             missing.append(SLOT_DATE_CLARIFY)
 
         if date_error:
-            missing.append(SLOT_DATES)
-            return self._order(missing)
+            if SLOT_DATES not in missing:
+                missing.append(SLOT_DATES)
 
         lt = str(draft.get("leave_type") or "").strip().lower()
         if lt not in WIZARD_LEAVE_TYPES:

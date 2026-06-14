@@ -56,6 +56,7 @@ class SessionSnapshot:
     expense_delete_verify_pending: bool
     expense_ordinal_amount_confirm_pending: bool
     expense_amount_correction_pending: bool
+    expense_active_prompt_kind: str | None
     leave_submit_confirm_pending: bool
     expense_submit_confirm_pending: bool
     # Pre-computed routing hints
@@ -70,6 +71,10 @@ class SessionSnapshot:
     is_cancel: bool
     expense_submission_locked: bool
     leave_submission_locked: bool
+    # Structured prompt binding (slot-first context)
+    active_prompt_domain: str | None
+    active_prompt_slot: str | None
+    expected_answer_kind: str
 
     @property
     def expense_domain_active(self) -> bool:
@@ -86,6 +91,16 @@ class SessionSnapshot:
     @property
     def leave_summary_available(self) -> bool:
         return self.leave_domain_active or self.has_leave_summary_context
+
+    @property
+    def has_pending_prompt(self) -> bool:
+        return self.expected_answer_kind not in ("", "none")
+
+
+def _empty_prompt_fields() -> tuple[str | None, str | None, str]:
+    from chat.services.session_expected_answer import KIND_NONE
+
+    return None, None, KIND_NONE
 
 
 def _expense_items_count(workflow_state: dict[str, Any]) -> int:
@@ -192,6 +207,16 @@ def build_classifier_snapshot(
     """Minimal snapshot for ``turn_classifier`` (flags only, no workflow_state)."""
     expense_stage = "review" if expense_review_pending else ("collecting" if expense_active else None)
     leave_stage = "review_pending" if leave_review_pending else ("collecting" if leave_active else None)
+    from chat.services.session_expected_answer import derive_prompt_context_fields
+
+    prompt_ctx = derive_prompt_context_fields(
+        leave_active=leave_active,
+        leave_review_pending=leave_review_pending,
+        leave_submit_confirm_pending=leave_review_pending,
+        pending_leave_step=pending_leave_step,
+        expense_active=expense_active,
+        pending_expense_step=pending_expense_step or None,
+    )
     return SessionSnapshot(
         message=(message or "").strip(),
         leave_active=leave_active,
@@ -210,6 +235,7 @@ def build_classifier_snapshot(
         expense_delete_verify_pending=False,
         expense_ordinal_amount_confirm_pending=False,
         expense_amount_correction_pending=False,
+        expense_active_prompt_kind=None,
         leave_submit_confirm_pending=leave_review_pending,
         expense_submit_confirm_pending=expense_review_pending,
         duplicate_leave_prompt=None,
@@ -222,6 +248,9 @@ def build_classifier_snapshot(
         is_cancel=_is_cancel_form_request(message),
         expense_submission_locked=False,
         leave_submission_locked=False,
+        active_prompt_domain=prompt_ctx.domain,
+        active_prompt_slot=prompt_ctx.slot,
+        expected_answer_kind=prompt_ctx.kind,
     )
 
 
@@ -280,6 +309,29 @@ def build_session_snapshot(
     elif leave_review_pending:
         leave_stage = "review_pending"
 
+    dup_choice_pending = is_duplicate_leave_choice_pending(wf)
+    exp_delete_pending = is_expense_delete_verify_pending(exp_block)
+    exp_submit_confirm = bool(expense_active and is_expense_submit_confirm(exp_block))
+
+    from chat.services.expense.prompt_routing import expense_active_prompt_kind
+
+    exp_prompt_kind = expense_active_prompt_kind(exp_block)
+
+    from chat.services.session_expected_answer import derive_prompt_context_fields
+
+    prompt_ctx = derive_prompt_context_fields(
+        duplicate_leave_choice_pending=dup_choice_pending,
+        leave_active=leave_active,
+        leave_review_pending=leave_review_pending,
+        leave_submit_confirm_pending=leave_review_pending,
+        pending_leave_step=pending_leave,
+        expense_active=expense_active,
+        expense_delete_verify_pending=exp_delete_pending,
+        expense_submit_confirm_pending=exp_submit_confirm,
+        pending_expense_step=pending_expense,
+        expense_active_prompt_kind=exp_prompt_kind,
+    )
+
     return SessionSnapshot(
         message=msg,
         leave_active=leave_active,
@@ -294,16 +346,15 @@ def build_session_snapshot(
         has_suspended_expense=suspended_expense,
         has_expense_draft=has_draft,
         has_leave_summary_context=leave_summary_ctx,
-        duplicate_leave_choice_pending=is_duplicate_leave_choice_pending(wf),
-        expense_delete_verify_pending=is_expense_delete_verify_pending(exp_block),
+        duplicate_leave_choice_pending=dup_choice_pending,
+        expense_delete_verify_pending=exp_delete_pending,
         expense_ordinal_amount_confirm_pending=has_ordinal_amount_confirm_pending(
             exp_block
         ),
         expense_amount_correction_pending=has_amount_correction_pending(exp_block),
+        expense_active_prompt_kind=exp_prompt_kind,
         leave_submit_confirm_pending=leave_review_pending,
-        expense_submit_confirm_pending=bool(
-            expense_active and is_expense_submit_confirm(exp_block)
-        ),
+        expense_submit_confirm_pending=exp_submit_confirm,
         duplicate_leave_prompt=dup_prompt,
         balance_probe=balance_probe if balance_probe is not None else _leave_balance_probe(msg),
         policy_interrupt=(
@@ -316,4 +367,7 @@ def build_session_snapshot(
         is_cancel=is_cancel if is_cancel is not None else _is_cancel_form_request(msg),
         expense_submission_locked=expense_submission_locked,
         leave_submission_locked=leave_submission_locked,
+        active_prompt_domain=prompt_ctx.domain,
+        active_prompt_slot=prompt_ctx.slot,
+        expected_answer_kind=prompt_ctx.kind,
     )

@@ -50,6 +50,10 @@ def looks_like_suspended_leave_correction(message: str) -> bool:
     raw = normalize_message_for_parsing(message)
     if not raw.strip():
         return False
+    from chat.services.workflow_suspend import wants_resume_suspended_leave
+
+    if wants_resume_suspended_leave(raw):
+        return False
     from chat.services.expense.expense_confirm import looks_like_expense_correction
 
     if looks_like_expense_correction(raw):
@@ -85,6 +89,20 @@ def looks_like_suspended_leave_correction(message: str) -> bool:
     ) and re.search(r"\d", raw):
         return False
     if looks_like_leave_review_update(raw):
+        from chat.services.leave.normalization import (
+            parse_day_scope_answer,
+            parse_wizard_leave_type_answer,
+        )
+        from chat.services.leave_workflow import _is_compound_slot_message
+
+        if _is_compound_slot_message(raw):
+            if parse_wizard_leave_type_answer(raw) or parse_day_scope_answer(raw):
+                if not (
+                    _DATE_SWAP_RE.search(raw)
+                    or _REASON_SWAP_RE.search(raw)
+                    or _END_DATE_SWAP_RE.search(raw)
+                ):
+                    return False
         return True
     if (
         _END_DATE_SWAP_RE.search(raw)
@@ -263,6 +281,13 @@ def _patch_leave_draft(
     raw = normalize_message_for_parsing(message)
 
     if _apply_leave_type_correction(draft, message):
+        changed = True
+
+    from chat.services.leave.normalization import parse_day_scope_answer
+
+    scope = parse_day_scope_answer(message)
+    if scope:
+        draft["day_scope"] = scope
         changed = True
 
     if _DURATION_SWAP_RE.search(raw) or re.search(r"দুই\s*দিন|two\s*days?", raw, re.I):

@@ -109,14 +109,9 @@ def handle_duplicate_leave_choice_turn(
     if choice == "new":
         from chat.services.leave_fsm import STATUS_ACTIVE, apply_leave_state
 
-        pending = wf.get(KEY_DUPLICATE_LEAVE_CHOICE) or {}
         wf = clear_duplicate_leave_choice_pending(wf)
+        # Fresh draft — do not seed overlap target dates (user picks dates next).
         draft: dict[str, Any] = {}
-        ts = str(pending.get("target_start") or "").strip()
-        te = str(pending.get("target_end") or ts).strip()
-        if ts:
-            draft["start_date"] = ts
-            draft["end_date"] = te or ts
         wf = apply_leave_state(
             wf,
             draft=draft,

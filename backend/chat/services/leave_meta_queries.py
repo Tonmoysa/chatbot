@@ -140,6 +140,20 @@ def should_block_parallel_leave_application(
     wf = workflow_state or {}
     if not is_leave_in_progress(wf):
         return False
+    from chat.services.leave_fsm import (
+        ACTIVE_FLOW_LEAVE,
+        STATUS_ACTIVE,
+        read_leave_state,
+    )
+
+    st = read_leave_state(wf)
+    if (
+        st.get("active_flow") == ACTIVE_FLOW_LEAVE
+        and st.get("step")
+        and not st.get("review_pending")
+        and str(st.get("status") or "") == STATUS_ACTIVE
+    ):
+        return False
     if not _leave_has_parallel_block_progress(wf):
         return False
     if not is_leave_application_message(message):
@@ -348,6 +362,33 @@ def _draft_covers_date(draft: dict[str, Any], target_iso: str) -> bool:
         return s <= t <= e
     except ValueError:
         return start == target_iso
+
+
+def block_duplicate_submitted_leave_dates(
+    workflow_state: dict[str, Any],
+    entities: dict[str, Any],
+) -> str | None:
+    """Block submitting the same calendar date twice in one session."""
+    from chat.services.leave_fsm import read_leave_last_submission
+
+    last = read_leave_last_submission(workflow_state)
+    if not last.get("submission_id"):
+        return None
+    submitted = dict(last.get("draft") or {})
+    sub_start = str(submitted.get("start_date") or "")
+    sub_end = str(submitted.get("end_date") or sub_start)
+    if not sub_start:
+        return None
+    start = str(entities.get("start_date") or "")
+    end = str(entities.get("end_date") or start)
+    if not start:
+        return None
+    if _iso_ranges_overlap(start, end, sub_start, sub_end):
+        return build_duplicate_session_leave_message(
+            target_iso=start,
+            submission_id=str(last.get("submission_id") or ""),
+        )
+    return None
 
 
 def check_overlapping_submitted_leave(

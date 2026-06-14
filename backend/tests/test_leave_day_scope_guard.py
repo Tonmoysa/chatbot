@@ -143,6 +143,34 @@ def test_single_day_submit_command_does_not_invent_full_day(monkeypatch):
     assert "**Full day**" not in q
 
 
+def test_llm_invented_half_period_stripped():
+    from chat.services.leave.normalization import (
+        strip_ungrounded_day_scope,
+        strip_ungrounded_half_day_period,
+    )
+
+    msg = "agami 15 august leave chai"
+    ent = {"day_scope": "half", "half_day_period": "second", "start_date": "2026-08-15"}
+    out = strip_ungrounded_half_day_period(
+        strip_ungrounded_day_scope(ent, msg),
+        msg,
+    )
+    assert "half_day_period" not in out
+    assert "day_scope" not in out
+
+
+def test_normalize_clears_orphan_half_period():
+    from chat.services.leave.normalization import normalize_leave_draft
+
+    draft = {
+        "start_date": "2026-08-15",
+        "half_day_period": "second",
+        "day_scope": "full",
+    }
+    normalize_leave_draft(draft)
+    assert draft.get("half_day_period") is None
+
+
 def test_multi_day_leave_auto_full_day_without_prompt(monkeypatch):
     fixed = dt.date(2026, 6, 11)
     monkeypatch.setattr("chat.services.leave_slot_extraction._today", lambda: fixed)

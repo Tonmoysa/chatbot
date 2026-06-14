@@ -270,8 +270,17 @@ def is_confirmation_yes(message: str) -> bool:
         if not _has_affirmative_token(t):
             return False
 
-    if _CONFIRM_YES_RE.match(t):
+    try:
+        from chat.services.workflow_suspend import wants_resume_suspended_leave
 
+        if wants_resume_suspended_leave(t):
+            return False
+    except Exception:
+        pass
+
+    if _CONFIRM_YES_RE.match(t):
+        if len(t.split()) > 3:
+            return False
         return True
 
     if re.search(r"\b(expense|খরচ)\b", t, re.I) and re.search(
@@ -1014,17 +1023,24 @@ def process_confirmation_turn(
         )
         from chat.services.leave.turn_apply import apply_leave_field_update
         from chat.services.leave.turn_parser import resolve_leave_turn
+        from chat.services.leave.turn_executor import (
+            leave_turn_from_execution_hint,
+            router_forces_review_correction,
+        )
         from chat.services.leave.turn_schema import TURN_EDIT_FIELD
         from chat.services.leave_slots import SLOT_DATES, generate_question, get_missing_slots
 
         d["_last_user_message"] = message
-        changed = try_apply_review_compound_update(
-            d,
-            message,
-            entities=entities,
-            trace_id=trace_id,
-            use_llm=True,
-        )
+        router_turn = leave_turn_from_execution_hint(wf)
+        changed = False
+        if not router_forces_review_correction(wf):
+            changed = try_apply_review_compound_update(
+                d,
+                message,
+                entities=entities,
+                trace_id=trace_id,
+                use_llm=True,
+            )
         if not changed:
             decision = resolve_leave_turn(
                 message,
@@ -1032,6 +1048,7 @@ def process_confirmation_turn(
                 review_pending=True,
                 entities=entities,
                 use_llm=True,
+                router_turn=router_turn,
             )
             if (
                 decision.turn_type == TURN_EDIT_FIELD

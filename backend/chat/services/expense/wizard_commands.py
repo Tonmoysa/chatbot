@@ -156,6 +156,58 @@ def wants_expense_submit_command(message: str) -> bool:
     return False
 
 
+_SUBMIT_TAIL_RE = re.compile(
+    r"(?:"
+    r"(?:\s*(?:eta|eita|aita|this|that|egulo|these|gulo|aigulo))\s+)?"
+    r"(?:"
+    r"(?:submit|sumit|submmit|submite|joma|জমা)\s*(?:kore?\s*)?"
+    r"(?:daw|dao|de|debo|diye|koro|kor|করো|করুন|দাও|দিন)"
+    r"|"
+    r"(?:submit|sumit|submmit|submite)\s+(?:kore?\s*)?(?:daw|dao|de|debo|koro|kor)"
+    r")"
+    r"\s*\.?$",
+    re.I | re.UNICODE,
+)
+
+
+def strip_expense_submit_tail_for_parse(message: str) -> str:
+    """Remove trailing submit/joma phrasing so expense lines can be parsed."""
+    t = (message or "").strip()
+    if not t:
+        return ""
+    m = _SUBMIT_TAIL_RE.search(t)
+    if m and m.start() > 0:
+        return t[: m.start()].strip().rstrip(",;.")
+    return t
+
+
+def message_has_ingestible_claim_body(body: str, *, original: str = "") -> bool:
+    """True when stripped text still contains parseable new expense line(s)."""
+    text = (body or "").strip()
+    if not text:
+        return False
+    if text == (original or "").strip():
+        return False
+    try:
+        from chat.services.expense.expense_confirm import looks_like_compound_expense_claim
+        from chat.services.expense_extraction import extract_expense_items
+        from chat.services.intent_detector import _strong_expense_claim
+
+        ext = extract_expense_items(text)
+        if ext.items:
+            return True
+        if looks_like_compound_expense_claim(text):
+            return True
+        if _strong_expense_claim(text) and re.search(r"\d", text):
+            return True
+    except Exception:
+        pass
+    return bool(
+        re.search(rf"\b({_CATEGORY_TOKEN})\b", text, re.I)
+        and re.search(r"\d", text)
+    )
+
+
 def wants_expense_done_command_rules(message: str) -> bool:
     """Fast rule path for finish-collecting (exact / common phrases)."""
     t = (message or "").strip()

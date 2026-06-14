@@ -348,7 +348,7 @@ def test_router_anual_token_during_collecting() -> None:
     }
     snap = build_session_snapshot("anual leave", workflow_state=wf)
     decision = route_session_turn(snap, workflow_state=wf)
-    assert decision.reason == "P80_leave_slot_token"
+    assert decision.reason in ("P80_leave_slot_token", "P79_slot_first_leave")
     assert decision.intent == INTENT_LEAVE_REQUEST
 
 

@@ -9,6 +9,7 @@ guessing (e.g. showing leave balance).
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from chat.constants import INTENT_LEAVE_BALANCE, INTENT_LEAVE_REQUEST, INTENT_UNKNOWN
 from chat.services.translator import detect_reply_language, detect_user_language
@@ -48,6 +49,15 @@ def looks_underspecified_message(message: str) -> bool:
     raw = (message or "").strip()
     if not raw or len(raw) > 120:
         return False
+    try:
+        if re.match(
+            r"^#?\d{1,2}\s*(?:number|নম্বর|no\.?|ta)?\s*$",
+            raw,
+            re.I | re.UNICODE,
+        ):
+            return False
+    except Exception:
+        pass
     try:
         from chat.services.policy_intent_helpers import (
             is_general_knowledge_out_of_scope,
@@ -99,12 +109,32 @@ def should_ask_context_clarification(
     leave_active: bool,
     expense_active: bool,
     workflow_continuation: bool,
+    pending_prompt_snapshot: Any | None = None,
+    workflow_state: dict[str, Any] | None = None,
 ) -> bool:
     """
     Ask the user to elaborate instead of mis-routing underspecified fragments.
     """
     if balance_probe:
         return False
+    if pending_prompt_snapshot is not None:
+        from chat.services.session_expected_answer import message_plausibly_answers_prompt
+
+        if message_plausibly_answers_prompt(message, pending_prompt_snapshot):
+            return False
+    try:
+        from chat.services.expense.expense_fsm import read_expense_block
+        from chat.services.expense.interactive_pending import (
+            message_answers_expense_interactive_pending,
+        )
+
+        block = read_expense_block(workflow_state or {})
+        if isinstance(block, dict) and message_answers_expense_interactive_pending(
+            message, block
+        ):
+            return False
+    except Exception:
+        pass
     if not looks_underspecified_message(message):
         return False
     if (leave_active or expense_active) and workflow_continuation:

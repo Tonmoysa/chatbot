@@ -28,16 +28,19 @@ KEY_SUSPENDED_EXPENSE = "suspended_expense"
 KEY_RESTORE_LEAVE_AFTER_EXPENSE = "restore_leave_after_expense_submit"
 
 # Banglish / Bengali / English — user phrasing varies; keep patterns broad.
+# Use word boundaries on short tokens so ``reason`` does not match ``as[o]``.
 _NAV_VERB = (
-    r"(?:back|return|resume|asho|as[o]|ferot|ফির|আস|চালু|continue|jao|যা|"
-    r"e\s+back|e\s+asho|e\s+as[o])"
+    r"(?:\bback\b|\breturn\b|\bresume\b|\basho\b|\baso\b|\bferot\b|"
+    r"ফির|আস|চালু|\bcontinue\b|\bjao\b|যা|"
+    r"e\s+back|e\s+asho|e\s+aso\b)"
 )
 _RESUME_SUSPENDED_LEAVE_RE = re.compile(
     r"(?:"
     rf"(?:leave|chuti|chhuti|chutti|ছুটি)(?:\s*(?:request|form|abedon|application|আবেদন))?"
     rf".{{0,35}}{_NAV_VERB}(?:\s*(?:koro|kor|কর|দাও|dao|daw))?|"
     rf"{_NAV_VERB}.{{0,30}}(?:leave|chuti|chhuti|ছুটি)|"
-    r"leave\s+request.{0,35}(?:back|return|resume|e\s+back|again|abar|asho|as[o])|"
+    r"leave\s+request.{0,40}(?:back|return|resume|e\s+back|again|abar|asho|as[o])(?:\s*(?:daw|dao|kor|koro))?|"
+    r"(?:leave|chuti|chhuti|ছুটি)\s+request.{0,25}(?:again|abar|আবার).{0,15}(?:daw|dao|kor|koro|দাও)|"
     r"(?:ছুটি|leave).{0,30}(?:back|ferot|return|e\s+back|আবার|ফির|আসো|আস)|"
     r"back\s+to\s+leave"
     r")",
@@ -50,19 +53,16 @@ def wants_resume_suspended_leave(message: str) -> bool:
     t = (message or "").strip()
     if not t:
         return False
+    if _RESUME_SUSPENDED_LEAVE_RE.search(t):
+        return True
     try:
-        from chat.services.leave_confirm import (
-            is_confirmation_yes,
-            wants_defer_expense_for_leave_submit,
-        )
+        from chat.services.leave_confirm import wants_defer_expense_for_leave_submit
 
-        if is_confirmation_yes(t):
-            return False
         if wants_defer_expense_for_leave_submit(t):
             return True
     except Exception:
         pass
-    return bool(_RESUME_SUSPENDED_LEAVE_RE.search(t))
+    return False
 
 
 def switch_active_expense_to_suspended_leave(workflow_state: dict[str, Any]) -> dict[str, Any]:
@@ -155,7 +155,10 @@ def suspend_expense_for_workflow_switch(workflow_state: dict[str, Any]) -> dict[
     block = wf.get("expense_request")
     if not isinstance(block, dict) or not block.get("active"):
         return wf
-    wf[KEY_SUSPENDED_EXPENSE] = {"expense_request": dict(block)}
+    from chat.services.expense.interactive_pending import clear_expense_interactive_pending
+
+    block = clear_expense_interactive_pending(dict(block))
+    wf[KEY_SUSPENDED_EXPENSE] = {"expense_request": block}
     wf.pop("expense_request", None)
     return wf
 
@@ -171,6 +174,9 @@ def restore_suspended_expense(workflow_state: dict[str, Any]) -> dict[str, Any]:
     block = dict(block)
     block["active"] = True
     block.pop("paused", None)
+    from chat.services.expense.interactive_pending import clear_expense_interactive_pending
+
+    block = clear_expense_interactive_pending(block)
     wf["expense_request"] = block
     return wf
 

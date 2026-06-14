@@ -69,6 +69,19 @@ class LeaveSubmissionService:
                 detail="Leave already submitted for this session.",
             )
 
+        from chat.services.leave_meta_queries import block_duplicate_submitted_leave_dates
+
+        dup_msg = block_duplicate_submitted_leave_dates(wf, entities)
+        if dup_msg:
+            return LeaveSubmissionResult(
+                ok=False,
+                submission_id="",
+                workflow_state=wf,
+                payload={},
+                crm_response={},
+                detail=dup_msg,
+            )
+
         idem = (idempotency_key or "").strip()
         if idem and st.get("idempotency_key") == idem and st.get("submission_id"):
             from chat.services.leave.session_action_memory import record_leave_submitted

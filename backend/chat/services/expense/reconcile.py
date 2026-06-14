@@ -152,6 +152,62 @@ def apply_category_hobe_correction(
     return out, changed
 
 
+def _open_pending_travel_keys(block: dict[str, Any]) -> set[tuple[str, float]]:
+    from chat.services.expense.normalization import normalize_category_label
+
+    keys: set[tuple[str, float]] = set()
+    pl = block.get("pending_line") or {}
+    cat = normalize_category_label(str(pl.get("category") or ""))
+    try:
+        amt = round(float(pl.get("amount") or 0), 2)
+    except (TypeError, ValueError):
+        amt = 0.0
+    if cat and is_travel_category(cat) and amt > 0:
+        keys.add((cat, amt))
+    for row in block.get("pending_queue") or []:
+        if not isinstance(row, dict):
+            continue
+        cat = normalize_category_label(str(row.get("category") or ""))
+        try:
+            amt = round(float(row.get("amount") or 0), 2)
+        except (TypeError, ValueError):
+            continue
+        if cat and is_travel_category(cat) and amt > 0:
+            keys.add((cat, amt))
+    return keys
+
+
+def drop_pending_duplicate_travel_ingest(
+    items: list[Any],
+    *,
+    message: str,
+    block: dict[str, Any],
+) -> list[Any]:
+    """Drop LLM phantom travel lines that repeat an already-open pending route slot."""
+    from chat.services.expense.entity_merge import explicit_category_mentions
+    from chat.services.expense.normalization import normalize_category_label
+
+    pending_keys = _open_pending_travel_keys(block)
+    if not pending_keys:
+        return items
+    explicit = explicit_category_mentions(message)
+    out: list[Any] = []
+    for it in items:
+        cat = normalize_category_label(str(getattr(it, "category", "") or ""))
+        if not cat or not is_travel_category(cat):
+            out.append(it)
+            continue
+        try:
+            amt = round(float(getattr(it, "amount", 0) or 0), 2)
+        except (TypeError, ValueError):
+            out.append(it)
+            continue
+        if (cat, amt) in pending_keys and cat not in explicit:
+            continue
+        out.append(it)
+    return out
+
+
 def filter_llm_phantom_lines(
     items: list[Any],
     *,

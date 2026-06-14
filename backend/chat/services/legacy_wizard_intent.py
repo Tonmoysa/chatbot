@@ -386,11 +386,25 @@ def detect_intent_during_expense_workflow(
     if has_suspended_leave(workflow_state) and looks_like_suspended_leave_correction(
         message
     ):
-        return {
-            "intent": INTENT_LEAVE_REQUEST,
-            "confidence": 0.99,
-            "source": "expense_workflow_gate+suspended_leave_correction",
-        }
+        from chat.services.leave_fsm import read_leave_state, ACTIVE_FLOW_LEAVE
+        from chat.services.session_snapshot import build_session_snapshot
+        from chat.services.wizard_turn_gate import is_leave_collecting_slot_answer
+
+        snap = build_session_snapshot(message, workflow_state=workflow_state)
+        if not (
+            read_leave_state(workflow_state).get("active_flow") == ACTIVE_FLOW_LEAVE
+            and is_leave_collecting_slot_answer(
+                message,
+                pending_leave_step=snap.pending_leave_step,
+                leave_active=snap.leave_active,
+                leave_review_pending=snap.leave_review_pending,
+            )
+        ):
+            return {
+                "intent": INTENT_LEAVE_REQUEST,
+                "confidence": 0.99,
+                "source": "expense_workflow_gate+suspended_leave_correction",
+            }
     if wants_leave_session_summary(message):
         return {
             "intent": INTENT_LEAVE_REQUEST,
@@ -422,6 +436,26 @@ def detect_intent_during_expense_workflow(
             "intent": INTENT_LEAVE_REQUEST,
             "confidence": 0.99,
             "source": "expense_workflow_gate+resume_leave_nav",
+        }
+    if _is_leave_application_message(message):
+        from chat.services.leave_meta_queries import check_duplicate_tomorrow_leave
+
+        dup_msg = check_duplicate_tomorrow_leave(workflow_state)
+        if dup_msg and re.search(
+            r"agamikal|agamikal|আগামীকাল|tomorrow|kalke|kalker",
+            message or "",
+            re.I | re.UNICODE,
+        ):
+            return {
+                "intent": INTENT_LEAVE_REQUEST,
+                "confidence": 0.99,
+                "source": "expense_workflow_gate+duplicate_tomorrow",
+                "_block_message": dup_msg,
+            }
+        return {
+            "intent": INTENT_LEAVE_REQUEST,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+leave_apply",
         }
     from chat.services.leave_workflow import is_leave_in_progress
     from chat.services.workflow_navigation import is_leave_navigation_phrase
@@ -547,26 +581,6 @@ def detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+entitlement",
         }
-    if _is_leave_application_message(message):
-        from chat.services.leave_meta_queries import check_duplicate_tomorrow_leave
-
-        dup_msg = check_duplicate_tomorrow_leave(workflow_state)
-        if dup_msg and re.search(
-            r"agamikal|agamikal|আগামীকাল|tomorrow|kalke|kalker",
-            message or "",
-            re.I | re.UNICODE,
-        ):
-            return {
-                "intent": INTENT_LEAVE_REQUEST,
-                "confidence": 0.99,
-                "source": "expense_workflow_gate+duplicate_tomorrow",
-                "_block_message": dup_msg,
-            }
-        return {
-            "intent": INTENT_LEAVE_REQUEST,
-            "confidence": 0.99,
-            "source": "expense_workflow_gate+leave_apply",
-        }
     if _looks_like_chitchat(message, strict=True) or _is_fresh_start_greeting(message):
         return {
             "intent": INTENT_UNKNOWN,
@@ -584,6 +598,12 @@ def detect_intent_during_expense_workflow(
             "intent": INTENT_UNKNOWN,
             "confidence": 0.99,
             "source": "expense_workflow_gate+side_question",
+        }
+    if balance_probe:
+        return {
+            "intent": INTENT_LEAVE_BALANCE,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+balance",
         }
     if looks_like_expense_wizard_continuation(message):
         return {

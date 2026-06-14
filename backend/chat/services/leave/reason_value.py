@@ -143,6 +143,12 @@ def looks_like_wizard_slot_label(text: str) -> bool:
         return False
     if _BARE_SLOT_LABEL_RE.match(raw) or _WIZARD_SLOT_PHRASE_RE.match(raw):
         return True
+    # Compound application sentences may mention sick/unpaid — not slot labels.
+    if len(raw.split()) > 5:
+        return False
+    # Short health/cause phrases are reasons (e.g. ``onek osusto``), not Select Leave.
+    if looks_like_health_leave_reason(raw) and len(raw.split()) <= 4:
+        return False
     try:
         from chat.services.leave.normalization import looks_like_wizard_leave_type_answer
 
@@ -450,6 +456,13 @@ def extract_reason_value(message: str, *, edit_context: bool = False) -> str | N
         from chat.services.workflow_navigation import is_leave_navigation_phrase
 
         if is_leave_navigation_phrase(raw):
+            return None
+    except Exception:
+        pass
+    try:
+        from chat.services.leave.date_correction import looks_like_date_only_message
+
+        if looks_like_date_only_message(raw):
             return None
     except Exception:
         pass

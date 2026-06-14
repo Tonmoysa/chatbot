@@ -135,6 +135,7 @@ class LeaveEntityPipeline:
 
         from chat.services.leave.normalization import (
             strip_ungrounded_day_scope,
+            strip_ungrounded_half_day_period,
             strip_ungrounded_leave_dates,
             strip_ungrounded_payment_category,
         )
@@ -142,6 +143,7 @@ class LeaveEntityPipeline:
 
         entities = strip_ungrounded_payment_category(entities, message)
         entities = strip_ungrounded_day_scope(entities, message)
+        entities = strip_ungrounded_half_day_period(entities, message)
         entities = strip_ungrounded_leave_dates(entities, message)
         entities = strip_ungrounded_reason(entities, message)
 
@@ -175,6 +177,7 @@ class LeaveEntityPipeline:
             message_mentions_leave_duration,
             should_suppress_inferred_leave_dates,
             strip_ungrounded_day_scope,
+            strip_ungrounded_half_day_period,
             strip_ungrounded_leave_dates,
             strip_ungrounded_payment_category,
         )
@@ -183,6 +186,7 @@ class LeaveEntityPipeline:
 
         ent = strip_ungrounded_payment_category(ent, message)
         ent = strip_ungrounded_day_scope(ent, message)
+        ent = strip_ungrounded_half_day_period(ent, message)
         ent = strip_ungrounded_leave_dates(ent, message)
         ent = strip_ungrounded_reason(ent, message)
         preserve_dates = overwrite and not message_explicitly_states_leave_date(message)
@@ -191,6 +195,9 @@ class LeaveEntityPipeline:
         preserved_start = draft.get("start_date") if preserve_dates else None
         preserved_end = draft.get("end_date") if preserve_dates else None
         had_scope = bool(draft.get("day_scope"))
+        had_payment = bool(draft.get("leave_payment_category"))
+        had_start_date = bool(draft.get("start_date"))
+        had_end_date = bool(draft.get("end_date"))
         if not ent and self._extractor._llm.is_configured():
             local = self.extract(
                 message,
@@ -268,12 +275,21 @@ class LeaveEntityPipeline:
         if not had_scope and not message_explicitly_states_day_scope(message):
             draft.pop("day_scope", None)
 
-        if not message_explicitly_states_payment_category(message):
+        if (
+            not had_payment
+            and not message_explicitly_states_payment_category(message)
+        ):
             draft.pop("leave_payment_category", None)
 
         if should_suppress_inferred_leave_dates(message):
             draft.pop("start_date", None)
             draft.pop("end_date", None)
+
+        if not message_explicitly_states_leave_date(message):
+            if not had_start_date:
+                draft.pop("start_date", None)
+            if not had_end_date:
+                draft.pop("end_date", None)
 
         if preserve_dates:
             if preserved_start:

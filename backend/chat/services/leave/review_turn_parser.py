@@ -111,6 +111,11 @@ def should_try_compound_review_update(message: str) -> bool:
     text = (message or "").strip()
     if len(text) < 8:
         return False
+    from chat.services.leave.normalization import parse_day_scope_answer
+
+    # Single-slot scope/payment edits use inline turn parser — not compound merge.
+    if parse_day_scope_answer(text) and len(text.split()) <= 4:
+        return False
     from chat.services.wizard_turn_gate import looks_like_leave_review_update
 
     return looks_like_leave_review_update(text) or is_review_compound_correction(text)
@@ -306,7 +311,11 @@ def _apply_rules_compound_update(
         changed = True
 
     scope = parse_day_scope_answer(text)
-    if scope and (not fill_gaps_only or not draft.get("day_scope")):
+    if scope and (
+        not fill_gaps_only
+        or not draft.get("day_scope")
+        or scope != draft.get("day_scope")
+    ):
         draft["day_scope"] = scope
         changed = True
 
@@ -420,6 +429,9 @@ def try_apply_review_compound_update(
     if not should_try_compound_review_update(text):
         return False
 
+    from chat.services.leave.normalization import normalize_leave_draft
+
+    normalize_leave_draft(draft)
     before = _draft_snapshot(draft)
     client = LLMClient() if use_llm else None
     llm_configured = bool(client and client.is_configured())

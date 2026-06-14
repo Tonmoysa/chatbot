@@ -495,6 +495,34 @@ def is_travel_category(category: str) -> bool:
     return normalize_category(category) in TRAVEL_CATEGORIES
 
 
+def strip_ungrounded_travel_routes(
+    items: list[ExpenseLineItem],
+    message: str,
+) -> list[ExpenseLineItem]:
+    """Clear From/To on travel lines when the user did not state that route."""
+    out: list[ExpenseLineItem] = []
+    for item in items:
+        cat = (item.category or "").strip()
+        frm = (item.from_location or "").strip()
+        to = (item.to_location or "").strip()
+        if (
+            cat
+            and is_travel_category(cat)
+            and frm
+            and to
+            and not route_explicit_in_user_message(message, frm, to)
+        ):
+            item = ExpenseLineItem(
+                category=item.category,
+                amount=item.amount,
+                from_location="",
+                to_location="",
+                notes=item.notes,
+            )
+        out.append(item)
+    return out
+
+
 def parse_category_token(message: str) -> str | None:
     text = message or ""
     if re.search(r"\bother\b", text, re.I):
@@ -815,6 +843,46 @@ def parse_from_to_locations(message: str) -> tuple[str, str] | None:
         if pair:
             return pair
     return None
+
+
+def _grounding_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def location_grounded_in_message(location: str, message: str) -> bool:
+    """True when a location label is explicitly present in the user message."""
+    loc = _grounding_text(_location_key(location))
+    msg = _grounding_text(preprocess_expense_message(message))
+    if not loc or not msg:
+        return False
+    if loc in msg:
+        return True
+    tokens = [
+        t
+        for t in re.findall(r"[a-zA-Z\u0980-\u09FF]+", loc)
+        if len(t) >= 3
+    ]
+    if not tokens:
+        return loc in msg
+    return all(t in msg for t in tokens)
+
+
+def route_explicit_in_user_message(
+    message: str,
+    from_loc: str,
+    to_loc: str,
+) -> bool:
+    """Both endpoints must appear in the user message — never from prompt examples."""
+    frm = (from_loc or "").strip()
+    to = (to_loc or "").strip()
+    if not frm or not to:
+        return False
+    if not location_grounded_in_message(frm, message):
+        return False
+    if not location_grounded_in_message(to, message):
+        return False
+    norm_msg = preprocess_expense_message(message)
+    return _looks_like_route_answer(norm_msg) or bool(parse_from_to_locations(norm_msg))
 
 
 def normalize_category(raw: str) -> str:

@@ -19,7 +19,10 @@ def test_schema_singleton():
     assert get_leave_workflow_schema() is get_leave_workflow_schema()
 
 
-def test_schema_missing_type_and_scope():
+def test_schema_missing_type_and_scope(monkeypatch):
+    import datetime as dt
+
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: dt.date(2026, 6, 1))
     schema = LeaveWorkflowSchema()
     missing = schema.missing_fields({"start_date": "2026-06-10"})
     assert SLOT_LEAVE_TYPE in missing
@@ -28,7 +31,10 @@ def test_schema_missing_type_and_scope():
     assert SLOT_DATES not in missing
 
 
-def test_schema_complete_draft():
+def test_schema_complete_draft(monkeypatch):
+    import datetime as dt
+
+    monkeypatch.setattr("chat.services.leave_draft_utils.today", lambda: dt.date(2026, 6, 1))
     schema = LeaveWorkflowSchema()
     draft = {
         "start_date": "2026-06-10",

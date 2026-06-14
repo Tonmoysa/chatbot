@@ -15,10 +15,15 @@ from chat.services.expense.entity_merge import (
     merge_parser_and_llm,
     overlay_llm_expense_lines,
 )
-from chat.services.expense_extraction import ExtractionResult, extract_expense_items
-from datetime import date
-
-from chat.services.expense_incurred_date import infer_expense_incurred_date_iso
+from chat.services.expense_extraction import (
+    ExtractionResult,
+    extract_expense_items,
+    strip_ungrounded_travel_routes,
+)
+from chat.services.expense_incurred_date import (
+    infer_expense_incurred_date_iso,
+)
+import chat.services.expense_incurred_date as expense_incurred_date_mod
 
 
 @dataclass
@@ -76,6 +81,10 @@ class ExpenseEntityPipeline:
         merged_ex, field_sources = merge_parser_and_llm(
             parser_ex, llm_entities, message
         )
+        merged_ex = ExtractionResult(
+            items=strip_ungrounded_travel_routes(merged_ex.items, message),
+            malformed=list(merged_ex.malformed),
+        )
 
         if llm_invoked:
             gap_ex, gap_sources = fill_parser_gaps_with_llm(
@@ -84,7 +93,10 @@ class ExpenseEntityPipeline:
                 message,
                 llm_used=True,
             )
-            merged_ex = gap_ex
+            merged_ex = ExtractionResult(
+                items=strip_ungrounded_travel_routes(gap_ex.items, message),
+                malformed=list(gap_ex.malformed),
+            )
             field_sources.update(gap_sources)
 
             if not merged_ex.items:
@@ -95,12 +107,17 @@ class ExpenseEntityPipeline:
                     llm_used=True,
                 )
                 if sem_ex.items:
-                    merged_ex = sem_ex
+                    merged_ex = ExtractionResult(
+                        items=strip_ungrounded_travel_routes(sem_ex.items, message),
+                        malformed=list(sem_ex.malformed),
+                    )
                 field_sources.update(sem_sources)
 
         entities = extraction_to_entities(merged_ex, llm_entities)
         inc = infer_expense_incurred_date_iso(
-            message=message, hints=llm_entities, today=date.today()
+            message=message,
+            hints=llm_entities,
+            today=expense_incurred_date_mod.date.today(),
         )
         if inc:
             entities["expense_incurred_date"] = inc

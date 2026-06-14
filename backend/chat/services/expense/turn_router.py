@@ -32,6 +32,7 @@ from chat.services.expense.turn_schema import (
     TURN_NAVIGATE,
     TURN_PRAISE,
     TURN_UNCLEAR,
+    TurnDecision,
     TurnRouteResult,
 )
 from chat.services.expense.slots import STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM
@@ -102,6 +103,15 @@ def _handle_amount_correction_pending_turn(
         return None
     pending = read_amount_correction_pending(block)
     if not pending:
+        return None
+
+    from chat.services.expense.interactive_pending import (
+        clear_expense_interactive_pending,
+        message_abandons_expense_interactive_pending,
+    )
+
+    if message_abandons_expense_interactive_pending(message, block):
+        clear_expense_interactive_pending(block)
         return None
 
     if is_confirmation_no(message):
@@ -426,6 +436,16 @@ def _handle_delete_verify_turn(
 
     if not is_expense_delete_verify_pending(block):
         return None
+
+    from chat.services.expense.interactive_pending import (
+        clear_expense_interactive_pending,
+        message_abandons_expense_interactive_pending,
+    )
+
+    if message_abandons_expense_interactive_pending(message, block):
+        clear_expense_interactive_pending(block)
+        return None
+
     idx = read_expense_delete_verify_index(block)
     if is_confirmation_no(message):
         block = clear_expense_delete_verify(block)
@@ -504,6 +524,24 @@ def _handle_delete_disambiguation_turn(
     )
 
     if not has_delete_disambiguation_pending(block):
+        return None
+
+    from chat.services.expense.active_prompt import (
+        KIND_DELETE_CONFIRM,
+        KIND_DELETE_PICK,
+        active_prompt_kind,
+    )
+
+    if active_prompt_kind(block) in (KIND_DELETE_PICK, KIND_DELETE_CONFIRM):
+        return None
+
+    from chat.services.expense.interactive_pending import (
+        clear_expense_interactive_pending,
+        message_abandons_expense_interactive_pending,
+    )
+
+    if message_abandons_expense_interactive_pending(message, block):
+        clear_expense_interactive_pending(block)
         return None
 
     reply_lang = lang or "banglish"
@@ -610,6 +648,7 @@ def route_expense_wizard_turn(
     trace_id: str = "",
     lang: str | None = None,
     last_question: str = "",
+    router_turn: TurnDecision | None = None,
 ) -> TurnRouteResult:
     """
     Return handled=True when this turn is fully processed by the unified router.
@@ -619,6 +658,35 @@ def route_expense_wizard_turn(
         block.get("pending_line") if isinstance(block.get("pending_line"), dict) else None
     )
     has_pending = bool(pending_line and pending_line.get("amount"))
+
+    from chat.services.expense.add_modify_residual import route_add_modify_residual
+    from chat.services.expense.active_prompt_handlers import handle_active_prompt_turn
+
+    residual_turn = route_add_modify_residual(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if residual_turn is not None:
+        return residual_turn
+
+    active_prompt_turn = handle_active_prompt_turn(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if active_prompt_turn is not None:
+        return active_prompt_turn
 
     delete_turn = _handle_delete_verify_turn(
         wf=wf,
@@ -710,6 +778,7 @@ def route_expense_wizard_turn(
         block=block,
         last_question=last_question,
         trace_id=trace_id,
+        router_turn=router_turn,
     )
 
     if not decision.is_handled():
@@ -797,8 +866,89 @@ def route_expense_wizard_turn(
         return TurnRouteResult(handled=False)
 
     if decision.turn_type == TURN_ADD_LINES:
-        # Let legacy workflow handle compound input while a slot is open.
+        from chat.services.expense.expense_confirm import (
+            looks_like_new_expense_during_pending_slot,
+        )
+        from chat.services.expense.wizard_commands import (
+            message_has_ingestible_claim_body,
+            strip_expense_submit_tail_for_parse,
+            wants_expense_submit_command,
+        )
+
+        ingest_message = message
+        if wants_expense_submit_command(message):
+            stripped = strip_expense_submit_tail_for_parse(message)
+            if message_has_ingestible_claim_body(stripped, original=message):
+                ingest_message = stripped
+
         if pending_step in ("from_to", "category"):
+            pending_dict = (
+                pending_line if isinstance(pending_line, dict) else {}
+            )
+            allow_pending_ingest = (
+                decision.source
+                in (
+                    "rules_submit_with_claims",
+                    "rules_fresh_multi_during_slot",
+                    "rules_new_line_during_slot",
+                )
+                or looks_like_new_expense_during_pending_slot(
+                    ingest_message,
+                    pending_dict,
+                    items,
+                    block,
+                    pending_step=pending_step,
+                )
+            )
+            if allow_pending_ingest:
+                from chat.services.expense_workflow import (
+                    _ingest_new_claim_preserving_pending_category,
+                    _ingest_new_claim_preserving_pending_from_to,
+                    try_finish_collecting_after_ingest,
+                )
+
+                if pending_step == "from_to":
+                    pack = _ingest_new_claim_preserving_pending_from_to(
+                        wf,
+                        block,
+                        items,
+                        pending_dict,
+                        ingest_message,
+                        inc_iso=inc_iso,
+                        day_logged_total=day_logged_total,
+                        daily_cap=daily_cap,
+                        trace_id=trace_id,
+                        pipeline_result=pipeline_result,
+                    )
+                else:
+                    pack = _ingest_new_claim_preserving_pending_category(
+                        wf,
+                        block,
+                        items,
+                        pending_dict,
+                        ingest_message,
+                        inc_iso=inc_iso,
+                        day_logged_total=day_logged_total,
+                        daily_cap=daily_cap,
+                        trace_id=trace_id,
+                        pipeline_result=pipeline_result,
+                    )
+                if decision.submit_draft or decision.finish_collecting:
+                    finish = try_finish_collecting_after_ingest(
+                        wf,
+                        block,
+                        list(pack.get("items") or items),
+                        message,
+                        inc_iso=inc_iso,
+                        lang=lang or "banglish",
+                        day_logged_total=day_logged_total,
+                        daily_cap=daily_cap,
+                        trace_id=trace_id,
+                        last_question=last_question,
+                    )
+                    if finish:
+                        pack = finish
+                return TurnRouteResult(handled=True, pack=pack)
             return TurnRouteResult(handled=False)
         return _route_add_lines(
             wf=wf,
@@ -810,6 +960,11 @@ def route_expense_wizard_turn(
             daily_cap=daily_cap,
             pipeline_result=pipeline_result,
             lang=lang,
+            submit_after_ingest=bool(
+                decision.submit_draft or decision.finish_collecting
+            ),
+            trace_id=trace_id,
+            last_question=last_question,
         )
 
     if decision.turn_type == TURN_PRAISE and stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
@@ -947,11 +1102,54 @@ def _route_navigate(
     daily_cap: float,
     lang: str | None,
 ) -> TurnRouteResult:
+    from chat.services.expense.wizard_commands import (
+        message_has_ingestible_claim_body,
+        strip_expense_submit_tail_for_parse,
+        wants_expense_submit_command,
+    )
     from chat.services.expense_workflow import (
+        _ingest_extracted_lines,
         _pack,
+        _pack_ingest_interrupt,
         _respond_done_while_incomplete,
         _try_advance_to_review,
+        try_finish_collecting_after_ingest,
     )
+
+    if wants_expense_submit_command(message):
+        body = strip_expense_submit_tail_for_parse(message)
+        if message_has_ingestible_claim_body(body, original=message):
+            from chat.services.expense_extraction import extract_expense_items
+
+            ext = extract_expense_items(body)
+            if ext.items:
+                items, blocked = _ingest_extracted_lines(
+                    block,
+                    items,
+                    ext,
+                    inc_iso=inc_iso,
+                    message=body,
+                    wf=wf,
+                )
+                if blocked:
+                    return TurnRouteResult(
+                        handled=True,
+                        pack=_pack_ingest_interrupt(
+                            wf, block, items, blocked, inc_iso=inc_iso
+                        ),
+                    )
+                finish = try_finish_collecting_after_ingest(
+                    wf,
+                    block,
+                    items,
+                    message,
+                    inc_iso=inc_iso,
+                    lang=lang or "banglish",
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                )
+                if finish:
+                    return TurnRouteResult(handled=True, pack=finish)
 
     done_incomplete = _respond_done_while_incomplete(
         wf,
@@ -963,6 +1161,8 @@ def _route_navigate(
     if done_incomplete:
         return TurnRouteResult(handled=True, pack=done_incomplete)
 
+    is_submit = wants_expense_submit_command(message)
+
     adv = _try_advance_to_review(
         wf,
         block,
@@ -972,6 +1172,22 @@ def _route_navigate(
         daily_cap=daily_cap,
         message=message,
     )
+    if is_submit:
+        from chat.services.expense_workflow import _try_enter_submit_confirm
+
+        submit_pack = _try_enter_submit_confirm(
+            wf,
+            block,
+            items,
+            message=message,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            lang=lang or "banglish",
+            trace_id="",
+        )
+        if submit_pack:
+            return TurnRouteResult(handled=True, pack=submit_pack)
     if adv:
         return TurnRouteResult(handled=True, pack=adv)
     return TurnRouteResult(handled=False)
@@ -988,8 +1204,25 @@ def _route_add_lines(
     daily_cap: float,
     pipeline_result: Any,
     lang: str | None,
+    submit_after_ingest: bool = False,
+    trace_id: str = "",
+    last_question: str = "",
 ) -> TurnRouteResult:
+    from chat.services.expense.add_modify import (
+        build_add_modify_prompt,
+        should_prompt_add_modify,
+        start_add_modify_prompt,
+        user_explicitly_wants_add,
+    )
+    from chat.services.expense.draft_summary import format_numbered_draft_summary
+    from chat.services.expense.draft_view import ExpenseDraftView
     from chat.services.expense.expense_ingest_guard import should_block_compound_reingest
+    from chat.services.expense_extraction import extract_expense_items
+    from chat.services.expense.wizard_commands import (
+        message_has_ingestible_claim_body,
+        strip_expense_submit_tail_for_parse,
+        wants_expense_submit_command,
+    )
     from chat.services.expense_workflow import (
         _ask_more_lines_prompt,
         _ingest_extracted_lines,
@@ -998,7 +1231,107 @@ def _route_add_lines(
         _try_advance_to_review,
         _unallocated_total_prompt,
         format_expense_summary,
+        try_finish_collecting_after_ingest,
     )
+
+    ingest_message = message
+    if wants_expense_submit_command(message):
+        stripped = strip_expense_submit_tail_for_parse(message)
+        if message_has_ingestible_claim_body(stripped, original=message):
+            ingest_message = stripped
+            submit_after_ingest = True
+
+    force_add = block.pop("_add_modify_force_add", None)
+    if isinstance(force_add, dict) and force_add.get("category"):
+        cat = str(force_add.get("category") or "")
+        amt = float(force_add.get("amount") or 0)
+        ingest_msg = f"{cat} {amt:g} taka"
+        ext = extract_expense_items(ingest_msg)
+        before_count = len(items)
+        items, blocked = _ingest_extracted_lines(
+            block, items, ext, inc_iso=inc_iso, message=ingest_msg, wf=wf
+        )
+        if blocked:
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack_ingest_interrupt(wf, block, items, blocked, inc_iso=inc_iso),
+            )
+        if len(items) > before_count:
+            clear_ingest_lock(block)
+        q = format_numbered_draft_summary(
+            items, block, incurred_date_iso=inc_iso, lang=lang
+        )
+        adv = _try_advance_to_review(
+            wf,
+            block,
+            items,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            message=message,
+        )
+        if adv:
+            return TurnRouteResult(handled=True, pack=adv)
+        more_q, facts = _ask_more_lines_prompt(block, items, lang=lang)
+        return TurnRouteResult(
+            handled=True,
+            pack=_pack(
+                wf,
+                block,
+                items=items,
+                question=q + "\n\n" + more_q,
+                inc_iso=inc_iso,
+                message_facts=facts,
+            ),
+        )
+
+    if not user_explicitly_wants_add(message):
+        ext_probe = extract_expense_items(message)
+        if ext_probe.items:
+            raw_row = ext_probe.items[0]
+            row = (
+                raw_row
+                if isinstance(raw_row, dict)
+                else {
+                    "category": getattr(raw_row, "category", ""),
+                    "amount": getattr(raw_row, "amount", 0),
+                    "from_location": getattr(raw_row, "from_location", ""),
+                    "to_location": getattr(raw_row, "to_location", ""),
+                }
+            )
+            cat = str(row.get("category") or "")
+            amt = float(row.get("amount") or 0)
+            view = ExpenseDraftView(items, block)
+            if should_prompt_add_modify(
+                message,
+                view,
+                category=cat,
+                amount=amt,
+                from_location=str(row.get("from_location") or ""),
+                to_location=str(row.get("to_location") or ""),
+            ):
+                start_add_modify_prompt(
+                    block,
+                    category=cat,
+                    amount=amt,
+                    from_location=str(row.get("from_location") or ""),
+                    to_location=str(row.get("to_location") or ""),
+                )
+                q = build_add_modify_prompt(view, category=cat, amount=amt, lang=lang)
+                facts = _prompt_message_facts(
+                    q, items=items, lang=lang, prompt_kind="add_modify"
+                )
+                return TurnRouteResult(
+                    handled=True,
+                    pack=_pack(
+                        wf,
+                        block,
+                        items=items,
+                        question=q,
+                        inc_iso=inc_iso,
+                        message_facts=facts,
+                    ),
+                )
 
     if items and should_block_compound_reingest(block, message, items):
         val = validate_expense_items(
@@ -1049,13 +1382,13 @@ def _route_add_lines(
     else:
         from chat.services.expense_extraction import extract_expense_items
 
-        ext = extract_expense_items(message)
+        ext = extract_expense_items(ingest_message)
     if not ext.items and not ext.malformed:
         return TurnRouteResult(handled=False)
 
     before_count = len(items)
     items, blocked = _ingest_extracted_lines(
-        block, items, ext, inc_iso=inc_iso, message=message, wf=wf
+        block, items, ext, inc_iso=inc_iso, message=ingest_message, wf=wf
     )
     if blocked:
         return TurnRouteResult(
@@ -1068,7 +1401,23 @@ def _route_add_lines(
     if len(items) > before_count:
         clear_ingest_lock(block)
 
-    gap_q = _unallocated_total_prompt(message, items, lang=lang)
+    if submit_after_ingest:
+        finish = try_finish_collecting_after_ingest(
+            wf,
+            block,
+            items,
+            message,
+            inc_iso=inc_iso,
+            lang=lang or "banglish",
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            trace_id=trace_id,
+            last_question=last_question,
+        )
+        if finish:
+            return TurnRouteResult(handled=True, pack=finish)
+
+    gap_q = _unallocated_total_prompt(ingest_message, items, lang=lang)
     if gap_q:
         return TurnRouteResult(
             handled=True,

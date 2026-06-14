@@ -300,8 +300,25 @@ def try_handle_pending_discard_turn(
     daily_cap: float = 300.0,
 ) -> dict[str, Any] | None:
     """Handle discard confirm / cancel / apply for incomplete pending lines."""
+    from chat.services.expense.active_prompt import (
+        KIND_DELETE_CONFIRM,
+        KIND_DELETE_PICK,
+        active_prompt_kind,
+    )
+    from chat.services.expense.delete_flow import (
+        parse_delete_pick_number,
+        parse_multi_delete_pick_numbers,
+    )
     from chat.services.expense.session_action_memory import record_pending_expense_discarded
     from chat.services.expense_workflow import _has_pending_expense_line
+
+    if active_prompt_kind(block) in (KIND_DELETE_PICK, KIND_DELETE_CONFIRM):
+        return None
+    if active_prompt_kind(block) == KIND_DELETE_PICK:
+        if parse_multi_delete_pick_numbers(message):
+            return None
+        if parse_delete_pick_number(message, block=block) is not None:
+            return None
 
     reply_lang = lang or "bn"
 

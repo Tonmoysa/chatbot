@@ -51,6 +51,45 @@ _LEAVE_REVIEW_UPDATE_RE = re.compile(
 )
 
 
+def is_leave_collecting_slot_answer(
+    message: str,
+    *,
+    pending_leave_step: str | None,
+    leave_active: bool,
+    leave_review_pending: bool,
+) -> bool:
+    """
+    User is answering the active leave wizard (single or compound slot reply).
+
+    Must beat P11 suspended-leave correction when expense switched away from leave.
+    """
+    if not leave_active or leave_review_pending:
+        return False
+    text = (message or "").strip()
+    if not text:
+        return False
+    try:
+        from chat.services.intent_detector import _message_answers_wizard_step
+
+        if _message_answers_wizard_step(text, pending_leave_step):
+            return True
+    except Exception:
+        pass
+    try:
+        from chat.services.leave_workflow import _is_compound_slot_message
+        from chat.services.leave.normalization import (
+            parse_day_scope_answer,
+            parse_wizard_leave_type_answer,
+        )
+
+        if _is_compound_slot_message(text):
+            if parse_wizard_leave_type_answer(text) or parse_day_scope_answer(text):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def looks_like_leave_review_update(message: str) -> bool:
     """True when text at leave review plausibly updates a leave slot (not casual talk)."""
     text = (message or "").strip()

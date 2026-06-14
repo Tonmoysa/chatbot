@@ -14,6 +14,7 @@ from chat.services.leave_draft_utils import (
     LEAVE_PAYMENT_LWOP,
     LEAVE_PAYMENT_PAID,
     apply_leave_draft_defaults,
+    apply_single_day_scope_default,
     normalize_end_equals_start_if_missing,
     supporting_document_needed,
     validate_dates,
@@ -364,6 +365,42 @@ def _apply_slots_from_message(
     )
 
 
+def _is_wizard_compound_collecting_message(message: str) -> bool:
+    """True when a compound reply fills leave_type and/or day_scope (not sick+paid+date only)."""
+    if not _is_compound_slot_message(message):
+        return False
+    from chat.services.leave.normalization import (
+        parse_day_scope_answer,
+        parse_wizard_leave_type_answer,
+    )
+
+    return bool(
+        parse_wizard_leave_type_answer(message) or parse_day_scope_answer(message)
+    )
+
+
+def _apply_compound_collecting_slots(
+    draft: dict[str, Any],
+    message: str,
+    entities: dict[str, Any],
+) -> None:
+    """Apply every slot hinted in a compound reply (e.g. annual leave + full day)."""
+    from chat.services.leave.normalization import (
+        parse_day_scope_answer,
+        parse_wizard_leave_type_answer,
+    )
+    from chat.services.leave_draft_utils import sync_payment_from_leave_type
+
+    lt = parse_wizard_leave_type_answer(message)
+    if lt in {"sick", "annual", "unpaid"}:
+        draft["leave_type"] = lt
+        sync_payment_from_leave_type(draft)
+    scope = parse_day_scope_answer(message)
+    if scope:
+        draft["day_scope"] = scope
+    _apply_slots_from_message(draft, message, entities, overwrite=False)
+
+
 def _force_scope_from_message(message: str, draft: dict[str, Any]) -> bool:
     """Overwrite day_scope when user clearly states half/full (review corrections)."""
     from chat.services.leave.normalization import parse_day_scope_answer
@@ -453,11 +490,35 @@ def process_leave_turn(
     entities: dict[str, Any],
     company_id: str = "",
     trace_id: str = "",
+    router_decision: Any = None,
 ) -> dict[str, Any]:
+    from chat.services.leave.turn_executor import (
+        router_forces_slot_answer,
+        router_skips_overlap_check,
+        store_router_execution_hint,
+        try_execute_router_locked_leave_turn,
+    )
+
     wf = normalize_workflow_state(workflow_state)
+    wf = store_router_execution_hint(wf, router_decision)
+
+    locked_pack = try_execute_router_locked_leave_turn(
+        workflow_state=wf,
+        message=message,
+        entities=entities,
+        router_decision=router_decision,
+        company_id=company_id,
+        trace_id=trace_id,
+    )
+    if locked_pack is not None:
+        return locked_pack
     from chat.services.leave.duplicate_choice import (
         handle_duplicate_leave_choice_turn,
         mark_duplicate_leave_choice_pending,
+    )
+    from chat.services.leave.intent_buffer import (
+        capture_leave_intent_buffer,
+        consume_leave_intent_buffer,
     )
     from chat.services.leave_meta_queries import (
         _target_date_range_from_leave_message,
@@ -465,6 +526,10 @@ def process_leave_turn(
         check_overlapping_submitted_leave,
         should_block_parallel_leave_application,
     )
+    from chat.services.leave_fsm import is_leave_submission_locked
+    from chat.services.workflow_navigation import format_post_submit_leave_locked_message
+
+    wf = capture_leave_intent_buffer(wf, message)
 
     choice_pack = handle_duplicate_leave_choice_turn(wf, message)
     if choice_pack:
@@ -481,9 +546,57 @@ def process_leave_turn(
             }
         if choice_pack.get("restart"):
             wf = choice_pack["workflow_state"]
+            st = read_leave_state(wf)
+            draft = dict(st.get("draft") or {})
+            policy = get_company_leave_policy(company_id or "default")
+            apply_leave_draft_defaults(draft, policy)
+            apply_single_day_scope_default(draft)
+            missing = get_missing_slots(draft, policy=policy)
+            if missing:
+                slot = missing[0]
+                if slot == SLOT_REASON:
+                    from chat.services.leave.workflow_schema import mark_reason_asked
+
+                    mark_reason_asked(draft)
+                wf = apply_leave_state(
+                    wf,
+                    draft=draft,
+                    step=missing[0],
+                    status=STATUS_ACTIVE,
+                    review_pending=False,
+                )
+                question = generate_question(
+                    missing[0],
+                    draft,
+                    remaining=len(missing),
+                    missing=missing,
+                )
+            else:
+                from chat.services.leave_confirm import build_confirmation_prompt
+
+                wf = mark_review_pending(wf, draft)
+                question = build_confirmation_prompt(draft)
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(draft),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": question,
+            }
+
+    if is_leave_submission_locked(wf):
+        st_locked = read_leave_state(wf)
+        draft_locked = dict(st_locked.get("draft") or {})
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft_locked),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": format_post_submit_leave_locked_message(wf),
+        }
 
     overlap_msg = check_overlapping_submitted_leave(wf, message)
-    if overlap_msg:
+    if overlap_msg and not router_skips_overlap_check(wf):
         target_rng = _target_date_range_from_leave_message(message)
         if target_rng:
             wf = mark_duplicate_leave_choice_pending(
@@ -500,6 +613,29 @@ def process_leave_turn(
         }
 
     st = read_leave_state(wf)
+    from chat.services.workflow_suspend import has_suspended_leave, restore_suspended_leave
+
+    if has_suspended_leave(wf) and st.get("active_flow") != ACTIVE_FLOW_LEAVE:
+        from chat.services.leave_confirm import wants_leave_submit_command
+        from chat.services.leave_meta_queries import (
+            wants_leave_session_summary,
+            wants_pending_leave_show,
+        )
+
+        router_tk = getattr(getattr(router_decision, "turn_kind", None), "value", "")
+        if (
+            wants_leave_submit_command(message)
+            or wants_leave_session_summary(message)
+            or wants_pending_leave_show(message)
+            or (
+                router_decision is not None
+                and getattr(router_decision, "target_workflow", None) == "leave"
+                and router_tk not in ("workflow_switch", "new_leave")
+            )
+        ):
+            wf = restore_suspended_leave(wf, force_active=True)
+            st = read_leave_state(wf)
+
     if st.get("active_flow") != ACTIVE_FLOW_LEAVE:
         seed: dict[str, Any] = {}
         if choice_pack and choice_pack.get("restart"):
@@ -527,6 +663,7 @@ def process_leave_turn(
         }
 
     draft = deep_merge_draft(dict(st.get("draft") or {}), {})
+    wf, draft = consume_leave_intent_buffer(wf, draft)
     draft["_last_user_message"] = message
     from chat.services.leave_draft_utils import persist_stated_leave_type
 
@@ -587,6 +724,13 @@ def process_leave_turn(
         policy = get_company_leave_policy(company_id or "default")
         normalize_leave_draft(draft)
         apply_leave_draft_defaults(draft, policy)
+        apply_single_day_scope_default(draft)
+        if _is_wizard_compound_collecting_message(message):
+            _apply_compound_collecting_slots(draft, message, entities)
+        elif not wants_leave_submit_command(message):
+            _apply_slots_from_message(draft, message, entities, overwrite=False)
+        normalize_leave_draft(draft)
+        apply_single_day_scope_default(draft)
         missing = get_missing_slots(draft, policy=policy)
         if not missing:
             apply_leave_draft_defaults(draft, policy)
@@ -608,6 +752,32 @@ def process_leave_turn(
                 "confirmed_submit": False,
                 "question": build_deferred_leave_return_prompt(draft, message=message),
             }
+        slot = missing[0]
+        if slot == SLOT_REASON:
+            from chat.services.leave.workflow_schema import mark_reason_asked
+
+            mark_reason_asked(draft)
+        wf = apply_leave_state(
+            wf,
+            draft=draft,
+            step=slot,
+            status=STATUS_ACTIVE,
+            review_pending=False,
+        )
+        question = generate_question(
+            slot,
+            draft,
+            remaining=len(missing),
+            extraction=extract_leave_slots(message, skip_leave_phrase_gate=True),
+            missing=missing,
+        )
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": question,
+        }
 
     if wf.get(KEY_EDIT_SNAPSHOT) and (
         is_edit_abort(message) or wants_navigate_back_to_leave_review(message)
@@ -716,9 +886,12 @@ def process_leave_turn(
         not document_handled
         and pending_slot
         and not _is_compound_slot_message(message)
-        and _is_direct_slot_answer(message, pending_slot)
+        and (_is_direct_slot_answer(message, pending_slot) or router_forces_slot_answer(wf))
     ):
         apply_wizard_answer(draft, pending_slot=pending_slot, message=message)
+        _apply_slots_from_message(draft, message, entities, overwrite=False)
+    elif _is_wizard_compound_collecting_message(message):
+        _apply_compound_collecting_slots(draft, message, entities)
     else:
         if pending_slot and _pending_slot_unfilled(draft, pending_slot):
             from chat.services.leave.collecting_turn_parser import try_resolve_collecting_slot
@@ -736,12 +909,14 @@ def process_leave_turn(
         before = dict(draft)
         _apply_slots_from_message(draft, message, entities, overwrite=False)
         draft = deep_merge_draft(before, draft)
-        if (
-            not message_explicitly_states_day_scope(message)
-            and not (pending_slot == SLOT_SCOPE and _is_direct_slot_answer(message, SLOT_SCOPE))
-            and not had_scope
-        ):
-            draft.pop("day_scope", None)
+
+    if (
+        not document_handled
+        and not message_explicitly_states_day_scope(message)
+        and not (pending_slot == SLOT_SCOPE and _is_direct_slot_answer(message, SLOT_SCOPE))
+        and not had_scope
+    ):
+        draft.pop("day_scope", None)
 
     from chat.services.leave_draft_utils import apply_duration_end_date
 

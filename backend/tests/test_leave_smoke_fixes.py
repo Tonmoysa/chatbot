@@ -52,8 +52,8 @@ def test_p72_spring_boot_during_expense_wizard() -> None:
     }
     snap = build_session_snapshot("spring boot ki?", workflow_state=wf)
     decision = route_session_turn(snap, workflow_state=wf)
-    assert decision.turn_kind == TurnKind.CHITCHAT
-    assert decision.reason == "P72_chitchat"
+    assert decision.turn_kind == TurnKind.OUT_OF_SCOPE
+    assert decision.reason == "P73_out_of_scope"
 
 
 def test_r03_sick_to_family_clears_leave_type() -> None:

@@ -28,6 +28,7 @@ from chat.services.expense_extraction import (
     parse_declared_day_total,
     parse_from_to_locations,
 )
+from chat.services.expense.draft_view import ExpenseDraftView
 from chat.services.expense_incurred_date import (
     expense_submit_date_block_reason,
     infer_expense_incurred_date_iso,
@@ -201,6 +202,62 @@ def _wants_finish_collecting(message: str, *, trace_id: str = "") -> bool:
     if _wants_finish_collecting_rules_only(message):
         return True
     return detect_finish_collecting_intent(message, trace_id=trace_id, use_llm=True)
+
+
+def try_finish_collecting_after_ingest(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    inc_iso: str,
+    lang: str,
+    day_logged_total: float = 0.0,
+    daily_cap: float = 300.0,
+    trace_id: str = "",
+    last_question: str = "",
+) -> dict[str, Any] | None:
+    """After new lines are ingested, honor submit/done in the same message."""
+    from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+    if not (
+        wants_expense_submit_command(message)
+        or _wants_finish_collecting(message, trace_id=trace_id)
+    ):
+        return None
+
+    done_incomplete = _respond_done_while_incomplete(
+        wf, block, items, inc_iso=inc_iso, lang=lang
+    )
+    if done_incomplete:
+        return done_incomplete
+
+    adv = _try_advance_to_review(
+        wf,
+        block,
+        items,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        message=message,
+        trace_id=trace_id,
+        last_question=last_question,
+    )
+    if wants_expense_submit_command(message):
+        sub = _try_enter_submit_confirm(
+            wf,
+            block,
+            items,
+            message=message,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            lang=lang,
+            trace_id=trace_id,
+        )
+        if sub:
+            return sub
+    return adv
 
 
 def _respond_done_while_incomplete(
@@ -492,6 +549,48 @@ def _try_handle_total_check_turn(
     )
 
 
+def _try_handle_summary_turn(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    lang: str | None,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+) -> dict[str, Any] | None:
+    """Read-only draft summary — must not hijack open route/category slots."""
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+
+    if not wants_expense_summary(message) or looks_like_expense_correction(message):
+        return None
+    val = validate_expense_items(
+        items,
+        incurred_date_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        message=message,
+    )
+    q = format_expense_summary(
+        items,
+        block=block,
+        incurred_date_iso=inc_iso,
+        warnings=val.warnings,
+        line_flags=val.line_flags,
+        lang=lang,
+        numbered=True,
+    )
+    return _pack(
+        wf,
+        block,
+        items=items,
+        question=q,
+        warnings=val.warnings,
+        inc_iso=inc_iso,
+    )
+
+
 def _try_handle_restore_turn(
     wf: dict[str, Any],
     block: dict[str, Any],
@@ -662,7 +761,7 @@ def wants_expense_summary(message: str) -> bool:
     low = raw.lower().strip()
     spend_domain = message_mentions_expense_spend(raw)
     if re.search(
-        r"(expense|খরচ|খরচের).{0,40}(summery|summary|সারাংশ|পর্যালোচনা|মোট|total|recap|"
+        r"(expense|খরচ|খরচের).{0,40}(summery|smmery|summary|সারাংশ|পর্যালোচনা|মোট|total|recap|"
         r"list|lists|লিস্ট|breakdown|lines)",
         low,
     ):
@@ -685,7 +784,7 @@ def wants_expense_summary(message: str) -> bool:
         ):
             return True
     if re.search(
-        r"(summery|summary|সারাংশ|পর্যালোচনা|list|lists|লিস্ট|breakdown).{0,30}"
+        r"(summery|smmery|summary|সারাংশ|পর্যালোচনা|list|lists|লিস্ট|breakdown).{0,30}"
         r"(ta\s*)?(bolo|দেখ|দেখাও|বল|dekhao|dekha|daw|dao|দাও|দাও)",
         low,
     ):
@@ -701,7 +800,7 @@ def wants_expense_summary(message: str) -> bool:
         low,
     ):
         return True
-    if re.search(r"(ekhon|এখন|now).{0,20}(summery|summary|সারাংশ|list|লিস্ট)", low):
+    if re.search(r"(ekhon|এখন|now).{0,20}(summery|smmery|summary|সারাংশ|list|লিস্ট)", low):
         return True
     if re.search(
         r"(ajke|ajker|today|আজকে|আজকের).{0,35}(expense|খরচ).{0,35}"
@@ -884,6 +983,11 @@ def _ask_from_to_prompt(
     amount: float,
     lang: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
+    from chat.services.expense.pending_routes import build_pending_routes_prompt
+
+    view_gaps = ExpenseDraftView(items, block).pending_gap_lines()
+    if len(view_gaps) > 1:
+        return build_pending_routes_prompt(block, items, lang=lang), None
     pending = dict(block.get("pending_line") or {})
     pending["category"] = category
     pending["amount"] = amount
@@ -1367,13 +1471,18 @@ def _ingest_extracted_lines(
                     }
                 )
 
-    ingest_items = ext.items
+    from chat.services.expense_extraction import strip_ungrounded_travel_routes
     from chat.services.expense.reconcile import (
+        drop_pending_duplicate_travel_ingest,
         filter_llm_invented_travel,
         filter_llm_phantom_lines,
     )
 
-    ingest_items = filter_llm_phantom_lines(ext.items, message=message)
+    stripped = strip_ungrounded_travel_routes(ext.items, message)
+    ingest_items = filter_llm_phantom_lines(stripped, message=message)
+    ingest_items = drop_pending_duplicate_travel_ingest(
+        ingest_items, message=message, block=block
+    )
     if pending_uncat_dicts and message:
         ingest_items = filter_llm_invented_travel(
             ingest_items, pending_uncat_dicts, message
@@ -1578,8 +1687,26 @@ def format_expense_summary(
     warnings: list[str] | None = None,
     line_flags: dict[int, list[str]] | None = None,
     lang: str | None = None,
+    numbered: bool = False,
 ) -> str:
     reply_lang = normalize_reply_lang(lang)
+    stage = str((block or {}).get("stage") or "").strip().lower()
+    if numbered or stage in ("collecting", ""):
+        from chat.services.expense.draft_summary import format_numbered_draft_summary
+
+        body = format_numbered_draft_summary(
+            items,
+            block,
+            incurred_date_iso=incurred_date_iso,
+            lang=lang,
+            include_pending_section=True,
+        )
+        if stage == "review" or stage == "submit_confirm":
+            warn = ""
+            if warnings:
+                warn = "\n\n" + "\n".join(f"⚠ {w}" for w in warnings)
+            return body + warn + "\n\n" + review_confirm_footer(reply_lang)
+        return body
     display_items = expense_summary_items(items, block)
     total = sum(float(r.get("amount") or 0) for r in display_items)
     head = review_head(incurred_date_iso, reply_lang)
@@ -1742,6 +1869,9 @@ def _append_single_review_line_if_new(
         return items, False
     if amt <= 0:
         return items, False
+    cat = str(getattr(ni, "category", "") or "").strip()
+    if not cat:
+        return items, False
     from chat.services.expense.expense_confirm import expense_line_fingerprint
 
     new_row = normalize_expense_line(
@@ -1853,9 +1983,13 @@ def _try_turn_router(
     pipeline_result: ExpenseExtractionResult | None,
     trace_id: str,
     lang: str | None,
+    router_decision: Any = None,
 ) -> dict[str, Any] | None:
     """Unified draft-aware turn router (Phases A–D)."""
     from chat.services.expense.turn_router import route_expense_wizard_turn
+    from chat.services.session_router_execution import expense_turn_decision_from_router
+
+    router_turn = expense_turn_decision_from_router(router_decision)
 
     result = route_expense_wizard_turn(
         wf=wf,
@@ -1870,6 +2004,7 @@ def _try_turn_router(
         trace_id=trace_id,
         lang=lang,
         last_question=expense_pending_prompt({"expense_request": block}) or "",
+        router_turn=router_turn,
     )
     if result.handled and result.pack:
         return result.pack
@@ -1946,34 +2081,21 @@ def _has_pending_expense_line(block: dict[str, Any]) -> bool:
     return get_expense_workflow_schema().has_pending_line(block)
 
 
-def _pending_finish_block_message(block: dict[str, Any], *, lang: str) -> str:
-    pending = block.get("pending_line") if isinstance(block.get("pending_line"), dict) else {}
-    lines: list[str] = []
-    if pending.get("amount"):
-        cat = str(pending.get("category") or "line").strip()
-        lines.append(f"**{cat}** — **{float(pending.get('amount') or 0):g} Tk**")
-    for qrow in list(block.get("pending_queue") or []):
-        cat = str(qrow.get("category") or "").strip()
-        try:
-            amt = float(qrow.get("amount") or 0)
-        except (TypeError, ValueError):
-            amt = 0.0
-        if cat and amt > 0:
-            lines.append(f"**{cat}** — **{amt:g} Tk**")
-    joined = "; ".join(lines) if lines else f"**{float(pending.get('amount') or 0):g} Tk**"
-    if lang == "en":
-        return (
-            f"Cannot submit yet — finish pending lines first: {joined}.\n"
-            "Add **from/to** for travel lines (e.g. `office to badda`), then **joma daw** again."
-        )
-    if lang == "banglish":
-        return (
-            f"Ekhono submit hobe na — age pending line gulo shesh korun: {joined}.\n"
-            "Travel line er **from/to** din (e.g. `office to badda`), tarpor abar **joma daw**."
-        )
-    return (
-        f"এখনো জমা দেওয়া যাবে না — আগে pending লাইন শেষ করুন: {joined}.\n"
-        "Travel খরচে **from/to** লিখুন (যেমন `office to badda`), তারপর আবার **জমা দিন**।"
+def _pending_finish_block_message(
+    block: dict[str, Any],
+    *,
+    lang: str,
+    items: list[dict[str, Any]] | None = None,
+) -> str:
+    from chat.services.expense.draft_summary import format_submit_blocked_summary
+
+    inc = str(block.get("incurred_date_iso") or "")
+    draft_items = list(items or block.get("items") or [])
+    return format_submit_blocked_summary(
+        draft_items,
+        block,
+        incurred_date_iso=inc,
+        lang=lang,
     )
 
 
@@ -2294,6 +2416,12 @@ def _handle_pending_line(
         pending["category"] = cat
         if is_travel_category(cat):
             frm, to = _resolve_pending_route(pending)
+            src = str(pending.get("source_clause") or "").strip()
+            if frm and to and src:
+                from chat.services.expense_extraction import route_explicit_in_user_message
+
+                if not route_explicit_in_user_message(src, frm, to):
+                    frm, to = "", ""
             if frm and to:
                 pending["from_location"], pending["to_location"] = frm, to
                 row = _finalize_pending_line(pending)
@@ -2337,6 +2465,10 @@ def _handle_pending_line(
 
     if step == "from_to":
         from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+        from chat.services.expense.pending_routes import (
+            build_pending_routes_prompt,
+            try_apply_pending_routes,
+        )
 
         if looks_like_new_expense_during_pending_slot(
             message, pending, items, block, pending_step=step
@@ -2353,23 +2485,49 @@ def _handle_pending_line(
                 trace_id=trace_id,
                 pipeline_result=None,
             )
-        cat = str(pending.get("category") or "Bus")
-        pair = parse_from_to_locations(message)
-        if not pair and is_travel_category(cat):
-            pair = _route_from_clause_prefix(message, cat)
-        if not pair:
-            pair_raw = _resolve_pending_route(pending)
-            if pair_raw[0] and pair_raw[1]:
-                pair = pair_raw
-        if not pair:
-            q, facts = _ask_from_to_prompt(block, items, cat, amt, lang=lang)
+
+        route_apply = try_apply_pending_routes(block, items, message)
+        items = route_apply.items
+        if route_apply.applied_count > 0:
+            if str(block.get("pending_step") or "") == "from_to":
+                q = build_pending_routes_prompt(block, items, lang=lang)
+                return _pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    inc_iso=inc_iso,
+                )
+            items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
             return _pack(
                 wf,
                 block,
                 items=items,
                 question=q,
                 inc_iso=inc_iso,
-                message_facts=facts,
+            )
+
+        cat = str(pending.get("category") or "Bus")
+        if route_apply.routes_found:
+            q = build_pending_routes_prompt(block, items, lang=lang)
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                inc_iso=inc_iso,
+            )
+        pair = parse_from_to_locations(message)
+        if not pair and is_travel_category(cat):
+            pair = _route_from_clause_prefix(message, cat)
+        if not pair:
+            q = build_pending_routes_prompt(block, items, lang=lang)
+            return _pack(
+                wf,
+                block,
+                items=items,
+                question=q,
+                inc_iso=inc_iso,
             )
         pending["from_location"], pending["to_location"] = pair
         row = _finalize_pending_line(pending)
@@ -2529,6 +2687,7 @@ def process_expense_turn(
     day_logged_total: float = 0.0,
     daily_cap: float = 300.0,
     pipeline_result: ExpenseExtractionResult | None = None,
+    router_decision: Any = None,
 ) -> dict[str, Any]:
     """
     CRM-aligned expense wizard: collect → review → submit confirm → CRM payload.
@@ -2571,15 +2730,21 @@ def process_expense_turn(
     block["items"] = items
     stage = normalize_expense_stage(str(block.get("stage") or "collecting"))
     hint_entities = dict((pipeline_result.entities if pipeline_result else {}) or {})
-    inc_iso = str(
-        block.get("incurred_date_iso")
-        or hint_entities.get("expense_incurred_date")
-        or infer_expense_incurred_date_iso(
-            message=message,
-            hints=hint_entities,
-            today=expense_incurred_date_mod.date.today(),
+    from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+    existing_inc = str(block.get("incurred_date_iso") or "").strip()
+    if wants_expense_submit_command(message) and existing_inc:
+        inc_iso = existing_inc
+    else:
+        inc_iso = str(
+            existing_inc
+            or hint_entities.get("expense_incurred_date")
+            or infer_expense_incurred_date_iso(
+                message=message,
+                hints=hint_entities,
+                today=expense_incurred_date_mod.date.today(),
+            )
         )
-    )
     block["incurred_date_iso"] = inc_iso
 
     from chat.services.expense.pending_discard import try_handle_pending_discard_turn
@@ -2637,6 +2802,19 @@ def process_expense_turn(
     if total_pack:
         return total_pack
 
+    summary_pack = _try_handle_summary_turn(
+        wf,
+        block,
+        items,
+        message,
+        lang=lang,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+    )
+    if summary_pack:
+        return summary_pack
+
     if wants_resume_or_show_expense(message):
         resume_msg = format_expense_resume_message(wf, user_message=message)
         if resume_msg:
@@ -2660,6 +2838,7 @@ def process_expense_turn(
         pipeline_result=pipeline_result,
         trace_id=trace_id,
         lang=lang,
+        router_decision=router_decision,
     )
     if routed is not None:
         return routed

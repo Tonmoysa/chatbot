@@ -115,10 +115,52 @@ def message_explicitly_states_leave_date(message: str) -> bool:
         pass
     if _LEAVE_DATE_SIGNAL_RE.search(text):
         return True
+    if re.search(
+        r"\b(tomorrow|tomarrow|tommorow|tommorrow|tomorow|agamikal|agamkal|agami\s*kal|kalke|kalker|\bkal\b)\b",
+        text,
+        re.I | re.UNICODE,
+    ) and re.search(
+        r"\b(leave|chuti|chhuti|chutti|chhuti|ছুটি|chuti|lagbe|lage|chai|nite|nit[e]?|chuti)\b",
+        text,
+        re.I | re.UNICODE,
+    ):
+        return True
+    try:
+        from chat.services.bn_normalize import infer_bn_calendar_date, infer_bn_calendar_date_range
+        from datetime import date
+
+        today = date.today()
+        has_cal = bool(
+            infer_bn_calendar_date_range(text, today=today)
+            or infer_bn_calendar_date(text, today=today)
+        )
+        if has_cal and re.search(
+            r"\b(leave|chuti|chhuti|chutti|chhuti|ছুটি|lagbe|lage|chai|nite|nit[e]?)\b",
+            text,
+            re.I | re.UNICODE,
+        ):
+            return True
+    except Exception:
+        pass
     if re.search(r"\bajke\b", text, re.I) and re.search(
         r"\b(leave|chuti|chhuti|chhuti|ছুটি|tarikh|tarik|date|তারিখ|lagbe|hobe|change|badl)\b",
         text,
         re.I,
+    ):
+        return True
+    # Date-step answers: "agamikal theke" / "kalke theke" = start from that day.
+    if re.search(
+        r"\b(?:agamikal|agamkal|agami\s*kal|kalke|kalker|tomorrow|ajke|aj\s*ke)\b"
+        r"(?:\s+\w+){0,2}\s*(?:theke|thke|from)\b",
+        text,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(
+        r"\b(?:theke|thke|from)\b(?:\s+\w+){0,2}\s*"
+        r"(?:agamikal|agamkal|agami\s*kal|kalke|kalker|tomorrow)\b",
+        text,
+        re.I | re.UNICODE,
     ):
         return True
     return False
@@ -174,6 +216,35 @@ _HALF_SECOND_RE = re.compile(
 )
 
 
+def _compound_leave_application_sentence(text: str) -> bool:
+    """
+    Long/compound apply sentences — embedded sick/unpaid tokens are reasons or
+    payment hints, not bare Select Leave slot answers.
+    """
+    from chat.services.leave.reason_value import (
+        _COMPOUND_LEAVE_APPLICATION_RE,
+        _LEAVE_INTENT_RE,
+    )
+
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    words = len(raw.split())
+    if words <= 4:
+        return False
+    if _COMPOUND_LEAVE_APPLICATION_RE.search(raw):
+        return True
+    if _LEAVE_INTENT_RE.search(raw) and words >= 6:
+        return True
+    if _LEAVE_INTENT_RE.search(raw) and re.search(
+        r"\b(for|jonno|because|program|family|wedding|need|chacchi|chacci|apply)\b",
+        raw,
+        re.I,
+    ):
+        return True
+    return False
+
+
 def looks_like_wizard_leave_type_answer(message: str) -> bool:
     """True when the message is a Select Leave slot answer (incl. common typos)."""
     return parse_wizard_leave_type_answer(message) is not None
@@ -183,6 +254,8 @@ def parse_wizard_leave_type_answer(message: str) -> str | None:
     """Parse sick / annual / unpaid wizard Select Leave answers."""
     text = (message or "").strip()
     if not text:
+        return None
+    if _compound_leave_application_sentence(text):
         return None
     low = text.lower()
     if low in {"sick", "annual", "unpaid"}:
@@ -219,6 +292,11 @@ def parse_half_day_period_answer(message: str) -> str | None:
 def message_explicitly_states_day_scope(message: str) -> bool:
     """True only when the user clearly said full/half day in this message."""
     return parse_day_scope_answer(message) is not None
+
+
+def message_explicitly_states_half_day_period(message: str) -> bool:
+    """True only when the user clearly said first/second half in this message."""
+    return parse_half_day_period_answer(message) is not None
 
 
 def message_explicitly_states_payment_category(message: str) -> bool:
@@ -266,8 +344,10 @@ def strip_ungrounded_leave_dates(
     entities: dict[str, Any],
     message: str,
 ) -> dict[str, Any]:
-    """Drop guessed calendar dates when only duration was stated."""
-    if not entities or not should_suppress_inferred_leave_dates(message):
+    """Drop calendar dates unless the user explicitly stated a leave date in this message."""
+    if not entities:
+        return entities
+    if message_explicitly_states_leave_date(message):
         return entities
     out = dict(entities)
     for key in ("start_date", "end_date", "date"):
@@ -284,6 +364,18 @@ def strip_ungrounded_day_scope(
         return entities
     out = dict(entities)
     out.pop("day_scope", None)
+    return out
+
+
+def strip_ungrounded_half_day_period(
+    entities: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    """Remove invented first/second half unless explicitly stated."""
+    if not entities or message_explicitly_states_half_day_period(message):
+        return entities
+    out = dict(entities)
+    out.pop("half_day_period", None)
     return out
 
 
@@ -398,6 +490,9 @@ def normalize_leave_draft(draft: dict[str, Any]) -> None:
         draft.setdefault("reason", "অসুস্থতা / sick leave")
         draft["_reason_implied"] = True
 
-    from chat.services.leave_draft_utils import apply_duration_end_date
+    from chat.services.leave_draft_utils import apply_duration_end_date, needs_half_day_period
+
+    if draft.get("half_day_period") and not needs_half_day_period(draft):
+        draft.pop("half_day_period", None)
 
     apply_duration_end_date(draft)

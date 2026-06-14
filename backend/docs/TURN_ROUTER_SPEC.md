@@ -1,7 +1,7 @@
 # Session Turn Router — Specification (Phase 1)
 
 > **Goal:** এক জায়গায় সব routing decision নেওয়া, যাতে একই message-কে অনেক layer আলাদা ভাবে interpret করে bug না হয়।  
-> **Status:** Spec only — implement ধাপে ধাপে।  
+> **Status:** Phase 1–6 implemented — router classifies; locked turns skip legacy re-classify in orchestrator + expense/leave execution.  
 > **Related:** `docs/WORKFLOW_STATE_MACHINES.md`, `WORKFLOW_TEST_MATRIX.md`, scenario tests 35/36/40.
 
 ---
@@ -169,6 +169,19 @@ class SessionTurnDecision:
 **Evaluation order:** উপর থেকে নিচ — প্রথম match জিতবে।  
 **Prefix:** `P##` — golden test-এ reference করবে।
 
+### Tier U — Turn Understanding Layer (before wizard traps)
+
+| ID | Condition | TurnKind | Intent | Handler |
+|----|-----------|----------|--------|---------|
+| **U00** | `resolve_utterance` → `out_of_scope` (confidence ≥ 0.85) | OUT_OF_SCOPE | UNKNOWN | `policy_intent_helpers` |
+| **U01** | `resolve_utterance` → `needs_clarify` (confidence ≥ 0.65) | CONTEXT_CLARIFICATION | UNKNOWN | `message_context_clarity` |
+| **U02** | `resolve_utterance` → in-scope `query_policy` / `query_status` / expense `summary` (confidence ≥ 0.82) | POLICY_QUERY / BALANCE_QUERY / SUMMARY | per domain | `policy_kb` / `leave_balance` / `expense_workflow` |
+
+> **Invariant I-U1:** TUL runs after `SessionSnapshot` is built; rules win when confidence ≥ 0.9.  
+> **Invariant I-U2:** LLM gate never invents slot values — ambiguous → `needs_clarify`.  
+> **Invariant I-U3:** Long messages (≥72 chars) with no HR domain signal → `out_of_scope` unless wizard-active short reply.  
+> **Invariant I-U4:** Scope classification lives in `turn_understanding/scope.py`; routing map in `utterance_router_map.py`.
+
 ### Tier 0 — Hard guards (session-level)
 
 | ID | Condition | TurnKind | Intent | Handler |
@@ -178,6 +191,7 @@ class SessionTurnDecision:
 | P02 | `expense_delete_verify_pending` + yes/no | DELETE_CONFIRM | EXPENSE_CLAIM | `expense.turn_router` |
 | P02b | `expense_ordinal_amount_confirm_pending` + yes/no | CONFIRM_YES/NO | EXPENSE_CLAIM | `expense.turn_router` |
 | P02c | `expense_amount_correction_pending` | CORRECTION | EXPENSE_CLAIM | `expense.turn_router` |
+| **P02e** | `expense_active_prompt` + `message_abandons_expense_prompt` on P04/P70/P50 | *decision continues* | *flags* `clear_expense_interactive` | orchestrator |
 | **P48** | `expense_submission_locked` + `looks_like_post_submit_expense_modification` | any | META_QUESTION | EXPENSE_STATUS | `expense.session_action_memory` |
 
 > **Invariant I7:** P48 always runs **before** P10 — submitted expense lines cannot re-enter the correction path.
@@ -530,6 +544,15 @@ if decision.handler_id == "leave_workflow":
 - [x] Mandatory: `test_scenario_35/36/40` + `test_session_turn_router` documented as merge gate
 - [x] Orchestrator post-gates respect `router_locked_intent` (no re-override when router decisively locks a wizard-active intent)
 - [x] `apply_hr_query_to_intent` respects `router_locked` — only the HR_POLICY upgrade (invariant I5) may override a locked intent; meta/summary/status overrides skipped
+
+### Phase 6 (execution lock) — **complete**
+- [x] `session_router_execution.py` — map `SessionTurnDecision` → expense `TurnDecision` (confirm, slot, navigate, summary, delete)
+- [x] `expense/turn_parser.py` — skip re-classify when router turn is locked (except bare CORRECTION without plan)
+- [x] `leave/turn_executor.py` — router hint storage, confirm/cancel fast path, slot-answer forcing, overlap skip
+- [x] `leave/turn_parser.py` — `router_turn` param mirrors expense
+- [x] Orchestrator passes `router_decision` to `process_expense_turn` / `process_leave_turn`
+- [x] Duplicate leave + context clarification post-gates skip when `router_locked`
+- [x] Non-P99 router always wins over `legacy_wizard_intent` + parallel `_detect_intent_during_*`
 - [x] Pre-router navigation mutations consolidated into one auditable phase: `orchestrator._apply_pre_router_navigation` (resume/switch/restore/suspend in a single seam before the router)
 - [x] Full inversion: navigation driven by router-owned rows **N50–N55** in `plan_pre_router_navigation` — orchestrator only persists + logs each step (`rule` in log payload); behaviour identical to the legacy pre-router phase
 - [x] LLM resilience: per-trace 429 fast-circuit in `llm_client` (rate-limited turn falls back to rules instantly; reset each turn)

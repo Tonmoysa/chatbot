@@ -23,6 +23,7 @@ from chat.services.expense_extraction import (
     ExtractionResult,
     is_travel_category,
     parse_from_to_locations,
+    route_explicit_in_user_message,
 )
 
 # Fields where regex/parser is authoritative when it produced line items.
@@ -70,9 +71,11 @@ def _row_to_item(
     )
     frm = normalize_location(row.get("from_location"))
     to = normalize_location(row.get("to_location"))
+    if frm and to and not route_explicit_in_user_message(message, frm, to):
+        frm, to = "", ""
     if not frm and not to:
-        pair = parse_from_to_locations(notes or message)
-        if pair:
+        pair = parse_from_to_locations(message)
+        if pair and route_explicit_in_user_message(message, pair[0], pair[1]):
             frm, to = pair
     return ExpenseLineItem(
         category=cat,
@@ -100,7 +103,13 @@ def _single_amount_fallback(
     if amt is None:
         return []
     desc = str(llm_entities.get("description") or "").strip()
-    pair = parse_from_to_locations(message) or parse_from_to_locations(desc)
+    pair = parse_from_to_locations(message)
+    if not pair and desc:
+        pair = parse_from_to_locations(desc)
+        if pair and not route_explicit_in_user_message(message, pair[0], pair[1]):
+            pair = None
+    elif pair and not route_explicit_in_user_message(message, pair[0], pair[1]):
+        pair = None
     frm, to = pair if pair else ("", "")
     cat = ""
     if desc:
@@ -360,9 +369,12 @@ def fill_parser_gaps_with_llm(
         used_llm.add(llm_idx)
 
         if needs_route and llm_item.from_location and llm_item.to_location:
-            item.from_location = llm_item.from_location
-            item.to_location = llm_item.to_location
-            sources[f"line_{idx}_route"] = "llm_gap_fill"
+            if route_explicit_in_user_message(
+                message, llm_item.from_location, llm_item.to_location
+            ):
+                item.from_location = llm_item.from_location
+                item.to_location = llm_item.to_location
+                sources[f"line_{idx}_route"] = "llm_gap_fill"
 
         if (
             needs_category

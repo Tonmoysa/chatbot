@@ -14,6 +14,7 @@ from chat.services.expense.expense_confirm import (
     is_confirmation_yes,
     looks_like_compound_expense_claim,
     looks_like_expense_correction,
+    _is_fresh_multi_category_expense_claim,
 )
 from chat.services.expense.turn_schema import (
     CONFIDENCE_LLM_FALLBACK,
@@ -295,12 +296,27 @@ def parse_turn_rules(
             return TurnDecision(turn_type=TURN_DENY, confidence=1.0, source="rules")
 
     done_cmd = wants_expense_done_command_rules_only(text)
-    if wants_expense_submit_command(text) or done_cmd:
+    submit_cmd = wants_expense_submit_command(text)
+    if submit_cmd or done_cmd:
+        from chat.services.expense.wizard_commands import (
+            message_has_ingestible_claim_body,
+            strip_expense_submit_tail_for_parse,
+        )
+
+        claim_body = strip_expense_submit_tail_for_parse(text)
+        if message_has_ingestible_claim_body(claim_body, original=text):
+            return TurnDecision(
+                turn_type=TURN_ADD_LINES,
+                confidence=0.96,
+                finish_collecting=done_cmd or submit_cmd,
+                submit_draft=submit_cmd,
+                source="rules_submit_with_claims",
+            )
         return TurnDecision(
             turn_type=TURN_NAVIGATE,
             confidence=1.0,
             finish_collecting=done_cmd,
-            submit_draft=wants_expense_submit_command(text),
+            submit_draft=submit_cmd,
             source="rules",
         )
 
@@ -344,19 +360,35 @@ def parse_turn_rules(
         )
 
     if has_pending_line and pending_step in ("category", "from_to"):
-        from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
+        from chat.services.expense.expense_confirm import (
+            looks_like_bare_delete_request,
+            looks_like_new_expense_during_pending_slot,
+        )
+
+        if looks_like_bare_delete_request(text):
+            return TurnDecision(
+                turn_type=TURN_EDIT_DRAFT,
+                confidence=0.95,
+                source="rules_delete_during_slot",
+            )
 
         pending = pending_line if isinstance(pending_line, dict) else {}
         if not pending and isinstance(block, dict):
             raw_pending = block.get("pending_line")
             pending = raw_pending if isinstance(raw_pending, dict) else {}
+        if _is_fresh_multi_category_expense_claim(text):
+            return TurnDecision(
+                turn_type=TURN_ADD_LINES,
+                confidence=0.93,
+                source="rules_fresh_multi_during_slot",
+            )
         if looks_like_new_expense_during_pending_slot(
             text, pending, items, block, pending_step=pending_step
         ):
             return TurnDecision(
-                turn_type=TURN_FILL_SLOT,
+                turn_type=TURN_ADD_LINES,
                 confidence=0.92,
-                source="rules",
+                source="rules_new_line_during_slot",
             )
         if looks_like_draft_edit_signal(text, items, block) and items is not None:
             plan = parse_correction_plan(text, item_count=len(items or []))
@@ -467,10 +499,25 @@ def resolve_expense_turn(
     last_question: str = "",
     trace_id: str = "",
     use_llm: bool = True,
+    router_turn: TurnDecision | None = None,
 ) -> TurnDecision:
     """
     Rules-first turn parse; LLM when rules/heuristic suggest edit but plan is empty.
+
+    When ``router_turn`` is set (session router locked), skip re-classification.
     """
+    if router_turn is not None and router_turn.is_handled():
+        if router_turn.turn_type == TURN_EDIT_DRAFT and not router_turn.plan.has_any_correction():
+            pass
+        elif router_turn.turn_type == TURN_FILL_SLOT and not has_pending_line and pending_step not in (
+            "category",
+            "from_to",
+            "clarify",
+        ):
+            pass
+        else:
+            return router_turn
+
     rules = parse_turn_rules(
         message,
         items=items,

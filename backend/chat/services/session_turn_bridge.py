@@ -155,9 +155,28 @@ def run_session_turn_router(
 
     )
 
+    from chat.services.turn_understanding import resolve_utterance
+
+    last_question = ""
+    for line in reversed(list(context_lines or [])):
+        text = str(line or "").strip()
+        if text.lower().startswith(("assistant:", "bot:")):
+            last_question = text.split(":", 1)[-1].strip()
+            break
+
+    utterance = resolve_utterance(
+        message,
+        snapshot,
+        last_question=last_question,
+        trace_id=trace_id,
+    )
+
     return snapshot, route_session_turn(
 
-        snapshot, workflow_state=workflow_state, trace_id=trace_id
+        snapshot,
+        workflow_state=workflow_state,
+        trace_id=trace_id,
+        utterance=utterance,
 
     )
 
@@ -483,6 +502,8 @@ def pipeline_effects_from_router_decision(
 
     context_lines: list[str] | None,
 
+    snapshot: SessionSnapshot | None = None,
+
 ) -> RouterPipelineEffects:
 
     effects = RouterPipelineEffects(
@@ -503,6 +524,10 @@ def pipeline_effects_from_router_decision(
 
     if decision.turn_kind == TurnKind.CONTEXT_CLARIFICATION:
         custom = str(decision.flags.get("clarification_prompt") or "").strip()
+        if not custom and snapshot is not None:
+            from chat.services.session_expected_answer import build_slot_aware_clarification
+
+            custom = str(build_slot_aware_clarification(message, snapshot) or "").strip()
         effects.context_clarification_message = custom or build_context_clarification_message(
             message, context_lines
         )
