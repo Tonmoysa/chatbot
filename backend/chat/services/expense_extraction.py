@@ -1356,11 +1356,21 @@ def extract_expense_items(message: str) -> ExtractionResult:
     items = _collapse_metro_train_duplicates(items, message)
     items = _romanize_travel_locations(items)
 
-    # Deduplicate identical category+amount in same message (accidental double-parse)
-    seen: set[tuple[str, float]] = set()
+    # Deduplicate identical lines in same message (accidental double-parse).
+    # Route-aware for travel: same fare on different routes (e.g. mirpur→motijheel
+    # vs motijheel→mirpur) are distinct trips and must NOT be collapsed.
+    seen: set[tuple[Any, ...]] = set()
     unique: list[ExpenseLineItem] = []
     for it in items:
-        key = (it.category, round(it.amount, 2))
+        if is_travel_category(it.category):
+            key = (
+                it.category,
+                round(it.amount, 2),
+                str(it.from_location or "").strip().lower(),
+                str(it.to_location or "").strip().lower(),
+            )
+        else:
+            key = (it.category, round(it.amount, 2))
         if key in seen:
             continue
         seen.add(key)

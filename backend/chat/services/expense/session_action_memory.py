@@ -111,6 +111,62 @@ def purge_stale_expense_draft_after_submit(
     return deactivate_expense_session(wf_in)
 
 
+_NEW_EXPENSE_CLAIM_MARKER_RE = re.compile(
+    r"(new\s+expense|notun\s+expense|notun\s+kore|notun\s+ekta|aro\s+(?:ekta\s+)?expense|"
+    r"arekta\s+expense|ar\s+ekta\s+expense|another\s+expense|notun\s+kharo?ch|নতুন\s*expense|নতুন\s*খরচ)",
+    re.I | re.UNICODE,
+)
+
+# Fresh "incurred" verbs — reporting new spending, not editing an existing line.
+_NEW_EXPENSE_CLAIM_VERB_RE = re.compile(
+    r"\b(hoyeche|hoeche|hoise|hoyche|hoiche|holo|korechi|korlam|diyechi|legeche|legechilo|"
+    r"cost\s+hoyeche|kharo?ch\s+hoyeche|হয়েছে|হইছে)\b",
+    re.I | re.UNICODE,
+)
+
+# Explicit "add this as a new expense" intent (add koro / jog koro / expense e add).
+_NEW_EXPENSE_ADD_RE = re.compile(
+    r"(add\s+kor\w*|\bexpense\s*(?:e|te)\s*add\b|\bjog\s+kor\w*|যোগ\s*কর\w*)",
+    re.I | re.UNICODE,
+)
+
+
+def looks_like_new_expense_claim_after_submit(message: str) -> bool:
+    """
+    True when a post-submit message opens a brand-new expense claim rather than
+    editing the already-submitted batch — e.g.
+
+      - ``amar ajke new expense hoyeche bus 100 taka``
+      - ``bus 70 mirpur to motijheel then lunch 100 ... eta expense e add koro``
+
+    Such claims must start a fresh workflow (duplicates of an already-submitted
+    batch are allowed — a re-submit creates a new claim, not an in-chat edit).
+    """
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+    from chat.services.expense_extraction import extract_expense_items
+
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    # A targeted correction ("lunch ta 200 hobe", "bus baad dao") is an edit.
+    if looks_like_expense_correction(raw):
+        return False
+    items = extract_expense_items(raw).items
+    if not items:
+        return False
+    low = raw.lower()
+    # A compound batch (2+ extracted lines) is a new claim, never a single edit.
+    if len(items) >= 2:
+        return True
+    if _NEW_EXPENSE_CLAIM_MARKER_RE.search(low):
+        return True
+    if _NEW_EXPENSE_ADD_RE.search(low):
+        return True
+    if _NEW_EXPENSE_CLAIM_VERB_RE.search(low) and not _POST_SUBMIT_EDIT_VERB_RE.search(low):
+        return True
+    return False
+
+
 def looks_like_post_submit_expense_modification(
     workflow_state: dict[str, Any] | None,
     message: str,
@@ -123,6 +179,10 @@ def looks_like_post_submit_expense_modification(
     if not raw or not has_expense_submission_lock(workflow_state):
         return False
     if wants_post_submit_edit_question(raw):
+        return False
+    # A fresh "new expense" claim after submit is NOT a modification — it should
+    # open a new expense workflow (the submitted batch stays locked/un-editable).
+    if looks_like_new_expense_claim_after_submit(raw):
         return False
 
     wf = workflow_state or {}

@@ -292,3 +292,154 @@ def test_llm_fallback_edit_when_regex_misses_novel_phrase():
         )
     assert decision.turn_type == TURN_EDIT_DRAFT
     assert decision.plan.replacements == [("Lunch", "Snack")]
+
+
+def _two_bus_draft():
+    return {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "incurred_date_iso": "2026-06-14",
+            "items": [
+                {
+                    "category": "Bus",
+                    "amount": 80,
+                    "from_location": "mirpur",
+                    "to_location": "motijheel",
+                },
+                {"category": "Lunch", "amount": 100},
+                {
+                    "category": "Bus",
+                    "amount": 70,
+                    "from_location": "motijheel",
+                    "to_location": "mirpur",
+                },
+            ],
+        }
+    }
+
+
+def test_ordinal_in_modify_message_resolves_without_clarify_loop():
+    """`second bus 90 taka hobe` must update the 2nd bus directly, not ask which one."""
+    wf = _two_bus_draft()
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="second bus 90 taka hobe",
+    )
+    items = pack["items"]
+    buses = [r for r in items if r["category"] == "Bus"]
+    assert buses[0]["amount"] == 80.0
+    assert buses[1]["amount"] == 90.0
+    q = pack.get("question") or ""
+    assert "line ache" not in q
+    assert "কোনটায়" not in q
+    block = pack["workflow_state"]["expense_request"]
+    assert not block.get("amount_correction_pending")
+
+
+def test_plain_ambiguous_amount_still_asks_which_line():
+    """No ordinal/route hint -> keep asking which bus (no silent wrong update)."""
+    wf = _two_bus_draft()
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="bus 90 taka hobe",
+    )
+    block = pack["workflow_state"]["expense_request"]
+    assert block.get("amount_correction_pending")
+    items = pack["items"]
+    buses = [r for r in items if r["category"] == "Bus"]
+    assert {b["amount"] for b in buses} == {80.0, 70.0}
+
+
+def test_extraction_keeps_same_fare_opposite_routes():
+    """`bus 70 mirpur to motijheel ... bus 70 motijheel to mirpur` -> 2 bus lines."""
+    from chat.services.expense_extraction import extract_expense_items
+
+    msg = (
+        "amar ajke expense hoyeche 70 taka bus mirpur to motejjhell then "
+        "lunch 100 taka then bus 70 taka motejhell to mirpur..eta expense e add koro"
+    )
+    res = extract_expense_items(msg)
+    buses = [i for i in res.items if i.category == "Bus"]
+    assert len(buses) == 2
+    routes = {(b.from_location, b.to_location) for b in buses}
+    assert ("mirpur", "motejjhell") in routes
+    assert ("motejhell", "mirpur") in routes
+
+
+def test_new_expense_claim_after_submit_not_blocked_as_modification():
+    """Post-submit, a fresh `new expense` claim must start a new workflow."""
+    from chat.services.expense.session_action_memory import (
+        looks_like_post_submit_expense_modification,
+    )
+
+    wf = {
+        "expense_last_submission": {
+            "reference_id": "EXP-1",
+            "items": [{"category": "Bus", "amount": 80}, {"category": "Lunch", "amount": 100}],
+        }
+    }
+    assert not looks_like_post_submit_expense_modification(
+        wf, "amar ajke new expense hoyeche bus 100 taka"
+    )
+    assert not looks_like_post_submit_expense_modification(
+        wf, "notun expense hoyeche rickshaw 40 taka"
+    )
+    # Resent compound batch (duplicate of submitted) must be allowed as a new claim.
+    assert not looks_like_post_submit_expense_modification(
+        wf,
+        "amar ajke expense hoyeche 70 taka bus mirpur to motejjhell then "
+        "lunch 100 taka then bus 70 taka motejhell to mirpur..eta expense e add koro",
+    )
+    assert not looks_like_post_submit_expense_modification(wf, "bus 50 taka add koro")
+    # Single-line edits / corrections of the submitted batch stay blocked.
+    assert looks_like_post_submit_expense_modification(wf, "lunch 200 taka koro")
+    assert looks_like_post_submit_expense_modification(wf, "bus ta 90 taka hobe")
+
+
+def test_new_compound_expense_after_submit_ingests_not_blocked():
+    """Full workflow: a fresh compound claim after submit builds a new draft."""
+    wf = {
+        "expense_last_submission": {
+            "reference_id": "EXP-2",
+            "items": [
+                {"category": "Bus", "amount": 70, "from_location": "mirpur", "to_location": "motejheel"},
+                {"category": "Lunch", "amount": 100},
+            ],
+        },
+        "expense_request": {},
+    }
+    msg = (
+        "amar ajke expense hoyeche 70 taka bus mirpur to motejjhell then "
+        "lunch 100 taka then bus 70 taka motejhell to mirpur..eta expense e add koro"
+    )
+    pack = process_expense_turn(workflow_state=wf, message=msg)
+    assert not pack.get("validation_blocked")
+    cats = [r["category"] for r in pack.get("items", [])]
+    assert cats.count("Bus") == 2
+    assert "Lunch" in cats
+
+
+def test_opposite_route_same_fare_not_flagged_duplicate():
+    """Two bus rides, same fare, opposite routes are NOT duplicates."""
+    from chat.services.expense_validation import validate_expense_items
+
+    res = validate_expense_items(
+        [
+            {
+                "category": "Bus",
+                "amount": 70,
+                "from_location": "mirpur",
+                "to_location": "motijheel",
+            },
+            {
+                "category": "Bus",
+                "amount": 70,
+                "from_location": "motijheel",
+                "to_location": "mirpur",
+            },
+        ],
+        incurred_date_iso="2026-06-14",
+    )
+    assert res.ok
+    assert not any("ডুপ্লিকেট" in w for w in res.warnings)

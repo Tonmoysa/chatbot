@@ -47,7 +47,7 @@ def validate_expense_items(
 
     warnings: list[str] = []
     line_flags: dict[int, list[str]] = {}
-    seen: set[tuple[str, float]] = set()
+    seen: set[tuple[Any, ...]] = set()
     total = 0.0
     loc_ctx = location_context_from_rows(items)
 
@@ -86,7 +86,17 @@ def validate_expense_items(
                 blocking_message="প্রতিটি খরচের amount ০ এর বেশি হতে হবে।",
             )
 
-        key = (cat.lower(), round(amt, 2))
+        # Route-aware key: two travel lines with the same fare but different
+        # from/to (e.g. mirpur→motijheel vs motijheel→mirpur) are NOT duplicates.
+        if is_travel_category(cat):
+            key = (
+                cat.lower(),
+                round(amt, 2),
+                str(row.get("from_location") or "").strip().lower(),
+                str(row.get("to_location") or "").strip().lower(),
+            )
+        else:
+            key = (cat.lower(), round(amt, 2))
         if key in seen:
             warnings.append(f"ডুপ্লিকেট লাইন: {cat} — {amt:g} Tk (একই মেসেজে দুবার)।")
         seen.add(key)

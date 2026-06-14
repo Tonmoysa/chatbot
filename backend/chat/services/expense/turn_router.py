@@ -1633,6 +1633,22 @@ def _route_edit_draft(
     if amb:
         cat, amt, mode = amb
         mark_amount_correction_pending(block, amount=amt, mode=mode, category=cat)
+        # If the same message already disambiguates the line (ordinal / route /
+        # amount hint), e.g. "second bus 90 taka hobe", resolve it immediately
+        # instead of asking "which one?" and getting stuck in a clarify loop.
+        resolved = _handle_amount_correction_pending_turn(
+            wf=wf,
+            block=block,
+            items=items,
+            message=message,
+            inc_iso=inc_iso,
+            day_logged_total=day_logged_total,
+            daily_cap=daily_cap,
+            lang=lang,
+        )
+        if resolved is not None:
+            return resolved
+        mark_amount_correction_pending(block, amount=amt, mode=mode, category=cat)
         cat_targets = [
             t
             for t in list_amount_correction_targets(items, block)
