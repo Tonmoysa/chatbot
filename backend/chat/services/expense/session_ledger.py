@@ -157,7 +157,7 @@ def wants_session_expense_ledger_query(message: str) -> bool:
         raw,
         re.I | re.UNICODE,
     ) and re.search(
-        r"(কত|মোট|koto|total|mot|how\s+much)",
+        r"(?:\b(?:কত|koto|total|mot|how\s+much)\b|মোট)",
         raw,
         re.I | re.UNICODE,
     ):

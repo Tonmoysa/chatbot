@@ -1332,7 +1332,13 @@ def route_session_turn(
             matched_predicate="wants_restore_expense_version",
         )
 
-    if snapshot.expense_active and is_expense_wizard_command(msg):
+    from chat.services.expense.expense_confirm import looks_like_expense_correction
+
+    if (
+        snapshot.expense_active
+        and is_expense_wizard_command(msg)
+        and not looks_like_expense_correction(msg)
+    ):
         return _decision(
             turn_kind=TurnKind.SUBMIT_COMMAND,
             intent=INTENT_EXPENSE_CLAIM,

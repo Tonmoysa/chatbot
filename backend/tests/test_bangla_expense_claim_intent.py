@@ -29,6 +29,12 @@ BANGLA_NINE_LINE_CLAIM = (
     "উত্তরা থেকে মিরপুর মেট্রোরেলে আশি টাকা, রাতে আবার নাস্তা ত্রিশ টাকা।"
 )
 
+BANGLISH_ADD_KORE_DAW_CLAIM = (
+    "amar ajke expense hoyeche 100 taka bus e mirpur to motejheel then 50 taka expense "
+    "hoyeche uttora to mirpur metro rail e..then 100 taka lunch e expense hoyeche "
+    "..eta tumi expense e add kore daw"
+)
+
 
 def test_bangla_ten_line_voice_dump_clarify_skips_detected_lines(monkeypatch):
     monkeypatch.setattr(
@@ -82,6 +88,44 @@ def test_bangla_compound_claim_not_recap():
     assert not wants_expense_spend_recap_query(BANGLA_NINE_LINE_CLAIM)
     assert _strong_expense_claim(BANGLA_NINE_LINE_CLAIM)
     assert not wants_resume_or_show_expense(BANGLA_NINE_LINE_CLAIM)
+
+
+def test_banglish_add_kore_daw_claim_not_recap():
+    """Regression: 'add kore daw' + motejheel must not match recap (mot substring)."""
+    from chat.services.expense.session_ledger import wants_session_expense_ledger_query
+    from chat.services.expense_workflow import wants_expense_summary
+    from chat.services.intent_detector import _strong_expense_day_summary
+
+    assert message_contains_expense_claim_lines(BANGLISH_ADD_KORE_DAW_CLAIM)
+    assert not wants_session_expense_ledger_query(BANGLISH_ADD_KORE_DAW_CLAIM)
+    assert not wants_expense_summary(BANGLISH_ADD_KORE_DAW_CLAIM)
+    assert not wants_expense_spend_recap_query(BANGLISH_ADD_KORE_DAW_CLAIM)
+    assert not _strong_expense_day_summary(BANGLISH_ADD_KORE_DAW_CLAIM)
+    assert _strong_expense_claim(BANGLISH_ADD_KORE_DAW_CLAIM)
+
+
+def test_banglish_add_kore_daw_claim_starts_wizard(monkeypatch):
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    pack = process_expense_turn(workflow_state={}, message=BANGLISH_ADD_KORE_DAW_CLAIM)
+    items = pack.get("items") or []
+    er = (pack.get("workflow_state") or {}).get("expense_request") or {}
+    assert len(items) >= 3
+    assert er.get("stage") == "review"
+
+
+def test_intent_detector_banglish_add_kore_daw_not_day_summary(monkeypatch):
+    det = IntentDetector()
+    monkeypatch.setattr(det._llm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        det._llm,
+        "chat_json",
+        lambda **kwargs: {"intent": "EXPENSE_DAY_SUMMARY", "confidence": 0.9},
+    )
+    r = det.detect(BANGLISH_ADD_KORE_DAW_CLAIM, "tid-bn-add-kore-daw")
+    assert r["intent"] == INTENT_EXPENSE_CLAIM
 
 
 def test_bangla_compound_claim_extracts_nine_lines():

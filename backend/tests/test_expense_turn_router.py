@@ -443,3 +443,176 @@ def test_opposite_route_same_fare_not_flagged_duplicate():
     )
     assert res.ok
     assert not any("ডুপ্লিকেট" in w for w in res.warnings)
+
+
+def _submitted_three_line_wf(*, ref: str = "EXP-2026-04B3B7") -> dict:
+    items = [
+        {"category": "Bus", "amount": 100, "from_location": "mirpur", "to_location": "motejheel"},
+        {"category": "Metro Rail", "amount": 50, "from_location": "uttora", "to_location": "mirpur"},
+        {"category": "Lunch", "amount": 100},
+    ]
+    return {
+        "expense_last_submission": {
+            "reference_id": ref,
+            "items": items,
+            "incurred_date_iso": "2026-06-14",
+        },
+        "last_bot_action": {
+            "action_type": "expense_submitted",
+            "reference_id": ref,
+            "items": items,
+        },
+    }
+
+
+def test_post_submit_route_fill_not_blocked_as_modification():
+    """After CRM submit, filling From/To on a new draft must not hit P48 block."""
+    from chat.services.expense.session_action_memory import (
+        looks_like_post_submit_expense_modification,
+    )
+
+    wf = _submitted_three_line_wf()
+    wf = {
+        **wf,
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "post_submit_draft": True,
+            "incurred_date_iso": "2026-06-14",
+            "items": [{"category": "Snack", "amount": 100}],
+            "pending_line": {"category": "Bike", "amount": 120},
+            "pending_step": "from_to",
+        },
+    }
+    assert not looks_like_post_submit_expense_modification(wf, "office to mirpur")
+
+
+def test_post_submit_new_expense_route_fill_and_submit(monkeypatch):
+    """Regression: snack+bike after submit → route → review → submit works."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    wf = _submitted_three_line_wf()
+    pack1 = process_expense_turn(
+        workflow_state=wf,
+        message="ajke 100 taka snack e and bike e 120 taka expense hoyeche",
+    )
+    assert not pack1.get("validation_blocked")
+    assert any(r.get("category") == "Snack" for r in pack1.get("items") or [])
+
+    pack2 = process_expense_turn(
+        workflow_state=pack1["workflow_state"],
+        message="office to mirpur",
+    )
+    assert not pack2.get("validation_blocked")
+    assert "cannot be edited" not in (pack2.get("question") or "").lower()
+    assert "edit করা যায় না" not in (pack2.get("question") or "")
+
+    items = pack2.get("items") or []
+    bike = next((r for r in items if r.get("category") == "Bike"), None)
+    assert bike is not None
+    assert str(bike.get("from_location") or "").lower() == "office"
+    assert str(bike.get("to_location") or "").lower() == "mirpur"
+
+
+def test_post_submit_duplicate_claim_allowed(monkeypatch):
+    """Re-logging the same lines as a new claim after submit must be allowed."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    wf = _submitted_three_line_wf()
+    msg = (
+        "amar ajke expense hoyeche 100 taka bus e mirpur to motejheel then "
+        "50 taka expense hoyeche uttora to mirpur metro rail e..then 100 taka "
+        "lunch e expense hoyeche ..eta tumi expense e add kore daw"
+    )
+    pack = process_expense_turn(workflow_state=wf, message=msg)
+    assert not pack.get("validation_blocked")
+    assert len(pack.get("items") or []) >= 3
+
+
+def test_bike_amount_modify_during_from_to_pending(monkeypatch):
+    """``bike 150 hobe`` while From/To slot is open updates pending amount."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "collecting",
+            "incurred_date_iso": "2026-06-14",
+            "items": [{"category": "Snack", "amount": 100}],
+            "pending_line": {"category": "Bike", "amount": 120},
+            "pending_step": "from_to",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="bike 150 hobe")
+    pending = (pack["workflow_state"]["expense_request"].get("pending_line") or {})
+    assert float(pending.get("amount") or 0) == 150.0
+
+
+def test_bike_amount_modify_at_submit_confirm(monkeypatch):
+    """``bike 150 modify kore daw`` at submit confirm applies edit, not re-prompt."""
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    items = [
+        {"category": "Snack", "amount": 100},
+        {"category": "Bike", "amount": 120, "from_location": "office", "to_location": "mirpur"},
+    ]
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-06-14",
+            "items": items,
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="bike 150 modify kore daw")
+    bike = next(r for r in (pack.get("items") or []) if r.get("category") == "Bike")
+    assert float(bike.get("amount") or 0) == 150.0
+    assert (pack["workflow_state"]["expense_request"].get("stage") or "") == "review"
+    assert "CRM" not in (pack.get("question") or "")
+
+
+def test_bike_amount_modify_with_misrouted_submit_router_decision(monkeypatch):
+    """Locked SUBMIT_COMMAND router must not block amount correction."""
+    from chat.services.session_turn_router import SessionTurnDecision, TurnKind
+
+    monkeypatch.setattr(
+        "chat.services.entity_extractor.LLMClient.is_configured",
+        lambda self: False,
+    )
+    items = [
+        {"category": "Snack", "amount": 100},
+        {"category": "Bike", "amount": 120, "from_location": "office", "to_location": "mirpur"},
+    ]
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "review",
+            "incurred_date_iso": "2026-06-14",
+            "items": items,
+        }
+    }
+    router_decision = SessionTurnDecision(
+        turn_kind=TurnKind.SUBMIT_COMMAND,
+        intent="EXPENSE_CLAIM",
+        confidence=0.99,
+        target_workflow="expense",
+        handler_id="expense.wizard_commands",
+        reason="P47_expense_wizard_command",
+        matched_predicate="is_expense_wizard_command",
+    )
+    pack = process_expense_turn(
+        workflow_state=wf,
+        message="bike 150 hobe",
+        router_decision=router_decision,
+    )
+    bike = next(r for r in (pack.get("items") or []) if r.get("category") == "Bike")
+    assert float(bike.get("amount") or 0) == 150.0
+    assert "CRM" not in (pack.get("question") or "")

@@ -173,7 +173,11 @@ def looks_like_post_submit_expense_modification(
 ) -> bool:
     """Detect edits to a submitted batch (including ``lunch 200 taka koro``)."""
     from chat.services.expense.expense_confirm import looks_like_expense_correction
-    from chat.services.expense_extraction import extract_expense_items, normalize_category
+    from chat.services.expense_extraction import (
+        _looks_like_route_answer,
+        extract_expense_items,
+        normalize_category,
+    )
 
     raw = (message or "").strip()
     if not raw or not has_expense_submission_lock(workflow_state):
@@ -187,8 +191,17 @@ def looks_like_post_submit_expense_modification(
 
     wf = workflow_state or {}
     block = read_expense_block(wf)
-    if block.get("active") and list(block.get("items") or []):
-        return True
+
+    # In-progress new claim after CRM submit — route fills, review edits, submit.
+    if block.get("active") and is_fresh_post_submit_expense_draft(wf, block=block):
+        return False
+
+    pending_step = str(block.get("pending_step") or "").strip()
+    if block.get("active") and block.get("pending_line"):
+        if pending_step == "from_to" and _looks_like_route_answer(raw):
+            return False
+        if is_fresh_post_submit_expense_draft(wf, block=block):
+            return False
 
     if looks_like_expense_correction(raw):
         return True

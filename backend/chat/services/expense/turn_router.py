@@ -749,7 +749,73 @@ def route_expense_wizard_turn(
         if is_awaiting_leave_confirmation(wf):
             return TurnRouteResult(handled=False)
 
-        from chat.services.expense_workflow import handle_submit_confirm_turn
+        from chat.services.expense.expense_confirm import (
+            is_confirmation_no,
+            looks_like_expense_correction,
+        )
+        from chat.services.expense_workflow import (
+            handle_submit_confirm_turn,
+            is_submit_confirm_yes,
+        )
+
+        if (
+            looks_like_expense_correction(message)
+            and not is_submit_confirm_yes(message)
+            and not is_confirmation_no(message)
+        ):
+            edit_decision = resolve_expense_turn(
+                message,
+                items=items,
+                stage=stage,
+                pending_step=pending_step,
+                pending_line=pending_line,
+                has_pending_line=has_pending,
+                block=block,
+                last_question=last_question,
+                trace_id=trace_id,
+                router_turn=router_turn,
+            )
+            if edit_decision.turn_type == TURN_EDIT_DRAFT:
+                return _route_edit_draft(
+                    wf=wf,
+                    block=block,
+                    items=items,
+                    message=message,
+                    stage=stage,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    decision_plan=edit_decision.plan,
+                    decision_source=edit_decision.source,
+                    uncertain_note=edit_decision.uncertain_note,
+                    lang=lang,
+                    trace_id=trace_id,
+                    last_question=last_question,
+                    pending_step=pending_step,
+                    pending_line=pending_line,
+                )
+            from chat.services.expense.command_parser import parse_correction_plan
+
+            fallback_plan = parse_correction_plan(message, item_count=len(items or []))
+            if fallback_plan.has_any_correction():
+                return _route_edit_draft(
+                    wf=wf,
+                    block=block,
+                    items=items,
+                    message=message,
+                    stage=stage,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    decision_plan=fallback_plan,
+                    decision_source="rules_submit_confirm_fallback",
+                    uncertain_note="",
+                    lang=lang,
+                    trace_id=trace_id,
+                    last_question=last_question,
+                    pending_step=pending_step,
+                    pending_line=pending_line,
+                )
 
         return TurnRouteResult(
             handled=True,

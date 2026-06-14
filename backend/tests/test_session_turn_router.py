@@ -592,6 +592,41 @@ def test_g22_post_submit_lunch_koro_blocked_by_p48():
     )
 
 
+def test_g22b_post_submit_route_fill_not_p48():
+    """Route slot fill on a fresh post-submit draft must reach expense wizard."""
+    from chat.services.expense.session_action_memory import record_expense_lines_added
+
+    items = [
+        {"category": "Bus", "amount": 100, "from_location": "mirpur", "to_location": "motejheel"},
+        {"category": "Lunch", "amount": 100},
+    ]
+    wf = _submitted_expense_wf(items)
+    wf = record_expense_lines_added(
+        {
+            **wf,
+            "expense_request": {
+                "active": True,
+                "stage": "collecting",
+                "post_submit_draft": True,
+                "incurred_date_iso": "2026-06-14",
+                "items": [{"category": "Snack", "amount": 100}],
+                "pending_line": {"category": "Bike", "amount": 120},
+                "pending_step": "from_to",
+            },
+        },
+        new_items=[{"category": "Snack", "amount": 100}],
+        all_items=[{"category": "Snack", "amount": 100}],
+        incurred_date_iso="2026-06-14",
+    )
+    _assert_route(
+        "office to mirpur",
+        wf,
+        turn_kind=TurnKind.SLOT_ANSWER,
+        intent=INTENT_EXPENSE_CLAIM,
+        reason_prefix="P",
+    )
+
+
 def test_g23_post_submit_edit_question_meta_not_correction():
     items = [{"category": "Lunch", "amount": 120}]
     _assert_route(
@@ -722,3 +757,26 @@ def test_g21_sick_token_alone_still_slot_answer():
         intent=INTENT_LEAVE_REQUEST,
         reason_prefix="P79",
     )
+
+
+def test_g23_bike_amount_correction_not_p47_submit():
+    """Amount edits must route as P10 correction, not P47 submit command."""
+    items = [
+        {"category": "Snack", "amount": 100},
+        {
+            "category": "Bike",
+            "amount": 120,
+            "from_location": "office",
+            "to_location": "mirpur",
+        },
+    ]
+    for stage in ("review", "submit_confirm"):
+        wf = _expense_wf(items, stage=stage)
+        for msg in ("bike 150 hobe", "bike 150 modify kore daw", "bike 150 edit kore daw"):
+            _assert_route(
+                msg,
+                wf,
+                turn_kind=TurnKind.CORRECTION,
+                intent=INTENT_EXPENSE_CLAIM,
+                reason_prefix="P10",
+            )

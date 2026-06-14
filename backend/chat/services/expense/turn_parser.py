@@ -415,6 +415,14 @@ def parse_turn_rules(
                     source="rules",
                 )
             return TurnDecision()
+        slot_plan = parse_correction_plan(text, item_count=len(items or []))
+        if slot_plan.has_any_correction():
+            return TurnDecision(
+                turn_type=TURN_EDIT_DRAFT,
+                confidence=0.91,
+                plan=slot_plan,
+                source="rules_correction_during_slot",
+            )
         return TurnDecision(
             turn_type=TURN_FILL_SLOT,
             confidence=0.9,
@@ -507,7 +515,15 @@ def resolve_expense_turn(
     When ``router_turn`` is set (session router locked), skip re-classification.
     """
     if router_turn is not None and router_turn.is_handled():
+        from chat.services.expense.expense_confirm import looks_like_expense_correction
+
         if router_turn.turn_type == TURN_EDIT_DRAFT and not router_turn.plan.has_any_correction():
+            pass
+        elif (
+            router_turn.turn_type == TURN_NAVIGATE
+            and router_turn.submit_draft
+            and looks_like_expense_correction(message)
+        ):
             pass
         elif router_turn.turn_type == TURN_FILL_SLOT and not has_pending_line and pending_step not in (
             "category",
@@ -569,8 +585,9 @@ def resolve_expense_turn(
         TURN_DENY,
         TURN_NAVIGATE,
         TURN_CLARIFY_REPLY,
-        TURN_FILL_SLOT,
-        TURN_PRAISE,
+    TURN_FILL_SLOT,
+    TURN_NAVIGATE,
+    TURN_PRAISE,
     ):
         return rules
 

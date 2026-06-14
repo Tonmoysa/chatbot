@@ -129,6 +129,13 @@ def wants_post_submit_expense_summary(message: str) -> bool:
 def _strong_expense_day_summary(message: str) -> bool:
     """Same-day spend recap (not submitting a new line item with an amount)."""
     try:
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+        if message_contains_expense_claim_lines(message):
+            return False
+    except Exception:
+        pass
+    try:
         from chat.services.expense.expense_policy import is_expense_daily_cap_query
 
         if is_expense_daily_cap_query(message):
@@ -547,6 +554,17 @@ class IntentDetector:
         text = (message or "").lower()
         # Strong heuristic overrides (esp. for Bengali/Banglish) so LLM misclassifications
         # don't break the workflow.
+        try:
+            from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+            if message_contains_expense_claim_lines(message):
+                return {
+                    "intent": INTENT_EXPENSE_CLAIM,
+                    "confidence": 0.99,
+                    "source": "rules_override_expense_claim_lines",
+                }
+        except Exception:
+            pass
         strong_leave_request = bool(
             re.search(r"(ছুটি|chuti|chhuti|holiday)", text)
             and re.search(r"(চাই|lagbe|lage|dorkar|need|apply|request)", text)

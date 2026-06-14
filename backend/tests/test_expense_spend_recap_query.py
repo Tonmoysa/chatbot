@@ -51,6 +51,17 @@ def test_recap_query_not_new_claim_line():
     assert not wants_expense_spend_recap_query("expense 200 taka lunch")
 
 
+def test_motejheel_not_session_ledger_add_query():
+    from chat.services.expense.session_ledger import wants_session_expense_ledger_query
+
+    msg = (
+        "amar ajke expense hoyeche 100 taka bus e mirpur to motejheel then 50 taka "
+        "expense hoyeche uttora to mirpur metro rail e..then 100 taka lunch e "
+        "expense hoyeche ..eta tumi expense e add kore daw"
+    )
+    assert not wants_session_expense_ledger_query(msg)
+
+
 def test_strong_day_summary_amar_expense_koto_ajke():
     assert _strong_expense_day_summary("amar expense koto ajke")
     assert _strong_expense_day_summary("amar ajker expense ta bolo")

@@ -562,7 +562,10 @@ def _try_handle_summary_turn(
 ) -> dict[str, Any] | None:
     """Read-only draft summary — must not hijack open route/category slots."""
     from chat.services.expense.expense_confirm import looks_like_expense_correction
+    from chat.services.expense_extraction import message_contains_expense_claim_lines
 
+    if message_contains_expense_claim_lines(message):
+        return None
     if not wants_expense_summary(message) or looks_like_expense_correction(message):
         return None
     val = validate_expense_items(
@@ -734,6 +737,13 @@ def message_mentions_expense_spend(message: str) -> bool:
 
 def wants_expense_summary(message: str) -> bool:
     """User wants to see expense review / day recap (not a new claim line)."""
+    try:
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+        if message_contains_expense_claim_lines(message):
+            return False
+    except Exception:
+        pass
     try:
         from chat.services.leave_meta_queries import wants_leave_session_summary
 
@@ -2697,6 +2707,7 @@ def process_expense_turn(
     del company_id, employee_id, session_id
     from chat.services.expense.session_action_memory import (
         format_submitted_expense_edit_blocked_answer,
+        has_expense_submission_lock,
         looks_like_post_submit_expense_modification,
         purge_stale_expense_draft_after_submit,
         wants_post_submit_edit_question,
@@ -2721,6 +2732,8 @@ def process_expense_turn(
 
     block = wf.setdefault("expense_request", {})
     ensure_expense_block_active(block)
+    if has_expense_submission_lock(wf):
+        block["post_submit_draft"] = True
     _sync_reply_language(block, message)
     lang = lang_from_block(block)
 

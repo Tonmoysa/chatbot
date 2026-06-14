@@ -429,6 +429,9 @@ def looks_like_new_expense_during_pending_slot(
         return True
     if new_cat != pending_cat:
         return True
+    # Same category while route slot is open — amount tweak on pending line, not duplicate.
+    if plan.set_amounts or plan.update_amounts:
+        return False
     # Same category while route slot is open — fresh ``bus 100`` adds another line.
     return _is_bare_fresh_category_amount_claim(text)
 
@@ -563,6 +566,18 @@ def looks_like_expense_correction(message: str) -> bool:
     if not low.strip():
         return False
     if wants_expense_draft_edit_intent(message):
+        return True
+    if (
+        _UPDATE_AMOUNT_RE.search(low)
+        or _SET_AMOUNT_RE.search(low)
+        or _CAT_ER_EXPENSE_AMOUNT_RE.search(low)
+        or _CAT_ER_AMOUNT_KORO_RE.search(low)
+        or _CONTEXTUAL_CAT_AMOUNT_HOBE_RE.search(low)
+    ) and re.search(
+        r"(?:hobe|habe|hoy|হবে|হয়|modify|update|change|kore\s*daw|kore\s*de|kore\s*dao)\b",
+        low,
+        re.I | re.UNICODE,
+    ):
         return True
     if _is_bare_fresh_category_amount_claim(message):
         return False
