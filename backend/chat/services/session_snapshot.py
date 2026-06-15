@@ -215,6 +215,7 @@ def build_classifier_snapshot(
         leave_submit_confirm_pending=leave_review_pending,
         pending_leave_step=pending_leave_step,
         expense_active=expense_active,
+        expense_review_pending=expense_review_pending,
         pending_expense_step=pending_expense_step or None,
     )
     return SessionSnapshot(
@@ -326,6 +327,7 @@ def build_session_snapshot(
         leave_submit_confirm_pending=leave_review_pending,
         pending_leave_step=pending_leave,
         expense_active=expense_active,
+        expense_review_pending=expense_review_pending,
         expense_delete_verify_pending=exp_delete_pending,
         expense_submit_confirm_pending=exp_submit_confirm,
         pending_expense_step=pending_expense,

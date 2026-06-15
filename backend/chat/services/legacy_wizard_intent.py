@@ -357,6 +357,15 @@ def detect_intent_during_expense_workflow(
             "confidence": 0.99,
             "source": "expense_workflow_gate+cancel_expense_verify",
         }
+    from chat.services.intent_detector import _is_cancel_form_request
+    from chat.services.leave_confirm import is_confirmation_cancel
+
+    if _is_cancel_form_request(message) or is_confirmation_cancel(message):
+        return {
+            "intent": INTENT_EXPENSE_CLAIM,
+            "confidence": 0.99,
+            "source": "expense_workflow_gate+cancel_expense_verify",
+        }
     from chat.services.expense.expense_confirm import (
         is_expense_delete_verify_pending,
     )

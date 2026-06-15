@@ -305,8 +305,21 @@ def legacy_wizard_intent_fallback(
     from chat.services.expense_workflow import is_expense_in_progress
 
     from chat.services.leave_workflow import is_leave_in_progress
+    from chat.services.workflow_priority import expense_workflow_is_foreground
 
 
+
+    if expense_workflow_is_foreground(workflow_state):
+
+        from chat.services.legacy_wizard_intent import detect_intent_during_expense_workflow
+
+
+
+        return detect_intent_during_expense_workflow(
+
+            message, workflow_state, balance_probe=balance_probe, trace_id=trace_id
+
+        )
 
     if is_leave_in_progress(workflow_state):
 

@@ -939,23 +939,21 @@ class ChatOrchestrator:
             )
 
         if wants_cancel_expense_command(message):
-            from chat.services.expense.expense_confirm import is_confirmation_yes
-
             block = read_expense_block(wf_state)
             if not is_expense_in_progress(wf_state) and not block.get("items"):
                 msg_ce = (
                     "এই session-এ **জমা দেওয়া** expense আছে — active draft **নেই**, "
                     "তাই cancel করা যাবে না।"
                 )
-            elif is_confirmation_yes(message):
+            elif is_expense_in_progress(wf_state):
                 wf_state = deactivate_expense_session(wf_state)
                 session.workflow_state = wf_state
                 session.save(update_fields=["workflow_state", "updated_at"])
                 msg_ce = "Expense draft **বাতিল** করা হয়েছে।"
             else:
                 msg_ce = (
-                    "আপনি কি নিশ্চিত যে **expense draft বাতিল** করতে চান? "
-                    "নিশ্চিত হলে **হ্যাঁ** বা **yes** লিখুন।"
+                    "এই session-এ **জমা দেওয়া** expense আছে — active draft **নেই**, "
+                    "তাই cancel করা যাবে না।"
                 )
             self.memory.append(session, "user", message)
             self.memory.append(session, "assistant", msg_ce)
@@ -965,15 +963,7 @@ class ChatOrchestrator:
                     "intent": INTENT_EXPENSE_CLAIM,
                     "entities": {},
                     "decision": {
-                        "outcome": (
-                            "INFORMATIONAL"
-                            if is_confirmation_yes(message)
-                            or (
-                                not is_expense_in_progress(wf_state)
-                                and not block.get("items")
-                            )
-                            else "NEEDS_CLARIFICATION"
-                        ),
+                        "outcome": "INFORMATIONAL",
                         "reason": msg_ce,
                     },
                     "response": {
@@ -1066,6 +1056,7 @@ class ChatOrchestrator:
         is_greeting_now = _is_fresh_start_greeting(message)
         is_cancel_now = _is_cancel_form_request(message)
         wizard_dismissed_reason: str | None = None
+        wizard_dismissed_workflow: str | None = None
         leave_nav_no_session = False
         leave_side_interrupt = False
         leave_workflow_interrupt = False
@@ -1344,54 +1335,62 @@ class ChatOrchestrator:
         if wants_cancel_leave_command(message) or wants_cancel_expense_command(message):
             is_cancel_now = False
 
-        # Explicit cancel drops the leave draft; greetings keep the draft alive.
-        if is_leave_in_progress(wf_state) and is_cancel_now:
-            wf_state = deactivate_leave_session(wf_state)
-            wf_state = clear_suspended_leave(wf_state)
-            wf_state = _persist_workflow_state(session, wf_state)
-            wizard_dismissed_reason = "cancel"
-            intent = INTENT_UNKNOWN
-            intent_result = {
-                **intent_result,
-                "intent": INTENT_UNKNOWN,
-                "source": (intent_result.get("source") or "intent")
-                + "+wizard_dismissed_cancel",
-            }
-            log_step(trace_id, "leave_wizard_dismissed", {"reason": "cancel"})
-        elif is_expense_in_progress(wf_state) and is_cancel_now:
-            wf_state = deactivate_expense_session(wf_state)
-            wf_state = _persist_workflow_state(session, wf_state)
-            wizard_dismissed_reason = "cancel"
-            intent = INTENT_UNKNOWN
-            intent_result = {
-                **intent_result,
-                "intent": INTENT_UNKNOWN,
-                "source": (intent_result.get("source") or "intent")
-                + "+wizard_dismissed_cancel",
-            }
-            log_step(trace_id, "expense_wizard_dismissed", {"reason": "cancel"})
-        elif is_cancel_now and has_suspended_leave(wf_state):
-            wf_state = _persist_workflow_state(session, clear_suspended_leave(wf_state))
-            wizard_dismissed_reason = "cancel"
-            intent = INTENT_UNKNOWN
-            intent_result = {
-                **intent_result,
-                "intent": INTENT_UNKNOWN,
-                "source": (intent_result.get("source") or "intent")
-                + "+suspended_leave_dismissed_cancel",
-            }
-            log_step(trace_id, "suspended_leave_dismissed", {"reason": "cancel"})
-        elif is_cancel_now and has_suspended_expense(wf_state):
-            wf_state = _persist_workflow_state(session, clear_suspended_expense(wf_state))
-            wizard_dismissed_reason = "cancel"
-            intent = INTENT_UNKNOWN
-            intent_result = {
-                **intent_result,
-                "intent": INTENT_UNKNOWN,
-                "source": (intent_result.get("source") or "intent")
-                + "+suspended_expense_dismissed_cancel",
-            }
-            log_step(trace_id, "suspended_expense_dismissed", {"reason": "cancel"})
+        # Generic cancel (বাতিল / cancel / cancel it) — dismiss the foreground wizard.
+        if is_cancel_now:
+            from chat.services.workflow_priority import resolve_generic_cancel_target
+
+            cancel_target = resolve_generic_cancel_target(wf_state)
+            if cancel_target == "expense":
+                wf_state = deactivate_expense_session(wf_state)
+                wf_state = _persist_workflow_state(session, wf_state)
+                wizard_dismissed_reason = "cancel"
+                wizard_dismissed_workflow = "expense"
+                intent = INTENT_UNKNOWN
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_UNKNOWN,
+                    "source": (intent_result.get("source") or "intent")
+                    + "+wizard_dismissed_cancel",
+                }
+                log_step(trace_id, "expense_wizard_dismissed", {"reason": "cancel"})
+            elif cancel_target == "leave":
+                wf_state = deactivate_leave_session(wf_state)
+                wf_state = clear_suspended_leave(wf_state)
+                wf_state = _persist_workflow_state(session, wf_state)
+                wizard_dismissed_reason = "cancel"
+                wizard_dismissed_workflow = "leave"
+                intent = INTENT_UNKNOWN
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_UNKNOWN,
+                    "source": (intent_result.get("source") or "intent")
+                    + "+wizard_dismissed_cancel",
+                }
+                log_step(trace_id, "leave_wizard_dismissed", {"reason": "cancel"})
+            elif cancel_target == "suspended_leave":
+                wf_state = _persist_workflow_state(session, clear_suspended_leave(wf_state))
+                wizard_dismissed_reason = "cancel"
+                wizard_dismissed_workflow = "leave"
+                intent = INTENT_UNKNOWN
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_UNKNOWN,
+                    "source": (intent_result.get("source") or "intent")
+                    + "+suspended_leave_dismissed_cancel",
+                }
+                log_step(trace_id, "suspended_leave_dismissed", {"reason": "cancel"})
+            elif cancel_target == "suspended_expense":
+                wf_state = _persist_workflow_state(session, clear_suspended_expense(wf_state))
+                wizard_dismissed_reason = "cancel"
+                wizard_dismissed_workflow = "expense"
+                intent = INTENT_UNKNOWN
+                intent_result = {
+                    **intent_result,
+                    "intent": INTENT_UNKNOWN,
+                    "source": (intent_result.get("source") or "intent")
+                    + "+suspended_expense_dismissed_cancel",
+                }
+                log_step(trace_id, "suspended_expense_dismissed", {"reason": "cancel"})
 
         if is_leave_in_progress(wf_state):
             hard_switch = intent in (
@@ -2975,11 +2974,18 @@ class ChatOrchestrator:
             # contradicts the cancellation.
             if wizard_dismissed_reason == "cancel":
                 user_lang = detect_user_language(message)
-                msg = (
-                    "ঠিক আছে, ছুটি ফর্মটি বাদ দিলাম। অন্য কিছু লাগলে জানাবেন।"
-                    if user_lang == "bn"
-                    else "Got it — I've cancelled the leave form. Let me know if you need anything else."
-                )
+                if wizard_dismissed_workflow == "expense":
+                    msg = (
+                        "ঠিক আছে, খরচের ফর্মটি বাদ দিলাম। অন্য কিছু লাগলে জানাবেন।"
+                        if user_lang == "bn"
+                        else "Got it — I've cancelled the expense form. Let me know if you need anything else."
+                    )
+                else:
+                    msg = (
+                        "ঠিক আছে, ছুটি ফর্মটি বাদ দিলাম। অন্য কিছু লাগলে জানাবেন।"
+                        if user_lang == "bn"
+                        else "Got it — I've cancelled the leave form. Let me know if you need anything else."
+                    )
                 rstatus = "success"
                 used_conversational = True
 

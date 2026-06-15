@@ -11,7 +11,60 @@ import re
 from typing import Any
 
 from chat.services.intent_detector import _strong_expense_day_summary
-from chat.services.leave_fsm import ACTIVE_FLOW_LEAVE, read_leave_state
+from chat.services.leave_fsm import ACTIVE_FLOW_LEAVE, STATUS_ACTIVE, read_leave_state
+
+CancelTarget = str  # "expense" | "leave" | "suspended_expense" | "suspended_leave"
+
+
+def expense_workflow_is_foreground(workflow_state: dict[str, Any] | None) -> bool:
+    """True when the user is actively in the expense wizard (not paused)."""
+    from chat.services.expense.expense_fsm import is_expense_in_progress, is_expense_paused
+
+    return is_expense_in_progress(workflow_state) and not is_expense_paused(workflow_state)
+
+
+def leave_workflow_is_foreground(workflow_state: dict[str, Any] | None) -> bool:
+    """True when leave is the active (non-paused) wizard."""
+    from chat.services.leave_workflow import is_leave_in_progress, is_leave_paused
+
+    if not is_leave_in_progress(workflow_state) or is_leave_paused(workflow_state):
+        return False
+    st = read_leave_state(workflow_state)
+    return st.get("active_flow") == ACTIVE_FLOW_LEAVE and st.get("status") == STATUS_ACTIVE
+
+
+def resolve_generic_cancel_target(workflow_state: dict[str, Any] | None) -> CancelTarget | None:
+    """
+    Which workflow a generic cancel (বাতিল, cancel, cancel it) should dismiss.
+
+    Expense takes priority when it is the foreground wizard so a paused or
+  mis-synced leave draft in the same session is not cancelled by mistake.
+    """
+    from chat.services.expense.expense_fsm import is_expense_in_progress
+    from chat.services.leave_workflow import is_leave_in_progress
+    from chat.services.workflow_suspend import has_suspended_expense, has_suspended_leave
+
+    wf = workflow_state or {}
+
+    if expense_workflow_is_foreground(wf):
+        return "expense"
+
+    if leave_workflow_is_foreground(wf):
+        return "leave"
+
+    if is_expense_in_progress(wf):
+        return "expense"
+
+    if is_leave_in_progress(wf):
+        return "leave"
+
+    if has_suspended_expense(wf):
+        return "suspended_expense"
+
+    if has_suspended_leave(wf):
+        return "suspended_leave"
+
+    return None
 
 
 def expense_query_should_suspend_leave(message: str) -> bool:

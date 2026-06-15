@@ -494,6 +494,29 @@ def route_session_turn(
         )
 
     if snapshot.is_cancel:
+        from chat.services.workflow_priority import resolve_generic_cancel_target
+
+        cancel_target = (
+            resolve_generic_cancel_target(workflow_state) if workflow_state else None
+        )
+        if cancel_target == "expense":
+            return _decision(
+                turn_kind=TurnKind.CANCEL,
+                intent=INTENT_EXPENSE_CLAIM,
+                target_workflow="expense",
+                handler_id="expense_workflow",
+                reason="P00_cancel_expense",
+                matched_predicate="is_cancel",
+            )
+        if cancel_target == "leave":
+            return _decision(
+                turn_kind=TurnKind.CANCEL,
+                intent=INTENT_LEAVE_REQUEST,
+                target_workflow="leave",
+                handler_id="leave_workflow",
+                reason="P00_cancel_leave",
+                matched_predicate="is_cancel",
+            )
         return _decision(
             turn_kind=TurnKind.CANCEL,
             intent=INTENT_UNKNOWN,

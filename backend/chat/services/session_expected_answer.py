@@ -75,6 +75,7 @@ def derive_prompt_context(snapshot: SessionSnapshot) -> PromptContext:
         leave_submit_confirm_pending=snapshot.leave_submit_confirm_pending,
         pending_leave_step=snapshot.pending_leave_step,
         expense_active=snapshot.expense_active,
+        expense_review_pending=snapshot.expense_review_pending,
         expense_delete_verify_pending=snapshot.expense_delete_verify_pending,
         expense_submit_confirm_pending=snapshot.expense_submit_confirm_pending,
         pending_expense_step=snapshot.pending_expense_step,
@@ -89,6 +90,7 @@ def derive_prompt_context_fields(
     leave_submit_confirm_pending: bool = False,
     pending_leave_step: str | None = None,
     expense_active: bool = False,
+    expense_review_pending: bool = False,
     expense_delete_verify_pending: bool = False,
     expense_submit_confirm_pending: bool = False,
     pending_expense_step: str | None = None,
@@ -97,6 +99,9 @@ def derive_prompt_context_fields(
     """Prompt context from raw session flags (no full snapshot required)."""
     if duplicate_leave_choice_pending:
         return PromptContext(domain="leave", slot="duplicate_choice", kind=KIND_ENUM)
+
+    if expense_review_pending:
+        return PromptContext(domain="expense", slot="review_confirm", kind=KIND_YES_NO)
 
     if leave_review_pending or leave_submit_confirm_pending:
         return PromptContext(domain="leave", slot="review_confirm", kind=KIND_YES_NO)
