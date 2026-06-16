@@ -89,13 +89,29 @@ def _pending_row_for_line(block: dict[str, Any], line: DraftLine) -> dict[str, A
 
 
 def _gap_route_lines(view: ExpenseDraftView) -> list[DraftLine]:
-    return [
-        ln
-        for ln in view.lines
-        if ln.pending_gap == "From/To needed"
-        and ln.category
-        and is_travel_category(ln.category)
-    ]
+    complete_keys: set[tuple[str, float]] = set()
+    for ln in view.lines:
+        if (
+            ln.kind == "committed"
+            and ln.from_location
+            and ln.to_location
+            and ln.category
+        ):
+            complete_keys.add(
+                (ln.category.lower(), round(float(ln.amount), 2))
+            )
+
+    gaps: list[DraftLine] = []
+    for ln in view.lines:
+        if ln.pending_gap != "From/To needed":
+            continue
+        if not ln.category or not is_travel_category(ln.category):
+            continue
+        key = (ln.category.lower(), round(float(ln.amount), 2))
+        if key in complete_keys:
+            continue
+        gaps.append(ln)
+    return gaps
 
 
 def build_pending_routes_prompt(
@@ -147,14 +163,145 @@ def build_pending_routes_prompt(
     )
 
 
+def consolidate_incomplete_travel_duplicates(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Drop route-less travel lines when the same category+amount already has From/To.
+
+    Happens when a route is applied to pending_line while an older committed Bus
+    line still lacks locations — submit must not re-ask for a route twice.
+    """
+    from chat.services.expense.normalization import normalize_expense_line
+
+    rows = [dict(x) for x in items]
+    complete: set[tuple[str, float]] = set()
+    for row in rows:
+        cat = str(row.get("category") or "").strip().lower()
+        if not is_travel_category(cat):
+            continue
+        frm = str(row.get("from_location") or "").strip()
+        to = str(row.get("to_location") or "").strip()
+        if frm and to:
+            complete.add((cat, round(float(row.get("amount") or 0), 2)))
+
+    if not complete:
+        return rows
+
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        cat = str(row.get("category") or "").strip().lower()
+        if is_travel_category(cat):
+            frm = str(row.get("from_location") or "").strip()
+            to = str(row.get("to_location") or "").strip()
+            if (not frm or not to) and (cat, round(float(row.get("amount") or 0), 2)) in complete:
+                continue
+        kept.append(normalize_expense_line(row))
+    return kept
+
+
+def _drop_redundant_pending_travel(
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> None:
+    """Remove open pending travel slots superseded by a complete committed line."""
+    pending = block.get("pending_line")
+    if not isinstance(pending, dict) or not pending.get("amount"):
+        return
+    cat = str(pending.get("category") or "").strip().lower()
+    if not is_travel_category(cat):
+        return
+    if str(pending.get("from_location") or "").strip() and str(
+        pending.get("to_location") or ""
+    ).strip():
+        return
+    amt = round(float(pending.get("amount") or 0), 2)
+    for row in items:
+        if (
+            str(row.get("category") or "").strip().lower() == cat
+            and round(float(row.get("amount") or 0), 2) == amt
+            and str(row.get("from_location") or "").strip()
+            and str(row.get("to_location") or "").strip()
+        ):
+            block.pop("pending_line", None)
+            block.pop("pending_step", None)
+            block.pop("pending_queue", None)
+            return
+
+
+def prepare_draft_items_for_submit(
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize draft lines before done/submit validation."""
+    cleaned = consolidate_incomplete_travel_duplicates(items)
+    _drop_redundant_pending_travel(block, cleaned)
+    return cleaned
+
+
+def _apply_route_to_gap_line(
+    ln: DraftLine,
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    frm: str,
+    to: str,
+) -> tuple[list[dict[str, Any]], int]:
+    from chat.services.expense.expense_confirm import expense_line_fingerprint
+    from chat.services.expense.normalization import normalize_expense_line
+    from chat.services.expense_workflow import _finalize_pending_line
+
+    new_items = list(items)
+    applied = 0
+
+    if ln.kind == "committed":
+        idx = ln.source_index
+        if 0 <= idx < len(new_items):
+            row = dict(new_items[idx])
+            row["from_location"] = frm
+            row["to_location"] = to
+            new_items[idx] = normalize_expense_line(row)
+            applied = 1
+        return new_items, applied
+
+    row = _pending_row_for_line(block, ln)
+    if not row:
+        return new_items, applied
+    row = dict(row)
+    row["from_location"] = frm
+    row["to_location"] = to
+    finalized = _finalize_pending_line(row)
+    if not finalized:
+        return new_items, applied
+
+    cat = str(finalized.get("category") or "").strip().lower()
+    amt = round(float(finalized.get("amount") or 0), 2)
+    for i, existing in enumerate(new_items):
+        if (
+            str(existing.get("category") or "").strip().lower() == cat
+            and round(float(existing.get("amount") or 0), 2) == amt
+            and is_travel_category(cat)
+            and not str(existing.get("from_location") or "").strip()
+            and not str(existing.get("to_location") or "").strip()
+        ):
+            updated = dict(existing)
+            updated["from_location"] = frm
+            updated["to_location"] = to
+            new_items[i] = normalize_expense_line(updated)
+            return new_items, 1
+
+    fp = expense_line_fingerprint(finalized)
+    if not any(expense_line_fingerprint(r) == fp for r in new_items):
+        new_items.append(finalized)
+        applied = 1
+    return new_items, applied
+
+
 def try_apply_pending_routes(
     block: dict[str, Any],
     items: list[dict[str, Any]],
     message: str,
 ) -> PendingRouteApplyResult:
     """Apply explicit route(s) from the user reply to open pending travel lines."""
-    from chat.services.expense_workflow import _finalize_pending_line
-
     view = ExpenseDraftView(items, block)
     gap_lines = _gap_route_lines(view)
     if not gap_lines:
@@ -164,6 +311,9 @@ def try_apply_pending_routes(
     routes = parse_route_segments(message)
     if not numbered and not routes:
         return PendingRouteApplyResult(list(items), block, 0, False)
+
+    if len(routes) == 1 and len(gap_lines) > 1 and not numbered:
+        return PendingRouteApplyResult(list(items), block, 0, routes_found=True)
 
     assignments: dict[int, tuple[str, str]] = dict(numbered)
     remaining = [ln for ln in gap_lines if ln.number not in assignments]
@@ -182,23 +332,16 @@ def try_apply_pending_routes(
     applied = 0
 
     for ln in gap_lines:
-        row = _pending_row_for_line(block, ln)
-        if not row:
+        if ln.number not in assignments:
+            row = _pending_row_for_line(block, ln)
+            if row:
+                still_pending.append(row)
             continue
-        if ln.number in assignments:
-            frm, to = assignments[ln.number]
-            row["from_location"] = frm
-            row["to_location"] = to
-            finalized = _finalize_pending_line(row)
-            if finalized:
-                from chat.services.expense.expense_confirm import expense_line_fingerprint
+        frm, to = assignments[ln.number]
+        new_items, delta = _apply_route_to_gap_line(ln, block, new_items, frm, to)
+        applied += delta
 
-                fp = expense_line_fingerprint(finalized)
-                if not any(expense_line_fingerprint(r) == fp for r in new_items):
-                    new_items.append(finalized)
-                    applied += 1
-        else:
-            still_pending.append(row)
+    new_items = consolidate_incomplete_travel_duplicates(new_items)
 
     if still_pending:
         block["pending_line"] = still_pending[0]
@@ -210,4 +353,5 @@ def try_apply_pending_routes(
         block.pop("pending_queue", None)
         block.pop("pending_step", None)
 
+    _drop_redundant_pending_travel(block, new_items)
     return PendingRouteApplyResult(new_items, block, applied, routes_found=True)

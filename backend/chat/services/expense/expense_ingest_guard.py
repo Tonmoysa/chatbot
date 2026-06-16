@@ -65,12 +65,8 @@ def should_block_compound_reingest(
     items: list[dict[str, Any]],
 ) -> bool:
     """True when a compound expense message must not merge into the draft."""
-    from chat.services.expense.expense_confirm import looks_like_duplicate_expense_reentry
-
     if block.get(KEY_RESTORE_PENDING):
         return False
-    if items and looks_like_duplicate_expense_reentry(message, items):
-        return True
     if is_ingest_locked(block) and not is_allowed_while_ingest_lock(message):
         return True
     return False

@@ -156,7 +156,12 @@ class ExpenseConversationManager:
         missing_set = set(missing)
         bullets: list[str] = []
 
-        if items and SLOT_ITEMS not in missing_set and primary_slot != SLOT_ITEMS:
+        ack_rows = block.get("ack_items") if isinstance(block, dict) else None
+        if isinstance(ack_rows, list) and ack_rows:
+            for row in ack_rows:
+                if isinstance(row, dict) and row.get("amount"):
+                    bullets.append(format_expense_line_bullet(row, lang))
+        elif items and SLOT_ITEMS not in missing_set and primary_slot != SLOT_ITEMS:
             for row in items[-4:]:
                 bullets.append(format_expense_line_bullet(row, lang))
 

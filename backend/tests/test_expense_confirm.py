@@ -226,7 +226,7 @@ def test_bike_and_lunch_correction_at_review():
     assert by_cat["Lunch"] == 70.0
 
 
-def test_duplicate_reentry_at_review_shows_notice_not_merge():
+def test_duplicate_reentry_at_review_adds_lines():
     wf = {
         "expense_request": {
             "active": True,
@@ -245,6 +245,6 @@ def test_duplicate_reentry_at_review_shows_notice_not_merge():
         "then lunch e 50 taka expense hoyeche"
     )
     pack = process_expense_turn(workflow_state=wf, message=msg)
-    bus = next(r for r in pack["items"] if r["category"] == "Bus")
-    assert bus["amount"] == 100
-    assert "duplicate" in (pack.get("question") or "").lower() or "submit" in (pack.get("question") or "").lower()
+    items = pack["items"]
+    assert len(items) >= 6
+    assert "duplicate" not in (pack.get("question") or "").lower()

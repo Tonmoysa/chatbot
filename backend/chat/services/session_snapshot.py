@@ -49,6 +49,8 @@ class SessionSnapshot:
     # Parked workflows
     has_suspended_leave: bool
     has_suspended_expense: bool
+    suspended_leave_review_pending: bool
+    suspended_expense_review_pending: bool
     has_expense_draft: bool
     has_leave_summary_context: bool
     # Pending UI states
@@ -129,6 +131,23 @@ def _read_expense_block_for_routing(workflow_state: dict[str, Any]) -> dict[str,
     return block
 
 
+def _suspended_leave_review_pending(workflow_state: dict[str, Any]) -> bool:
+    sl = (workflow_state or {}).get("suspended_leave") or {}
+    if not isinstance(sl, dict) or not sl:
+        return False
+    return bool(sl.get("review_pending"))
+
+
+def _suspended_expense_review_pending(workflow_state: dict[str, Any]) -> bool:
+    if not has_suspended_expense(workflow_state):
+        return False
+    se = (workflow_state or {}).get("suspended_expense") or {}
+    block = se.get("expense_request") if isinstance(se, dict) else {}
+    if not isinstance(block, dict) or not block:
+        return False
+    return is_expense_review(block) or is_expense_submit_confirm(block)
+
+
 def _leave_balance_probe(message: str) -> bool:
     from chat.services.leave_balance_intent import is_leave_balance_query
 
@@ -175,20 +194,9 @@ def _duplicate_leave_prompt(
     *,
     today: date | None,
 ) -> str | None:
-    import re
-
-    if not re.search(
-        r"(?:^|\b)(?:আবার|abar|again)\b",
-        message or "",
-        re.I | re.UNICODE,
-    ):
-        from chat.services.workflow_navigation import is_leave_application_message
-
-        if not is_leave_application_message(message):
-            return None
-    from chat.services.leave_meta_queries import check_overlapping_submitted_leave
-
-    return check_overlapping_submitted_leave(workflow_state, message, today=today)
+    """Overlap detection lives in leave_workflow only — snapshot stays read-only."""
+    del workflow_state, message, today
+    return None
 
 
 def build_classifier_snapshot(
@@ -230,6 +238,8 @@ def build_classifier_snapshot(
         pending_expense_step=pending_expense_step or None,
         has_suspended_leave=False,
         has_suspended_expense=has_suspended_expense,
+        suspended_leave_review_pending=False,
+        suspended_expense_review_pending=False,
         has_expense_draft=has_expense_draft,
         has_leave_summary_context=False,
         duplicate_leave_choice_pending=False,
@@ -290,6 +300,8 @@ def build_session_snapshot(
 
     suspended_leave = has_suspended_leave(wf)
     suspended_expense = has_suspended_expense(wf)
+    suspended_leave_review = _suspended_leave_review_pending(wf)
+    suspended_expense_review = _suspended_expense_review_pending(wf)
     has_draft = _expense_items_count(wf) > 0
 
     dup_prompt = _duplicate_leave_prompt(wf, msg, today=today)
@@ -346,6 +358,8 @@ def build_session_snapshot(
         pending_expense_step=pending_expense,
         has_suspended_leave=suspended_leave,
         has_suspended_expense=suspended_expense,
+        suspended_leave_review_pending=suspended_leave_review,
+        suspended_expense_review_pending=suspended_expense_review,
         has_expense_draft=has_draft,
         has_leave_summary_context=leave_summary_ctx,
         duplicate_leave_choice_pending=dup_choice_pending,

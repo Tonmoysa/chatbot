@@ -68,13 +68,14 @@ def test_router_p04_clears_expense_interactive_flag():
     assert not has_delete_disambiguation_pending(wf2["expense_request"])
 
 
-def test_snack_collision_prompts_add_modify():
+def test_snack_collision_auto_adds_duplicate_category():
     wf = _five_item_review_with_delete_pending()
     mark_delete_disambiguation_pending(wf["expense_request"])
     pack = process_expense_turn(workflow_state=wf, message="ajke nasta 50 taka")
     q = pack.get("question") or ""
     assert "Which entry should I delete" not in q
-    assert "modify" in q.lower() or "add" in q.lower()
+    items = pack["items"]
+    assert sum(1 for r in items if str(r.get("category")).lower() == "snack") >= 1
 
 
 def test_suspend_restore_clears_active_prompt():

@@ -138,7 +138,8 @@ def format_post_submit_leave_locked_message(
         return (
             "আপনার leave request **ইতিমধ্যে জমা হয়েছে** (এই session-এ)।\n"
             f"- **রেফারেন্স:** `{ref}`{detail}{date_part}\n\n"
-            "চূড়ান্ত অনুমোদন আপনার কোম্পানির HR সিস্টেমে হবে। "
+            "চূড়ান্ত অনুমোদন আপনার কোম্পানির **HR সিস্টেমে** হবে।\n"
+            "সারাংশ দেখতে বলুন — যেমন: **leave summary daw**।\n"
             "নতুন leave নিতে চাইলে বলুন — যেমন: **ami kalke sick leave nite chai**।"
         )
     return (

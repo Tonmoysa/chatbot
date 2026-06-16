@@ -23,6 +23,7 @@ from chat.services.expense_extraction import (
     ExtractionResult,
     is_travel_category,
     parse_from_to_locations,
+    route_explicit_for_category,
     route_explicit_in_user_message,
 )
 
@@ -369,8 +370,11 @@ def fill_parser_gaps_with_llm(
         used_llm.add(llm_idx)
 
         if needs_route and llm_item.from_location and llm_item.to_location:
-            if route_explicit_in_user_message(
-                message, llm_item.from_location, llm_item.to_location
+            if route_explicit_for_category(
+                message,
+                item.category,
+                llm_item.from_location,
+                llm_item.to_location,
             ):
                 item.from_location = llm_item.from_location
                 item.to_location = llm_item.to_location

@@ -191,6 +191,109 @@ def router_is_fallback(decision: SessionTurnDecision) -> bool:
 
 
 
+def apply_hr_query_router_fallback(
+    decision: SessionTurnDecision,
+    hr_query: Any,
+) -> SessionTurnDecision:
+    """
+  When the P00–P99 matrix did not match (P99), promote a confident
+    ``hr_query_classifier`` result into a concrete router decision.
+    """
+    from chat.constants import (
+        INTENT_APPROVAL_ESCALATION,
+        INTENT_EXPENSE_CLAIM,
+        INTENT_EXPENSE_DAY_SUMMARY,
+        INTENT_EXPENSE_STATUS,
+        INTENT_HR_POLICY,
+        INTENT_LEAVE_BALANCE,
+        INTENT_LEAVE_REQUEST,
+        INTENT_REQUEST_STATUS,
+    )
+    from chat.services.hr_query_classifier import (
+        CONFIDENCE_LLM_FALLBACK,
+        QUERY_CHITCHAT,
+        QUERY_UNKNOWN,
+    )
+    from chat.services.session_turn_router import _decision
+
+    if not router_is_fallback(decision):
+        return decision
+
+    intent = hr_query.maps_to_intent
+    if not intent:
+        return decision
+    if float(hr_query.confidence or 0) < CONFIDENCE_LLM_FALLBACK:
+        return decision
+    if hr_query.query_kind in (QUERY_CHITCHAT, QUERY_UNKNOWN) and not hr_query.in_hr_scope:
+        return decision
+
+    mapping: dict[str, tuple[TurnKind, str | None, str, str]] = {
+        INTENT_LEAVE_BALANCE: (
+            TurnKind.BALANCE_QUERY,
+            None,
+            "leave_balance",
+            "hr_query_fallback_balance",
+        ),
+        INTENT_HR_POLICY: (
+            TurnKind.POLICY_QUERY,
+            None,
+            "policy_kb",
+            "hr_query_fallback_policy",
+        ),
+        INTENT_EXPENSE_STATUS: (
+            TurnKind.META_QUESTION,
+            "expense",
+            "expense.session_action_memory",
+            "hr_query_fallback_expense_meta",
+        ),
+        INTENT_REQUEST_STATUS: (
+            TurnKind.META_QUESTION,
+            "leave",
+            "leave.session_action_memory",
+            "hr_query_fallback_request_status",
+        ),
+        INTENT_EXPENSE_DAY_SUMMARY: (
+            TurnKind.SUMMARY,
+            "expense",
+            "expense_workflow",
+            "hr_query_fallback_expense_summary",
+        ),
+        INTENT_EXPENSE_CLAIM: (
+            TurnKind.NEW_EXPENSE,
+            "expense",
+            "expense_workflow",
+            "hr_query_fallback_expense_claim",
+        ),
+        INTENT_LEAVE_REQUEST: (
+            TurnKind.NEW_LEAVE,
+            "leave",
+            "leave_workflow",
+            "hr_query_fallback_leave",
+        ),
+        INTENT_APPROVAL_ESCALATION: (
+            TurnKind.META_QUESTION,
+            None,
+            "global_intent",
+            "hr_query_fallback_approval",
+        ),
+    }
+    row = mapping.get(intent)
+    if not row:
+        return decision
+
+    kind, target, handler, reason = row
+    return _decision(
+        turn_kind=kind,
+        intent=intent,
+        target_workflow=target,
+        handler_id=handler,
+        reason=reason,
+        matched_predicate="hr_query_classifier",
+        confidence=float(hr_query.confidence or CONFIDENCE_LLM_FALLBACK),
+    )
+
+
+
 
 def should_override_wizard_intent(
 
@@ -429,6 +532,10 @@ def intent_result_from_router_decision(decision: SessionTurnDecision) -> dict[st
 
         result["_block_message"] = decision.flags["duplicate_prompt"]
 
+    if decision.flags.get("block_message"):
+
+        result["_block_message"] = decision.flags["block_message"]
+
     if decision.flags.get("leave_nav_no_session"):
 
         result["leave_nav_no_session"] = True
@@ -483,6 +590,8 @@ def workflow_turn_from_router_decision(decision: SessionTurnDecision) -> str | N
 
         TurnKind.NEW_LEAVE: TURN_NEW_WORKFLOW,
 
+        TurnKind.NEW_EXPENSE: TURN_NEW_WORKFLOW,
+
         TurnKind.RESUME_SUSPENDED: TURN_SLOT_ANSWER,
 
         TurnKind.DEFER_SUBMIT: TURN_CONFIRM,
@@ -527,23 +636,18 @@ def pipeline_effects_from_router_decision(
 
     )
 
-    if decision.turn_kind == TurnKind.DUPLICATE_LEAVE:
-
-        effects.duplicate_leave_message = str(
-
-            decision.flags.get("duplicate_prompt") or ""
-
-        ) or None
-
     if decision.turn_kind == TurnKind.CONTEXT_CLARIFICATION:
-        custom = str(decision.flags.get("clarification_prompt") or "").strip()
-        if not custom and snapshot is not None:
+        prompt = decision.flags.get("clarification_prompt")
+        if prompt:
+            effects.context_clarification_message = str(prompt)
+        elif snapshot is not None:
             from chat.services.session_expected_answer import build_slot_aware_clarification
 
-            custom = str(build_slot_aware_clarification(message, snapshot) or "").strip()
-        effects.context_clarification_message = custom or build_context_clarification_message(
-            message, context_lines
-        )
+            tailored = build_slot_aware_clarification(message, snapshot)
+            if tailored:
+                effects.context_clarification_message = tailored
+
+  # Duplicate overlap and context clarification are owned by workflows only.
 
     if decision.turn_kind == TurnKind.OUT_OF_SCOPE:
 
@@ -587,16 +691,8 @@ def router_overrides_cold_start_intent(decision: SessionTurnDecision) -> bool:
 
 def router_locked_intent(intent_result: dict[str, Any]) -> bool:
 
-    """True when orchestrator should not override intent via workflow locks."""
+    """Router intent is final — orchestrator must not override."""
 
-    source = str(intent_result.get("source") or "")
-
-    if not source.startswith("session_turn_router+"):
-
-        return False
-
-    reason = str(intent_result.get("router_reason") or "")
-
-    return not reason.startswith("P99")
+    return str(intent_result.get("source") or "").startswith("session_turn_router+")
 
 

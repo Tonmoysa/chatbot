@@ -176,9 +176,9 @@ def classify_message_scope(message: str, snapshot: Any) -> HrScopeResult:
 
         # No HR keyword signal in a long message → likely general chat / trivia
         try:
-            from chat.services.hr_query_classifier import _HR_ADJACENT_RE
+            from chat.services.hr_signal import message_has_hr_signal
 
-            if not _HR_ADJACENT_RE.search(msg):
+            if not message_has_hr_signal(msg):
                 return HrScopeResult(
                     in_scope=False,
                     confidence=0.86,

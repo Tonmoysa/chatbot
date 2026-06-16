@@ -201,6 +201,36 @@ def _replace_category_targets(
     return False
 
 
+def _set_category_route(
+    out: list[dict[str, Any]], cat: str, frm: str, to: str
+) -> bool:
+    from chat.services.expense.normalization import normalize_location
+
+    cat_l = cat.lower()
+    frm_n = normalize_location(frm)
+    to_n = normalize_location(to)
+    for row in out:
+        if str(row.get("category") or "").lower() == cat_l:
+            row["from_location"] = frm_n
+            row["to_location"] = to_n
+            return True
+    return False
+
+
+def _set_category_route_at_index(
+    out: list[dict[str, Any]], index: int, frm: str, to: str
+) -> bool:
+    from chat.services.expense.normalization import normalize_location
+
+    if not (0 <= index < len(out)):
+        return False
+    frm_n = normalize_location(frm)
+    to_n = normalize_location(to)
+    out[index]["from_location"] = frm_n
+    out[index]["to_location"] = to_n
+    return True
+
+
 def execute_correction_plan(
     items: list[dict[str, Any]],
     plan: CorrectionCommandPlan,
@@ -209,6 +239,14 @@ def execute_correction_plan(
     """Apply a correction plan — mirrors legacy apply_corrections ordering."""
     changed = False
     out = [dict(x) for x in items]
+
+    for idx, frm, to in plan.set_routes_by_index:
+        if _set_category_route_at_index(out, idx, frm, to):
+            changed = True
+
+    for cat, frm, to in plan.set_routes:
+        if _set_category_route(out, cat, frm, to):
+            changed = True
 
     for from_cat, to_cat in plan.replacements:
         if _replace_category_targets(out, block, from_cat, to_cat):
@@ -398,6 +436,12 @@ def execute_correction_plan(
 
     if changed:
         out = _prune_zero_lines(dedupe_expense_items(out))
+    if changed and block is not None:
+        from chat.services.expense.expense_draft_gate import finalize_expense_draft
+
+        out, finalized_block = finalize_expense_draft(block, out)
+        block.clear()
+        block.update(finalized_block)
     return CommandExecuteResult(items=out, changed=changed)
 
 

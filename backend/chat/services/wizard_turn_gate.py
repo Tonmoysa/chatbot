@@ -95,7 +95,34 @@ def looks_like_leave_review_update(message: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
+    try:
+        from chat.services.leave_meta_queries import (
+            wants_leave_session_summary,
+            wants_pending_leave_show,
+            wants_submitted_leave_details,
+        )
+
+        if (
+            wants_leave_session_summary(text)
+            or wants_pending_leave_show(text)
+            or wants_submitted_leave_details(text)
+        ):
+            return False
+    except Exception:
+        pass
     if looks_like_expense_correction(text):
+        return False
+    from chat.services.expense_extraction import _CATEGORY_TOKEN
+
+    if re.search(
+        rf"\b({_CATEGORY_TOKEN}|expense|খরচ|kharcha|khoroch)\b",
+        text,
+        re.I | re.UNICODE,
+    ) and not re.search(
+        r"\b(leave|chuti|chhuti|chutti|ছুটি|sick\s*leave|annual\s*leave)\b",
+        text,
+        re.I | re.UNICODE,
+    ):
         return False
     if parse_edit_slot(text):
         return True

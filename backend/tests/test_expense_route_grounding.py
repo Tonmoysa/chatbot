@@ -79,6 +79,73 @@ def test_strip_ungrounded_travel_routes():
     assert not bus.to_location
 
 
+def test_bike_does_not_inherit_bus_route_in_same_message():
+    msg = (
+        "amar ajke expense hoyeche 100 taka bus mirpur to badda then lunch 100 taka,"
+        "tarpor bike 150 taka ,tarpor metro rail 50 taka uttora to mirpur"
+    )
+    pack = process_expense_turn(workflow_state={}, message=msg)
+    block = pack["workflow_state"]["expense_request"]
+    items = block["items"]
+    pending = block.get("pending_line") or {}
+    if str(pending.get("category") or "") == "Bike":
+        assert not str(pending.get("from_location") or "").strip()
+        assert not str(pending.get("to_location") or "").strip()
+    else:
+        bike = next(r for r in items if r["category"] == "Bike")
+        assert not bike.get("from_location")
+        assert not bike.get("to_location")
+    bus = next(r for r in items if r["category"] == "Bus")
+    assert str(bus.get("from_location") or "").lower() == "mirpur"
+    assert str(bus.get("to_location") or "").lower() == "badda"
+
+
+def test_route_correction_at_review():
+    from chat.services.expense.command_executor import apply_message_corrections
+
+    items = [
+        {"category": "Bus", "amount": 100, "from_location": "mirpur", "to_location": "badda"},
+        {"category": "Bike", "amount": 150, "from_location": "mirpur", "to_location": "badda"},
+    ]
+    result = apply_message_corrections(
+        items,
+        "bike badda to gulshan hobe",
+        extract_lines=None,
+        use_llm=False,
+        review_stage=True,
+    )
+    assert result.changed
+    bike = next(r for r in result.items if r["category"] == "Bike")
+    assert str(bike.get("from_location") or "").lower() == "badda"
+    assert str(bike.get("to_location") or "").lower() == "gulshan"
+
+
+def test_expense_route_correction_not_leave_block():
+    from chat.services.leave_fsm import mark_submitted
+    from chat.services.session_snapshot import build_session_snapshot
+    from chat.services.session_turn_router import route_session_turn
+
+    msg0 = (
+        "bus 100 mirpur to badda, lunch 100, bike 150, metro 50 uttora to mirpur"
+    )
+    pack = process_expense_turn(workflow_state={}, message=msg0)
+    wf = pack["workflow_state"]
+    wf = mark_submitted(
+        wf,
+        draft={
+            "leave_type": "annual",
+            "start_date": "2026-06-16",
+            "end_date": "2026-06-18",
+            "reason": "family",
+        },
+        submission_id="PHP-LEAVE-TEST",
+    )
+    snap = build_session_snapshot("bike badda to gulshan hobe", workflow_state=wf)
+    decision = route_session_turn(snap, workflow_state=wf)
+    assert decision.target_workflow == "expense"
+    assert "P47_post_submit_leave" not in decision.reason
+
+
 def test_parse_two_routes_from_one_message():
     from chat.services.expense.pending_routes import parse_route_segments
 

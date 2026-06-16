@@ -73,9 +73,13 @@ def _strong_expense_claim(message: str) -> bool:
 
     if _strong_hr_policy(message) and is_rules_query(message):
         return False
+    from chat.services.hr_signal import message_looks_like_expense_status_query
+
+    if message_looks_like_expense_status_query(message):
+        return False
     low = (message or "").lower()
     if re.search(r"\b(expense|reimbursement|claim)\b", low) and re.search(
-        r"\b(status|track|where)\b", low
+        r"\b(status|track|where|koi|kothay|kothai|kothao)\b", low
     ):
         return False
     if re.search(r"\b(expense|reimbursement|claim)\b", low):
@@ -462,6 +466,13 @@ def _message_answers_wizard_step(message: str, step: str | None) -> bool:
         text = (message or "").strip()
         if not text:
             return False
+        try:
+            from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+            if message_contains_expense_claim_lines(text) or _strong_expense_claim(text):
+                return False
+        except Exception:
+            pass
         if looks_like_wizard_side_question(message):
             return False
         try:
@@ -485,7 +496,14 @@ def _message_answers_wizard_step(message: str, step: str | None) -> bool:
             _WIZARD_DAYSCOPE_RE.search(text)
             or _WIZARD_DAYSCOPE_BN_RE.search(text)
         )
-    if step == "leave_dates":
+    if step in ("leave_dates", "dates"):
+        try:
+            from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+            if message_contains_expense_claim_lines(text) or _strong_expense_claim(text):
+                return False
+        except Exception:
+            pass
         if re.search(r"\d", text):
             return True
         return bool(

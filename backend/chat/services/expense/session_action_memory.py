@@ -238,6 +238,42 @@ def looks_like_submitted_expense_correction_attempt(
     return looks_like_post_submit_expense_modification(workflow_state, message)
 
 
+def format_submitted_expense_cancel_blocked_answer(
+    workflow_state: dict[str, Any] | None,
+    *,
+    lang: str | None = None,
+) -> str:
+    """Explain that a submitted expense cannot be cancelled in chat."""
+    wf = workflow_state or {}
+    action = read_last_bot_action(wf)
+    last_sub = wf.get("expense_last_submission") or {}
+    ref = str(last_sub.get("reference_id") or action.get("reference_id") or "")
+    if lang == "en":
+        if ref:
+            return (
+                f"Expense `{ref}` is already **submitted** — it cannot be **cancelled** "
+                "or edited in this chat.\n\n"
+                "Please contact **CRM/Finance** for post-submit changes.\n"
+                "To start a **new** claim, describe your expenses again."
+            )
+        return (
+            "Your expense is already **submitted** — it cannot be **cancelled** "
+            "or edited in this chat.\n\n"
+            "Contact **CRM/Finance** for changes after submit."
+        )
+    if ref:
+        return (
+            f"Expense `{ref}` **ইতিমধ্যে জমা** হয়েছে — এই চ্যাট থেকে **বাতিল বা edit** "
+            "করা যাবে না।\n\n"
+            "পরিবর্তন চাইলে **CRM/Finance**-এর সাথে যোগাযোগ করুন।\n"
+            "নতুন claim শুরু করতে আবার খরচের বিবরণ লিখুন।"
+        )
+    return (
+        "Expense **ইতিমধ্যে জমা** হয়েছে — chat থেকে **বাতিল বা edit** করা যাবে না।\n"
+        "পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+    )
+
+
 def format_submitted_expense_edit_blocked_answer(
     workflow_state: dict[str, Any] | None,
     *,
@@ -251,17 +287,17 @@ def format_submitted_expense_edit_blocked_answer(
     if lang == "en":
         if ref:
             return (
-                f"Expense `{ref}` is already **submitted** — it cannot be edited in chat. "
-                "Contact CRM/Finance for post-submit changes."
+                f"Expense `{ref}` is already **submitted** — it cannot be edited in chat.\n\n"
+                "Contact **CRM/Finance** for post-submit changes."
             )
         return (
-            "Your expense is already **submitted** — it cannot be edited in chat. "
-            "Contact CRM/Finance for post-submit changes."
+            "Your expense is already **submitted** — it cannot be edited in chat.\n\n"
+            "Contact **CRM/Finance** for post-submit changes."
         )
     if ref:
         return (
-            f"Expense `{ref}` **submit** হয়ে গেছে — chat-এ আর **edit করা যায় না**।\n"
-            "পরিবর্তন চাইলে CRM/Finance-এর সাথে যোগাযোগ করুন।"
+            f"Expense `{ref}` **submit** হয়ে গেছে — chat-এ আর **edit করা যায় না**।\n\n"
+            "পরিবর্তন চাইলে **CRM/Finance**-এর সাথে যোগাযোগ করুন।"
         )
     return (
         "Expense **submit** হয়ে গেছে — chat-এ আর **edit করা যায় না**।\n"
@@ -289,6 +325,14 @@ def wants_expense_submit_timing_question(message: str) -> bool:
     """User asks whether/when they must submit (draft still open — not a status lookup)."""
     raw = (message or "").strip()
     if not raw:
+        return False
+    from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+    if wants_expense_submit_command(raw) and re.search(
+        r"\b(koro|kor|daw|dao|de|debo|din|den|kore\s*daw|kore\s*de)\b",
+        raw,
+        re.I | re.UNICODE,
+    ):
         return False
     if wants_post_submit_edit_question(raw):
         return False
@@ -420,6 +464,10 @@ def wants_expense_meta_question(message: str) -> bool:
         return True
     if wants_expense_draft_persistence_question(message):
         return True
+    from chat.services.hr_signal import message_looks_like_expense_status_query
+
+    if message_looks_like_expense_status_query(raw):
+        return True
     low = raw.lower()
     if wants_expense_history_query(message):
         return False
@@ -448,11 +496,13 @@ def wants_expense_meta_question(message: str) -> bool:
         re.I | re.UNICODE,
     ):
         return True
-    if re.search(r"\b(expense|kharcha|khoroch|summary|summery|draft|pending)\b", low) or re.search(
-        r"(খরচ|expense)", raw, re.I
-    ):
+    if re.search(
+        r"\b(expense|kharcha|khoroch|reimbursement|reimburse|claim|summary|summery|draft|pending)\b",
+        low,
+    ) or re.search(r"(খরচ|expense)", raw, re.I):
         if re.search(
-            r"\b(keno|why|kothai|where|missing|shudhu|only|just|incomplete)\b", low
+            r"\b(keno|why|kothai|kothay|kothao|koi|where|missing|shudhu|only|just|incomplete)\b",
+            low,
         ) or re.search(r"\bbaki\s+(expense|line|gula|kharcha)\b", low):
             return True
     if re.search(r"\b(ki|what)\b", low) and re.search(

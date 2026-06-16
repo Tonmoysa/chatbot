@@ -462,8 +462,25 @@ _ROUTE_JUNK_WORDS_RE = re.compile(
     r"\b(?:ajke|aajke|amar|ami|my|expense|expenses|hoyeche|hocche|hoyese|cost|kharch|"
     r"খরচ|হয়েছে|হয়েছে|hoyeche|taka|টাকা|tk|then|abar|tarpor|তারপর|first|note|"
     r"kor|korechi|kore|lagche|laglo|khoroch|sokale|সকালে|giyechi|গিয়েছি|গিয়েছি|"
-    r"pouche|পৌঁছে|পৌছে)\b",
+    r"pouche|পৌঁছে|পৌছে|baad|bad|diye|theke|add|koro|kor|jog|debo|daw|dao|komao|komiye)\b",
     re.I,
+)
+
+# English prepositions / articles — never valid place names (e.g. "for bus mirpur" → not "for").
+_ROUTE_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "the",
+        "with",
+    }
 )
 
 
@@ -510,7 +527,7 @@ def strip_ungrounded_travel_routes(
             and is_travel_category(cat)
             and frm
             and to
-            and not route_explicit_in_user_message(message, frm, to)
+            and not route_explicit_for_category(message, cat, frm, to)
         ):
             item = ExpenseLineItem(
                 category=item.category,
@@ -641,13 +658,21 @@ def _strip_route_endpoint(raw: str) -> str:
     for _ in range(5):
         if not s:
             break
-        if _looks_like_location_label(s) or not _ROUTE_JUNK_WORDS_RE.search(s):
+        if _looks_like_location_label(s):
             return _romanize_known_place(s)
+        if _ROUTE_JUNK_WORDS_RE.search(s):
+            parts = s.split(None, 1)
+            if len(parts) < 2:
+                break
+            s = parts[1].strip()
+            continue
         parts = s.split(None, 1)
         if len(parts) < 2:
             break
         s = parts[1].strip()
-    return _romanize_known_place(s)
+    if _looks_like_location_label(s):
+        return _romanize_known_place(s)
+    return ""
 
 
 def _valid_location_pair(frm: str, to: str) -> tuple[str, str] | None:
@@ -670,6 +695,11 @@ def _looks_like_location_label(label: str) -> bool:
     if _AMOUNT_RE.search(s):
         return False
     if len(s.split()) > 4:
+        return False
+    words = [w.lower() for w in s.split()]
+    if words and all(w in _ROUTE_STOP_WORDS for w in words):
+        return False
+    if len(words) == 1 and words[0] in _ROUTE_STOP_WORDS:
         return False
     return True
 
@@ -867,16 +897,67 @@ def location_grounded_in_message(location: str, message: str) -> bool:
     return all(t in msg for t in tokens)
 
 
+def _category_mentioned_in_clause(clause: str, category: str) -> bool:
+    cat = normalize_category(category)
+    low = preprocess_expense_message(clause).lower()
+    if re.search(rf"\b{re.escape(cat.lower())}\b", low):
+        return True
+    for alias, canon in _CATEGORY_ALIASES.items():
+        if canon == cat and re.search(rf"\b{re.escape(alias)}\b", low):
+            return True
+    return False
+
+
+def _route_pair_matches(pair: tuple[str, str], frm: str, to: str) -> bool:
+    return _location_key(pair[0]) == _location_key(frm) and _location_key(
+        pair[1]
+    ) == _location_key(to)
+
+
+def route_explicit_for_category(
+    message: str,
+    category: str,
+    from_loc: str,
+    to_loc: str,
+) -> bool:
+    """Route counts only when stated in the same clause as that travel category."""
+    frm = (from_loc or "").strip()
+    to = (to_loc or "").strip()
+    cat = (category or "").strip()
+    if not frm or not to or not cat:
+        return False
+    if not is_travel_category(normalize_category(cat)):
+        return False
+    if not location_grounded_in_message(frm, message):
+        return False
+    if not location_grounded_in_message(to, message):
+        return False
+    for clause in _split_clauses(preprocess_expense_message(message)):
+        if not _category_mentioned_in_clause(clause, cat):
+            continue
+        cleaned = re.sub(
+            r"\b(hobe|habe|হবে|হয়)\s*$", "", clause, flags=re.I | re.UNICODE
+        ).strip()
+        pair = parse_from_to_locations(cleaned)
+        if pair and _route_pair_matches(pair, frm, to):
+            return True
+    return False
+
+
 def route_explicit_in_user_message(
     message: str,
     from_loc: str,
     to_loc: str,
+    *,
+    category: str | None = None,
 ) -> bool:
     """Both endpoints must appear in the user message — never from prompt examples."""
     frm = (from_loc or "").strip()
     to = (to_loc or "").strip()
     if not frm or not to:
         return False
+    if category and is_travel_category(normalize_category(category)):
+        return route_explicit_for_category(message, category, frm, to)
     if not location_grounded_in_message(frm, message):
         return False
     if not location_grounded_in_message(to, message):

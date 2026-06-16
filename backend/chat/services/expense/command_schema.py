@@ -31,6 +31,8 @@ class CorrectionCommandPlan:
     has_partial_deduct_pattern: bool = False
     set_category_only: str = ""
     bare_amount_set: float | None = None
+    set_routes: list[tuple[str, str, str]] = field(default_factory=list)
+    set_routes_by_index: list[tuple[int, str, str]] = field(default_factory=list)
 
     def has_any_correction(self) -> bool:
         return bool(
@@ -52,6 +54,8 @@ class CorrectionCommandPlan:
             or self.update_amount_by_index is not None
             or bool(self.set_category_only)
             or self.bare_amount_set is not None
+            or self.set_routes
+            or self.set_routes_by_index
         )
 
 

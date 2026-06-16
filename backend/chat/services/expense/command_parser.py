@@ -14,6 +14,7 @@ from chat.services.expense.expense_confirm import (
     _AMOUNT_INSTEAD_RE,
     _CAT_ER_AMOUNT_KORO_RE,
     parse_bare_amount_correction,
+    parse_category_route_correction,
     _CAT_AMT_BAAD_RE,
     _CAT_ER_EXPENSE_AMOUNT_RE,
     _CAT_HOBE_RE,
@@ -98,30 +99,20 @@ _ORDINAL_SET_AMOUNT_RE = re.compile(
 
 
 def _ordinal_index_from_message(low: str, *, item_count: int | None = None) -> int | None:
-    """Map ordinal words; Bengali tokens skip ``\\b`` (unreliable with conjuncts)."""
-    if _LAST_ORDINAL_RE.search(low):
-        if item_count is not None and item_count > 0:
-            return item_count - 1
-        return None
-    num_m = re.search(
-        r"\b(\d+)\s*(?:tatei|tite|te|number|no|টায়|টাই)\b",
-        low,
-        re.I | re.UNICODE,
-    )
-    if num_m:
-        try:
-            idx = int(num_m.group(1)) - 1
-        except (TypeError, ValueError):
-            idx = -1
-        if idx >= 0 and (item_count is None or idx < item_count):
-            return idx
-    for word, idx in _ORDINAL_INDEX_MAP.items():
-        if word.isascii():
-            if re.search(rf"\b{re.escape(word)}\b", low, re.I):
-                return idx
-        elif re.search(re.escape(word), low, re.I | re.UNICODE):
-            return idx
-    return None
+    """Map ordinal words and numeric line refs to a 0-based index."""
+    from chat.services.expense.expense_edit_parser import parse_line_index_from_message
+
+    return parse_line_index_from_message(low, item_count=item_count)
+
+
+def parse_ordinal_amount_correction(
+    message: str, *, item_count: int | None = None
+) -> tuple[int, float] | None:
+    """Ordinal amount edit — ``120 na 140`` patterns beat bare ``prothom 120``."""
+    parsed = _parse_ordinal_amount_update(message, item_count=item_count)
+    if parsed is not None:
+        return parsed
+    return parse_ordinal_set_amount(message, item_count=item_count)
 
 
 def parse_ordinal_set_amount(
@@ -152,17 +143,12 @@ def parse_ordinal_set_amount(
 def _parse_ordinal_amount_update(
     message: str, *, item_count: int | None = None
 ) -> tuple[int, float] | None:
-    low = _normalize_correction_message(message)
-    m = _ORDINAL_AMOUNT_RE.search(low)
-    if not m:
+    from chat.services.expense.expense_edit_parser import parse_line_amount_update
+
+    parsed = parse_line_amount_update(message, item_count=item_count)
+    if parsed is None:
         return None
-    idx = _ordinal_index_from_message(low, item_count=item_count)
-    if idx is None:
-        return None
-    try:
-        return idx, float(str(m.group("new")).replace(",", "."))
-    except (TypeError, ValueError):
-        return None
+    return parsed.line_index, parsed.new_amount
 
 
 def _parse_ordinal_delete_index(message: str, *, item_count: int | None = None) -> int | None:
@@ -191,6 +177,8 @@ def parse_correction_plan(
         plan.update_amount_by_index = parse_ordinal_set_amount(
             message, item_count=item_count
         )
+
+    ordinal_amount_update = plan.update_amount_by_index is not None
 
     for m in _REPLACE_RE.finditer(low):
         plan.replacements.append(
@@ -300,6 +288,8 @@ def parse_correction_plan(
         plan.remove_category_suffix.append(normalize_category(m.group("cat")))
 
     for m in _UPDATE_AMOUNT_RE.finditer(low):
+        if ordinal_amount_update:
+            continue
         try:
             new_amt = float(m.group("amt").replace(",", "."))
         except ValueError:
@@ -378,6 +368,8 @@ def parse_correction_plan(
         plan.set_category_only = _normalize_remove_cat(m_hobe.group("cat"))
 
     for m in _AMOUNT_INSTEAD_RE.finditer(low):
+        if ordinal_amount_update:
+            continue
         raw_new = m.group("new_amt") or m.group("new_amt2")
         raw_old = m.group("old_amt") or m.group("old_amt2")
         if not raw_new:
@@ -392,6 +384,8 @@ def parse_correction_plan(
             plan.amount_replacements.append(pair)
 
     for m in _LINE_HINT_AMOUNT_HOBE_RE.finditer(low):
+        if ordinal_amount_update:
+            continue
         try:
             new_amt = float(str(m.group("new")).replace(",", "."))
             old_amt = float(str(m.group("hint")).replace(",", "."))
@@ -415,6 +409,17 @@ def parse_correction_plan(
             seen_cats.add(key)
             deduped.append((cat, amt))
         plan.set_amounts = deduped
+
+    route_corr = parse_category_route_correction(message)
+    if route_corr:
+        cat, frm, to = route_corr
+        idx = _ordinal_index_from_message(low, item_count=item_count)
+        if idx is not None:
+            plan.set_routes_by_index.append((idx, frm, to))
+        else:
+            pair = (cat, frm, to)
+            if pair not in plan.set_routes:
+                plan.set_routes.append(pair)
 
     return plan
 

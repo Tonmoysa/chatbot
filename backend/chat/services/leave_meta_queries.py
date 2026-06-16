@@ -50,8 +50,16 @@ _SUBMITTED_LEAVE_DETAILS_RE = re.compile(
     re.I | re.UNICODE,
 )
 _CANCEL_LEAVE_RE = re.compile(
-    r"(?:^|\b)(?:cancel\s*leave|leave\s*cancel|ছুটি\s*cancel|cancel\s*ছুটি|ছুটি\s*বাতিল|বাতিল\s*ছুটি)"
-    r"(?:\s*[\.।]|$)",
+    r"(?:^|\b)(?:"
+    r"cancel\s+(?:the\s+)?(?:leave|chuti|chhuti|chutti|ছুটি)(?:\s+request)?"
+    r"|cancel\s+(?:the\s+)?leave\s+request"
+    r"|cancel\s*leave"
+    r"|leave\s*cancel"
+    r"|ছুটি\s*cancel"
+    r"|cancel\s*ছুটি"
+    r"|ছুটি\s*বাতিল"
+    r"|বাতিল\s*ছুটি"
+    r")(?:\s*[\.।]|$)",
     re.I | re.UNICODE,
 )
 _KEY_CANCEL_PENDING = "leave_cancel_verify_pending"
@@ -184,6 +192,114 @@ def wants_cancel_leave_command(message: str) -> bool:
     return bool(_CANCEL_LEAVE_RE.search(raw))
 
 
+def format_submitted_leave_cancel_blocked_message(
+    workflow_state: dict[str, Any] | None,
+    *,
+    lang: str | None = None,
+) -> str:
+    """Explain that a submitted leave cannot be cancelled in chat."""
+    from chat.services.leave_fsm import read_leave_last_submission
+    from chat.services.leave_confirm import build_leave_review_summary
+
+    wf = workflow_state or {}
+    last = read_leave_last_submission(wf)
+    ref = str(last.get("submission_id") or "").strip()
+    draft = dict(last.get("draft") or {})
+    summary = build_leave_review_summary(draft) if draft else ""
+    days = compute_requested_leave_days(draft) if draft else 0
+
+    if lang == "en":
+        lines = [
+            "**This leave request is already submitted** — it cannot be cancelled or edited in this chat.",
+        ]
+        if ref:
+            lines.append(f"- **Reference:** `{ref}`")
+        if days:
+            lines.append(f"- **Days requested:** {days:g}")
+        if summary:
+            lines.extend(["", summary])
+        lines.extend(
+            [
+                "",
+                "Final approval is handled in your company's HR system. "
+                "For withdrawal or changes after submit, please contact **HR** directly.",
+                "",
+                "To apply for a **new** leave, start fresh — e.g. *ami kalke sick leave nite chai*.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines = [
+        "**আপনার ছুটির আবেদন ইতিমধ্যে জমা হয়েছে** — এই চ্যাট থেকে আর **বাতিল বা সম্পাদনা** করা যাবে না।",
+    ]
+    if ref:
+        lines.append(f"- **রেফারেন্স:** `{ref}`")
+    if days:
+        lines.append(f"- **আবেদনকৃত দিন:** {days:g} দিন")
+    if summary:
+        lines.extend(["", summary])
+    lines.extend(
+        [
+            "",
+            "চূড়ান্ত অনুমোদন আপনার কোম্পানির **HR সিস্টেমে** হবে। "
+            "জমা দেওয়ার পর বাতিল বা পরিবর্তন চাইলে সরাসরি **HR-এর সাথে যোগাযোগ** করুন।",
+            "",
+            "নতুন ছুটির জন্য আবার শুরু করতে পারেন — যেমন: **ami kalke sick leave nite chai**।",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_submitted_leave_edit_blocked_message(
+    workflow_state: dict[str, Any] | None,
+    *,
+    lang: str | None = None,
+) -> str:
+    """Explain that a submitted leave cannot be edited in chat."""
+    from chat.services.leave_fsm import read_leave_last_submission
+
+    wf = workflow_state or {}
+    last = read_leave_last_submission(wf)
+    ref = str(last.get("submission_id") or "").strip()
+    draft = dict(last.get("draft") or {})
+    start = str(draft.get("start_date") or "").strip()
+    end = str(draft.get("end_date") or start).strip()
+    date_line = f"**{start}**" if start == end else f"**{start}** → **{end}**"
+
+    if lang == "en":
+        lines = [
+            "**This leave is already submitted** — dates, type, or reason cannot be changed in chat.",
+        ]
+        if ref:
+            lines.append(f"- **Reference:** `{ref}`")
+        if start:
+            lines.append(f"- **Dates:** {date_line}")
+        lines.extend(
+            [
+                "",
+                "Please contact **HR** for post-submit changes.",
+                "For a **new** request, start a fresh leave message.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines = [
+        "**ছুটি ইতিমধ্যে জমা** — তারিখ, ধরন বা কারণ এই চ্যাট থেকে **বদলানো যাবে না**।",
+    ]
+    if ref:
+        lines.append(f"- **রেফারেন্স:** `{ref}`")
+    if start:
+        lines.append(f"- **তারিখ:** {date_line}")
+    lines.extend(
+        [
+            "",
+            "পরিবর্তন চাইলে **HR-এর সাথে যোগাযোগ** করুন।",
+            "নতুন আবেদনের জন্য আবার leave message দিন।",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def is_leave_cancel_verify_pending(workflow_state: dict[str, Any] | None) -> bool:
     return bool((workflow_state or {}).get(_KEY_CANCEL_PENDING))
 
@@ -223,32 +339,55 @@ def build_pending_leave_show_message(workflow_state: dict[str, Any]) -> str:
 
 def build_leave_session_summary_message(workflow_state: dict[str, Any]) -> str:
     from chat.services.leave_fsm import read_leave_last_submission, read_leave_state
+    from chat.services.leave_copy import lang_from_draft
+    from chat.services.expense_copy import normalize_reply_lang
+
+    def _submitted_card(
+        draft: dict[str, Any], *, ref: str, days: float
+    ) -> str:
+        lang = normalize_reply_lang(lang_from_draft(draft))
+        summary = build_leave_review_summary(draft)
+        if lang == "en":
+            header = f"**Submitted leave summary** ({days:g} day(s))"
+            footer = (
+                "\n\n---\n"
+                f"**Status:** Submitted · ref `{ref}`\n"
+                "Final approval happens in your company's HR system."
+            )
+        else:
+            header = f"**জমা দেওয়া ছুটির সারাংশ** ({days:g} দিন)"
+            footer = (
+                "\n\n---\n"
+                f"**স্ট্যাটাস:** জমা হয়েছে · রেফারেন্স `{ref}`\n"
+                "চূড়ান্ত অনুমোদন HR সিস্টেমে হবে — এই চ্যাট শুধু আবেদন জমা নেয়।"
+            )
+        return f"{header}\n\n{summary}{footer}"
 
     last = read_leave_last_submission(workflow_state)
     if last.get("submission_id") and not _active_leave_draft(workflow_state):
         draft = dict(last.get("draft") or {})
-        summary = build_leave_review_summary(draft)
         ref = str(last.get("submission_id") or "")
         days = compute_requested_leave_days(draft)
-        return (
-            f"**জমা দেওয়া ছুটির সারাংশ** ({days:g} দিন) · ref: **{ref}**\n\n{summary}"
-        )
+        return _submitted_card(draft, ref=ref, days=days)
 
     st = read_leave_state(workflow_state)
     if st.get("locked") and st.get("submission_id"):
         draft = dict(st.get("draft") or {})
-        summary = build_leave_review_summary(draft)
         ref = str(st.get("submission_id") or "")
         days = compute_requested_leave_days(draft)
-        return (
-            f"**জমা দেওয়া ছুটির সারাংশ** ({days:g} দিন) · ref: **{ref}**\n\n{summary}"
-        )
+        return _submitted_card(draft, ref=ref, days=days)
+
     draft = _active_leave_draft(workflow_state)
     if not draft:
-        return "এই session-এ আপনার leave summary নেই — হয়তো cancel করা হয়েছে বা এখনো শুরু হয়নি।"
+        return (
+            "এই session-এ আপনার leave summary নেই — হয়তো cancel করা হয়েছে বা এখনো শুরু হয়নি।"
+        )
     summary = build_leave_review_summary(draft)
     days = compute_requested_leave_days(draft)
-    return f"**ছুটির সারাংশ** ({days:g} দিন):\n\n{summary}"
+    lang = normalize_reply_lang(lang_from_draft(draft))
+    if lang == "en":
+        return f"**Leave summary** ({days:g} day(s) — not submitted yet):\n\n{summary}"
+    return f"**ছুটির সারাংশ** ({days:g} দিন — এখনো জমা হয়নি):\n\n{summary}"
 
 
 def session_has_leave_on_date(

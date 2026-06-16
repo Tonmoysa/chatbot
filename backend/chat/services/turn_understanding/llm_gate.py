@@ -77,8 +77,10 @@ def try_llm_resolve(
     trace_id: str = "",
 ) -> UtteranceResolution | None:
     """Return None when LLM unavailable or low confidence — caller uses rules."""
+    from chat.services.hr_signal import should_try_utterance_llm
+
     text = (message or "").strip()
-    if len(text) < 48:
+    if not should_try_utterance_llm(text, snapshot):
         return None
     try:
         from chat.services.llm_client import LLMClient

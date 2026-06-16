@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from chat.constants import (
+    INTENT_APPROVAL_ESCALATION,
     INTENT_EXPENSE_CLAIM,
     INTENT_EXPENSE_DAY_SUMMARY,
     INTENT_EXPENSE_STATUS,
@@ -23,11 +24,15 @@ from chat.constants import (
     INTENT_UNKNOWN,
 )
 from chat.services.llm_client import LLMClient
+from chat.services.hr_signal import HR_KEYWORD_RE, message_has_hr_signal
 
 logger = logging.getLogger("hr_chatbot")
 
 CONFIDENCE_LLM_FALLBACK = 0.72
 CONFIDENCE_RULES = 0.95
+
+# Backward-compatible alias for scope.py and tests.
+_HR_ADJACENT_RE = HR_KEYWORD_RE
 
 QUERY_EXPENSE_DAY_SUMMARY = "expense_day_summary"
 QUERY_EXPENSE_META = "expense_meta"
@@ -38,6 +43,7 @@ QUERY_LEAVE_REQUEST = "leave_request"
 QUERY_LEAVE_BALANCE = "leave_balance"
 QUERY_HR_POLICY = "hr_policy"
 QUERY_CHITCHAT = "chitchat"
+QUERY_APPROVAL_ESCALATION = "approval_escalation"
 QUERY_UNKNOWN = "unknown"
 
 DATE_TODAY = "today"
@@ -52,7 +58,8 @@ Side questions during a wizard are common — classify what the user wants NOW, 
 Return STRICT JSON only:
 {
   "query_kind": "expense_day_summary" | "expense_meta" | "expense_recall" | "expense_status" |
-    "expense_claim" | "leave_request" | "leave_balance" | "hr_policy" | "chitchat" | "unknown",
+    "expense_claim" | "leave_request" | "leave_balance" | "hr_policy" | "approval_escalation" |
+    "chitchat" | "unknown",
   "date_reference": "today" | "yesterday" | "none",
   "confidence": 0.0 to 1.0,
   "in_hr_scope": true | false
@@ -68,6 +75,7 @@ RULES
 - leave_request: apply for leave (not policy question)
 - leave_balance: how many leave days remaining
 - hr_policy: company rules, entitlement, handbook
+- approval_escalation: manager approval pending / escalate approval
 - chitchat: greetings, jokes, general knowledge (eid kobe, weather, python ki)
 - unknown: unclear
 - date_reference yesterday for: last day, গত দিন, লাস্ট দিন, goto kal, yesterday
@@ -75,15 +83,6 @@ RULES
 - in_hr_scope true for all HR kinds; false for chitchat/unknown/general trivia
 - NEVER classify "lunch 100 taka" as meta — that is expense_claim
 """
-
-_HR_ADJACENT_RE = re.compile(
-    r"(?:"
-    r"expense|খরচ|কস্ট|এক্সপেন্স|leave|ছুটি|লিভ|chuti|"
-    r"submit|জমা|add|এড|koto|কত|ki|কি|কোন|"
-    r"paid|unpaid|policy|নিয়ম"
-    r")",
-    re.I | re.UNICODE,
-)
 
 _turn_cache: dict[str, HrQueryDecision] = {}
 
@@ -131,6 +130,8 @@ def _map_kind_to_intent(kind: str) -> str | None:
         return INTENT_LEAVE_BALANCE
     if kind == QUERY_HR_POLICY:
         return INTENT_HR_POLICY
+    if kind == QUERY_APPROVAL_ESCALATION:
+        return INTENT_APPROVAL_ESCALATION
     if kind == QUERY_CHITCHAT:
         return INTENT_UNKNOWN
     return None
@@ -241,6 +242,15 @@ def rules_classify_hr_query(
     if is_leave_balance_query(raw):
         return _finish_decision(
             QUERY_LEAVE_BALANCE, confidence=CONFIDENCE_RULES, source="rules_balance"
+        )
+
+    from chat.services.hr_signal import message_looks_like_approval_query
+
+    if message_looks_like_approval_query(raw):
+        return _finish_decision(
+            QUERY_APPROVAL_ESCALATION,
+            confidence=CONFIDENCE_RULES,
+            source="rules_approval",
         )
 
     if wants_recent_expense_recall_query(raw):
@@ -393,6 +403,7 @@ def _llm_classify_hr_query(
         QUERY_LEAVE_REQUEST,
         QUERY_LEAVE_BALANCE,
         QUERY_HR_POLICY,
+        QUERY_APPROVAL_ESCALATION,
         QUERY_CHITCHAT,
         QUERY_UNKNOWN,
     }:
@@ -470,7 +481,7 @@ def _should_try_llm(message: str, rules: HrQueryDecision) -> bool:
         return False
     if rules.in_hr_scope and rules.source == "rules_expense_ambiguous":
         return True
-    if _HR_ADJACENT_RE.search(raw):
+    if message_has_hr_signal(raw):
         return True
     if re.search(r"(?:\?|কি|কোন|কত|ki\s|koto)", raw, re.I | re.UNICODE):
         return True

@@ -117,6 +117,71 @@ def _llm_extract_dates(
     return start, end
 
 
+def looks_like_leave_date_correction(message: str, *, today: date | None = None) -> bool:
+    """True when the user is correcting leave dates (not stating a fresh range)."""
+    today_d = today or date.today()
+    raw = normalize_message_for_parsing((message or "").strip())
+    if not raw:
+        return False
+    low = raw.lower()
+    if re.search(
+        r"(?:sesh|শেষ|ses|end|শেষের)\s*(?:date|তারিখ|din|day)?|"
+        r"leave\s+er\s+sesh",
+        low,
+        re.I | re.UNICODE,
+    ) and re.search(r"\b(?:na|nah|not|না)\b", low, re.I | re.UNICODE):
+        return True
+    if not re.search(r"\b(?:na|nah|not|না)\b", low, re.I | re.UNICODE):
+        return False
+    if not re.search(
+        r"(?:ছুটি|chuti|chhuti|leave|তারিখ|date|tarikh|tarik|sesh|শেষ)",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return False
+    if infer_bn_calendar_date_range(raw, today=today_d):
+        return True
+    if infer_bn_calendar_date(raw, today=today_d):
+        return True
+    return False
+
+
+def try_apply_leave_end_date_only(
+    draft: dict[str, Any],
+    message: str,
+    *,
+    today: date | None = None,
+) -> bool:
+    """``sesh date 7 august na 8 august hobe`` — update end_date only, keep start."""
+    today_d = today or date.today()
+    raw = normalize_message_for_parsing((message or "").strip())
+    if not raw:
+        return False
+    low = raw.lower()
+    if not re.search(
+        r"(?:sesh|শেষ|ses|end|শেষের)\s*(?:date|তারিখ|din|day)?|"
+        r"leave\s+er\s+sesh",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return False
+    if not re.search(r"\b(?:na|nah|not|না)\b", low, re.I | re.UNICODE):
+        return False
+    start_iso = str(draft.get("start_date") or "").strip()
+    if not start_iso:
+        return False
+    parts = re.split(r"\b(?:na|nah|not|না)\b", raw, maxsplit=1, flags=re.I | re.UNICODE)
+    tail = parts[-1] if len(parts) > 1 else raw
+    end_iso = infer_bn_calendar_date(tail, today=today_d)
+    if not end_iso:
+        rng = infer_bn_calendar_date_range(tail, today=today_d)
+        if rng:
+            end_iso = rng[1]
+    if not end_iso:
+        return False
+    return _apply_iso_range(draft, start_iso, end_iso)
+
+
 def try_apply_leave_date_correction(
     draft: dict[str, Any],
     message: str,
@@ -133,6 +198,9 @@ def try_apply_leave_date_correction(
     raw = normalize_message_for_parsing((message or "").strip())
     if not raw:
         return False
+
+    if try_apply_leave_end_date_only(draft, message, today=today_d):
+        return True
 
     from chat.services.expense.expense_confirm import looks_like_expense_correction
 

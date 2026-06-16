@@ -6,6 +6,7 @@ These must not survive workflow switches (leave ↔ expense) or explicit new com
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -14,6 +15,9 @@ def clear_expense_interactive_pending(block: dict[str, Any]) -> dict[str, Any]:
     from chat.services.expense.active_prompt import clear_active_prompt
     from chat.services.expense.amount_correction_pending import (
         clear_amount_correction_pending,
+    )
+    from chat.services.expense.route_correction_pending import (
+        clear_route_correction_pending,
     )
     from chat.services.expense.delete_disambiguation_pending import (
         clear_delete_disambiguation_pending,
@@ -28,6 +32,7 @@ def clear_expense_interactive_pending(block: dict[str, Any]) -> dict[str, Any]:
     clear_expense_delete_verify(block)
     clear_ordinal_amount_confirm(block)
     clear_amount_correction_pending(block)
+    clear_route_correction_pending(block)
     return block
 
 
@@ -62,6 +67,16 @@ def message_answers_expense_interactive_pending(
         if cat and len(text.split()) <= 3:
             return True
         if pending.get("category") and cat:
+            return True
+
+    from chat.services.expense.route_correction_pending import (
+        has_route_correction_pending,
+    )
+
+    if has_route_correction_pending(block):
+        if _ordinal_index_from_message(text.lower(), item_count=99) is not None:
+            return True
+        if re.match(r"^#?\d{1,2}\s*$", text):
             return True
 
     from chat.services.expense.active_prompt import (
@@ -101,7 +116,21 @@ def message_answers_expense_interactive_pending(
         if parse_modify_target_number(text) is not None:
             return True
 
-    from chat.services.expense.expense_confirm import is_expense_delete_verify_pending
+    from chat.services.expense.expense_confirm import (
+        has_ordinal_amount_confirm_pending,
+        is_expense_delete_verify_pending,
+    )
+
+    if has_ordinal_amount_confirm_pending(block):
+        from chat.services.expense.expense_confirm import (
+            is_confirmation_no,
+            is_confirmation_yes,
+        )
+
+        if is_confirmation_yes(text) or is_confirmation_no(text):
+            return True
+        if _parse_amount_hint(text) is not None:
+            return True
 
     if is_expense_delete_verify_pending(block):
         from chat.services.expense.expense_confirm import (
@@ -145,5 +174,16 @@ def message_abandons_expense_interactive_pending(
     if _strong_expense_claim(text):
         return True
     if is_leave_application_message(text):
+        return True
+    from chat.services.expense.expense_confirm import (
+        looks_like_bare_delete_request,
+        parse_ordinal_delete_index,
+    )
+
+    if parse_ordinal_delete_index(text) is not None:
+        return True
+    if looks_like_bare_delete_request(text):
+        return True
+    if re.search(r"\b(delete|remove|বাদ|মুছ)\b", text, re.I | re.UNICODE):
         return True
     return False

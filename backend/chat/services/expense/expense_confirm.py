@@ -13,6 +13,7 @@ from chat.services.expense_extraction import (
     _looks_like_route_answer,
     extract_expense_items,
     is_travel_category,
+    location_grounded_in_message,
     normalize_category,
 )
 
@@ -385,6 +386,39 @@ def looks_like_new_expense_during_pending_slot(
         return False
     if step == "from_to" and _looks_like_route_answer(text):
         return False
+    if step == "from_to":
+        from chat.services.expense.pending_slot import (
+            message_completes_open_pending_travel,
+            pending_amount_update_for_category,
+        )
+
+        if message_completes_open_pending_travel(
+            text, pending, pending_step=step
+        ):
+            return False
+        pending_cat = str(pending.get("category") or "").strip().lower()
+        new_amt = pending_amount_update_for_category(text, pending_cat)
+        if new_amt:
+            try:
+                pending_amt = round(float(pending.get("amount") or 0), 2)
+            except (TypeError, ValueError):
+                pending_amt = 0.0
+            if abs(float(new_amt) - pending_amt) >= 0.01:
+                ext = extract_expense_items(text)
+                if (
+                    len(ext.items) == 1
+                    and not ext.malformed
+                    and str(ext.items[0].category or "").strip().lower() == pending_cat
+                ):
+                    return False
+        ext_same = extract_expense_items(text)
+        if (
+            len(ext_same.items) == 1
+            and not ext_same.malformed
+            and str(ext_same.items[0].category or "").strip().lower() == pending_cat
+            and _is_bare_fresh_category_amount_claim(text)
+        ):
+            return True
     if _is_fresh_multi_category_expense_claim(text):
         return True
     if looks_like_expense_correction(text):
@@ -525,6 +559,64 @@ def _is_fresh_multi_category_expense_claim(message: str) -> bool:
     return True
 
 
+def parse_category_route_correction(message: str) -> tuple[str, str, str] | None:
+    """Parse ``bike badda to gulshan hobe`` style route edits at review."""
+    from chat.services.expense_extraction import (
+        _split_clauses,
+        is_travel_category,
+        normalize_category,
+        parse_category_token,
+        parse_from_to_locations,
+        preprocess_expense_message,
+        route_explicit_for_category,
+    )
+
+    raw = (message or "").strip()
+    if not raw:
+        return None
+    low = _normalize_correction_message(raw)
+    cat = parse_category_token(low)
+    if not cat or not is_travel_category(normalize_category(cat)):
+        return None
+    cat_norm = normalize_category(cat)
+
+    ext = extract_expense_items(raw)
+    if len(ext.items) >= 2:
+        return None
+
+    for clause in _split_clauses(preprocess_expense_message(raw)):
+        if not re.search(
+            rf"\b{re.escape(cat_norm.lower())}\b", clause, re.I | re.UNICODE
+        ):
+            continue
+        cleaned = re.sub(
+            r"\b(hobe|habe|হবে|হয়)\s*$", "", clause, flags=re.I | re.UNICODE
+        ).strip()
+        tail_m = re.search(
+            r"(?:modify|update|change|kore\s*daw|kore\s*de|kore\s*dao|daw|dao|de)\s+(.+)$",
+            cleaned,
+            re.I | re.UNICODE,
+        )
+        candidates = [tail_m.group(1).strip()] if tail_m else []
+        candidates.append(cleaned)
+        for text in candidates:
+            pair = parse_from_to_locations(text)
+            if not pair:
+                continue
+            frm, to = pair
+            if route_explicit_for_category(raw, cat_norm, frm, to) or (
+                frm and to and location_grounded_in_message(frm, raw) and location_grounded_in_message(to, raw)
+            ):
+                from chat.services.expense.normalization import normalize_location
+
+                return (
+                    cat_norm,
+                    normalize_location(frm),
+                    normalize_location(to),
+                )
+    return None
+
+
 def wants_expense_draft_edit_intent(message: str) -> bool:
     """
   User wants to edit the expense draft (not leave slots).
@@ -565,6 +657,8 @@ def looks_like_expense_correction(message: str) -> bool:
     low = _normalize_correction_message(message)
     if not low.strip():
         return False
+    if parse_category_route_correction(message):
+        return True
     if wants_expense_draft_edit_intent(message):
         return True
     if (
@@ -652,6 +746,14 @@ def looks_like_expense_correction(message: str) -> bool:
     ):
         return True
     if re.search(
+        r"(?:\b\d{1,2}\s*(?:no|number|nombor|নম্বর|নং|ta|টা)\b|"
+        r"\b(?:line|entry|no|number)\s*\d{1,2}\b|#\s*\d{1,2}).{0,40}"
+        r"(?:expense|entry|line|খরচ).{0,30}\d+.{0,25}(?:না|na).{0,25}\d+",
+        low,
+        re.I | re.UNICODE,
+    ):
+        return True
+    if re.search(
         r"(?:প্রথম|দ্বিতীয়|তৃতীয়|শেষ|শেষটা|first|second|third|last).{0,40}"
         r"(?:expense|entry|line|খরচ|টা).{0,40}\d+.{0,30}(?:ছিল|chilo|was)",
         low,
@@ -659,6 +761,45 @@ def looks_like_expense_correction(message: str) -> bool:
     ) and re.search(r"(?:করে\s*দাও|kore\s*daw|হবে|hobe|habe)", low, re.I):
         return True
     return False
+
+
+def looks_like_cross_category_transfer(message: str) -> bool:
+    """``bike theke 50 baad diye snack e 50 add`` — reallocate, not new travel lines."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = _normalize_correction_message(raw)
+    return bool(_TRANSFER_RE.search(low))
+
+
+def format_cross_category_transfer_decline(*, lang: str | None = None) -> str:
+    """Professional decline — user must edit each line by name/number."""
+    from chat.services.expense_copy import normalize_reply_lang
+
+    reply_lang = normalize_reply_lang(lang)
+    if reply_lang == "en":
+        return (
+            "I **can't move money between categories** automatically "
+            "(e.g. take 50 from Bike and add to Snack in one step).\n\n"
+            "Please update **each line separately**, with the name or number:\n"
+            "- `bike 100 taka koro` or `7 number bike 100 taka koro`\n"
+            "- `snack 100 taka koro`"
+        )
+    if reply_lang == "banglish":
+        return (
+            "Category theke category-te taka **transfer** (bike theke kete snack-e jog) "
+            "ami **auto kori na**.\n\n"
+            "Alada alada bolun — category ba line **number** diye:\n"
+            "- `bike 100 taka koro` ba `7 number bike 100 taka koro`\n"
+            "- `snack 100 taka koro`"
+        )
+    return (
+        "এক category থেকে অন্যটিতে taka **transfer** (bike থেকে কেটে snack-এ যোগ) "
+        "ami **auto করি না**।\n\n"
+        "আলাদা আলাদা বলুন — category বা line **number** দিয়ে:\n"
+        "- `bike 100 taka koro` ba `7 number bike 100 taka koro`\n"
+        "- `snack 100 taka koro`"
+    )
 
 
 _KEY_DELETE_VERIFY = "expense_delete_verify_pending"
@@ -724,21 +865,25 @@ def build_ordinal_amount_confirm_prompt(
         return correction_unclear_notice(lang)
     row = items[index]
     line = format_expense_line_bullet(row, reply_lang)
+    try:
+        old_amount = round(float(row.get("amount") or 0), 2)
+    except (TypeError, ValueError):
+        old_amount = 0.0
     if reply_lang == "en":
         head = (
-            f"Update line {index + 1} to **{new_amount:g} Tk**?\n\n"
+            f"Update line {index + 1}: **{old_amount:g} Tk → {new_amount:g} Tk**?\n\n"
             f"Current: {line}\n\n"
             f"Reply **yes** to confirm or **no** to keep unchanged."
         )
     elif reply_lang == "banglish":
         head = (
-            f"Line {index + 1} **{new_amount:g} Tk** korbo?\n\n"
+            f"Line {index + 1}: **{old_amount:g} Tk → {new_amount:g} Tk** korbo?\n\n"
             f"Ekhon: {line}\n\n"
             f"**Yes** dile update hobe, **no** dile same thakbe."
         )
     else:
         head = (
-            f"Line {index + 1} **{new_amount:g} Tk** করব?\n\n"
+            f"Line {index + 1}: **{old_amount:g} Tk → {new_amount:g} Tk** করব?\n\n"
             f"এখন: {line}\n\n"
             f"**হ্যাঁ** দিলে update হবে, **না** দিলে আগের মতো থাকবে।"
         )
@@ -1019,7 +1164,7 @@ def correction_unclear_notice(lang: str | None = None) -> str:
 def looks_like_duplicate_expense_reentry(
     message: str, items: list[dict[str, Any]]
 ) -> bool:
-    """True when user re-sends a compound expense claim overlapping the current draft."""
+    """True when user re-sends a compound expense claim matching existing draft lines."""
     if not items:
         return False
     if looks_like_expense_correction(message):
@@ -1031,16 +1176,25 @@ def looks_like_duplicate_expense_reentry(
     ext = extract_expense_items(message)
     if not ext.items:
         return False
-    existing_cats = {
-        str(r.get("category") or "").lower() for r in items if r.get("category")
-    }
-    parsed_cats = {ni.category.lower() for ni in ext.items if ni.category}
-    if not parsed_cats:
+    existing_fps = {expense_line_fingerprint(r) for r in items if r.get("category")}
+    parsed_rows = [
+        {
+            "category": ni.category,
+            "amount": ni.amount,
+            "from_location": ni.from_location or "",
+            "to_location": ni.to_location or "",
+            "notes": getattr(ni, "notes", "") or "",
+        }
+        for ni in ext.items
+        if ni.category
+    ]
+    parsed_fps = {expense_line_fingerprint(r) for r in parsed_rows}
+    if not parsed_fps:
         return False
-    overlap = len(existing_cats & parsed_cats)
+    overlap = len(existing_fps & parsed_fps)
     if len(items) >= 2:
         return overlap >= 2
-    return overlap >= 1 and len(parsed_cats) >= 2
+    return overlap >= 1 and len(parsed_fps) >= 2
 
 
 def _adjust_category_amount(
@@ -1264,6 +1418,36 @@ def build_correction_failure_notice(
             return replace_not_found_notice(from_cat, lang=lang)
     if wants_expense_draft_edit_intent(message):
         from chat.services.expense.confusion_handler import list_amount_correction_targets
+        from chat.services.expense.expense_confirm import parse_category_route_correction
+
+        route_corr = parse_category_route_correction(message)
+        if route_corr:
+            cat, frm, to = route_corr
+            targets = [
+                t
+                for t in list_amount_correction_targets(items, block)
+                if str(t.get("category") or "").strip().lower() == cat.lower()
+            ]
+            if len(targets) > 1:
+                from chat.services.expense.route_correction_pending import (
+                    build_route_modify_disambiguation_prompt,
+                    mark_route_correction_pending,
+                )
+
+                if block is not None:
+                    mark_route_correction_pending(
+                        block,
+                        category=cat,
+                        from_location=frm,
+                        to_location=to,
+                    )
+                return build_route_modify_disambiguation_prompt(
+                    targets,
+                    category=cat,
+                    from_location=frm,
+                    to_location=to,
+                    lang=lang,
+                )
 
         targets = list_amount_correction_targets(items, block)
         if targets:

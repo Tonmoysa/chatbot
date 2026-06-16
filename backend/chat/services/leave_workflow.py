@@ -512,6 +512,22 @@ def process_leave_turn(
     )
     if locked_pack is not None:
         return locked_pack
+
+    if router_decision is not None and (router_decision.flags or {}).get(
+        "dual_submit_clarify"
+    ):
+        from chat.services.workflow_navigation import build_dual_workflow_submit_clarification
+
+        st = read_leave_state(wf)
+        draft = dict(st.get("draft") or {})
+        return {
+            "workflow_state": wf,
+            "merged_entities": build_merged_entities_for_engine(draft),
+            "complete": False,
+            "confirmed_submit": False,
+            "question": build_dual_workflow_submit_clarification(),
+        }
+
     from chat.services.leave.duplicate_choice import (
         handle_duplicate_leave_choice_turn,
         mark_duplicate_leave_choice_pending,
@@ -585,15 +601,37 @@ def process_leave_turn(
             }
 
     if is_leave_submission_locked(wf):
-        st_locked = read_leave_state(wf)
-        draft_locked = dict(st_locked.get("draft") or {})
-        return {
-            "workflow_state": wf,
-            "merged_entities": build_merged_entities_for_engine(draft_locked),
-            "complete": False,
-            "confirmed_submit": False,
-            "question": format_post_submit_leave_locked_message(wf),
-        }
+        router_tk = ""
+        if router_decision is not None:
+            router_tk = getattr(
+                getattr(router_decision, "turn_kind", None), "value", ""
+            )
+        if router_tk != "new_leave":
+            st_locked = read_leave_state(wf)
+            draft_locked = dict(st_locked.get("draft") or {})
+            from chat.services.leave_meta_queries import (
+                build_leave_session_summary_message,
+                wants_leave_session_summary,
+                wants_submitted_leave_details,
+            )
+
+            if wants_leave_session_summary(message) or wants_submitted_leave_details(
+                message
+            ):
+                question = build_leave_session_summary_message(wf)
+            else:
+                from chat.services.workflow_navigation import (
+                    format_post_submit_leave_locked_message,
+                )
+
+                question = format_post_submit_leave_locked_message(wf)
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(draft_locked),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": question,
+            }
 
     overlap_msg = check_overlapping_submitted_leave(wf, message)
     if overlap_msg and not router_skips_overlap_check(wf):
@@ -672,17 +710,20 @@ def process_leave_turn(
 
     from chat.services.leave.date_correction import try_apply_leave_date_correction
 
-    try_apply_leave_date_correction(
+    date_corrected = try_apply_leave_date_correction(
         draft, message, trace_id=trace_id, use_llm=True
     )
 
     from chat.services.leave_confirm import (
         SLOT_EDIT_MENU,
-        _begin_edit_slot,
+        _EDIT_RE,
+        _begin_edit_slot_with_inline_apply,
         _finish_edit_return_review,
         build_confirmation_prompt,
+        build_edit_field_menu_prompt,
         is_edit_abort,
         parse_edit_field_choice,
+        parse_edit_slot,
         process_confirmation_turn,
         restore_leave_review_from_edit,
         try_apply_inline_edit_value,
@@ -690,18 +731,16 @@ def process_leave_turn(
         wants_resume_or_show_expense,
     )
     from chat.services.leave_fsm import KEY_EDIT_SNAPSHOT
-    from chat.services.expense_workflow import (
-        format_expense_resume_message,
-        resume_expense_session,
-    )
+    from chat.services.expense_workflow import format_expense_resume_message
     from chat.services.workflow_suspend import (
         has_suspended_expense,
+        restore_suspended_expense,
         suspend_leave_for_workflow_switch,
     )
 
     if wants_resume_or_show_expense(message) and has_suspended_expense(wf):
         wf = suspend_leave_for_workflow_switch(wf)
-        wf = resume_expense_session(wf)
+        wf = restore_suspended_expense(wf)
         return {
             "workflow_state": wf,
             "merged_entities": build_merged_entities_for_engine(draft),
@@ -804,6 +843,48 @@ def process_leave_turn(
     policy = get_company_leave_policy(company_id or "default")
     extraction = extract_leave_slots(message, skip_leave_phrase_gate=True)
 
+    edit_slot = parse_edit_slot(message)
+    if edit_slot and edit_slot != pending_slot:
+        return _begin_edit_slot_with_inline_apply(
+            wf, draft, edit_slot, message, entities
+        )
+
+    if (
+        pending_slot
+        and pending_slot != SLOT_EDIT_MENU
+        and _EDIT_RE.search(message or "")
+        and not parse_edit_field_choice(message)
+        and not is_confirmation_yes(message)
+    ):
+        has_draft_data = any(
+            draft.get(k)
+            for k in (
+                "start_date",
+                "end_date",
+                "reason",
+                "day_scope",
+                "leave_payment_category",
+                "leave_type",
+            )
+        )
+        if has_draft_data:
+            snap = dict(draft)
+            wf = apply_leave_state(
+                wf,
+                draft=draft,
+                step=SLOT_EDIT_MENU,
+                status=STATUS_ACTIVE,
+                review_pending=False,
+            )
+            wf[KEY_EDIT_SNAPSHOT] = snap
+            return {
+                "workflow_state": wf,
+                "merged_entities": build_merged_entities_for_engine(draft),
+                "complete": False,
+                "confirmed_submit": False,
+                "question": build_edit_field_menu_prompt(draft, message=message),
+            }
+
     from chat.services.leave.normalization import parse_day_scope_answer
     from chat.services.leave.reason_bucket_classifier import apply_leave_semantic_reconcile
     from chat.services.leave.reason_correction_parser import try_apply_reason_correction
@@ -818,19 +899,6 @@ def process_leave_turn(
     scope_answer = parse_day_scope_answer(message)
     if scope_answer:
         draft["day_scope"] = scope_answer
-
-    in_edit_flow = bool(wf.get(KEY_EDIT_SNAPSHOT)) or st.get("step") == SLOT_EDIT_MENU
-    switch_slot = (
-        parse_edit_field_choice(message)
-        if in_edit_flow
-        else None
-    )
-    if switch_slot and switch_slot != pending_slot:
-        from chat.services.leave_confirm import _begin_edit_slot_with_inline_apply
-
-        return _begin_edit_slot_with_inline_apply(
-            wf, draft, switch_slot, message, entities
-        )
 
     from chat.services.leave.normalization import message_explicitly_states_day_scope
 
@@ -908,7 +976,12 @@ def process_leave_turn(
                 apply_leave_field_update(draft, slot_upd, message=message)
         before = dict(draft)
         _apply_slots_from_message(draft, message, entities, overwrite=False)
-        draft = deep_merge_draft(before, draft)
+        if date_corrected:
+            for key in ("start_date", "end_date", "days"):
+                if before.get(key) is not None:
+                    draft[key] = before[key]
+        else:
+            draft = deep_merge_draft(before, draft)
 
     if (
         not document_handled

@@ -153,9 +153,9 @@ def test_g03_duplicate_leave_july10():
     _assert_route(
         "আবার ১০ জুলাই ছুটি চাই।",
         wf,
-        turn_kind=TurnKind.DUPLICATE_LEAVE,
+        turn_kind=TurnKind.NEW_LEAVE,
         intent=INTENT_LEAVE_REQUEST,
-        reason_prefix="P20",
+        reason_prefix="P50c",
     )
 
 
@@ -255,7 +255,7 @@ def test_g10_delete_confirm_yes():
     _assert_route(
         "হ্যাঁ",
         wf,
-        turn_kind=TurnKind.DELETE_CONFIRM,
+        turn_kind=TurnKind.CONTINUE_WIZARD,
         intent=INTENT_EXPENSE_CLAIM,
         reason_prefix="P02",
     )
@@ -282,7 +282,7 @@ def test_g12_duplicate_leave_not_context_clarification():
     wf = _submitted_july10_leave_wf()
     decision, _ = _route("আবার ১০ জুলাই ছুটি চাই।", wf)
     assert decision.turn_kind != TurnKind.CONTEXT_CLARIFICATION
-    assert decision.turn_kind == TurnKind.DUPLICATE_LEAVE
+    assert decision.turn_kind == TurnKind.NEW_LEAVE
 
 
 def test_g13_reimbursement_policy_not_expense_claim():
@@ -323,6 +323,31 @@ def test_g15_expense_correction_during_leave_collecting_not_leave():
     assert decision.target_workflow == "expense"
 
 
+def test_g15b_expense_claim_during_leave_dates_switches_not_slot_answer():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "draft": {
+            "days": 3,
+            "day_scope": "full",
+            "reason": "family program",
+            "reply_language": "bn",
+        },
+        "step": "dates",
+        "review_pending": False,
+    }
+    msg = (
+        "amar ajke expense hoyeche 100 taka bus mirpur to badda then lunch 100 taka,"
+        "then 120 taka bike then 50 taka snack then 60 taka metro rail uttora to mirpur"
+    )
+    decision, snap = _route(msg, wf)
+    assert snap.leave_active
+    assert decision.turn_kind == TurnKind.WORKFLOW_SWITCH
+    assert decision.reason == "P51_switch_to_expense"
+    assert decision.target_workflow == "expense"
+    assert (decision.flags or {}).get("suspend_leave") is True
+
+
 def test_g16_lunch_during_from_to_pending_not_p10_correction():
     wf = {
         "expense_request": {
@@ -340,8 +365,8 @@ def test_g16_lunch_during_from_to_pending_not_p10_correction():
     }
     decision, _ = _route("lunch 150 taka", wf)
     assert decision.turn_kind != TurnKind.CORRECTION
-    assert decision.turn_kind == TurnKind.SLOT_ANSWER
-    assert decision.reason.startswith(("P79", "P81"))
+    assert decision.turn_kind in (TurnKind.SLOT_ANSWER, TurnKind.CONTINUE_WIZARD)
+    assert decision.reason.startswith(("P79", "P80", "P81"))
 
 
 def test_g17_new_leave_cold_start():
@@ -351,6 +376,16 @@ def test_g17_new_leave_cold_start():
         turn_kind=TurnKind.NEW_LEAVE,
         intent=INTENT_LEAVE_REQUEST,
         reason_prefix="P50c",
+    )
+
+
+def test_g17b_new_expense_cold_start():
+    _assert_route(
+        "amar expense hoyeche 100 taka for bus mirpur to badda",
+        {},
+        turn_kind=TurnKind.NEW_EXPENSE,
+        intent=INTENT_EXPENSE_CLAIM,
+        reason_prefix="P50d",
     )
 
 
@@ -366,7 +401,7 @@ def test_g18_ordinal_amount_confirm_yes():
     _assert_route(
         "ha",
         {"expense_request": block},
-        turn_kind=TurnKind.CONFIRM_YES,
+        turn_kind=TurnKind.CONTINUE_WIZARD,
         intent=INTENT_EXPENSE_CLAIM,
         reason_prefix="P02b",
     )

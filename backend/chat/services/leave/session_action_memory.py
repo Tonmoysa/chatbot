@@ -71,16 +71,13 @@ def format_leave_meta_answer(
 
     if wants_leave_session_summary(raw):
         if ref and draft:
-            summary = build_leave_review_summary(draft)
-            return (
-                f"**জমা দেওয়া ছুটির সারাংশ** · ref: **{ref}**\n\n{summary}"
-            )
+            from chat.services.leave_meta_queries import build_leave_session_summary_message
+
+            return build_leave_session_summary_message(wf)
         if st.get("submission_id") and st.get("draft"):
-            summary = build_leave_review_summary(dict(st.get("draft") or {}))
-            ref = str(st.get("submission_id") or "")
-            return (
-                f"**জমা দেওয়া ছুটির সারাংশ** · ref: **{ref}**\n\n{summary}"
-            )
+            from chat.services.leave_meta_queries import build_leave_session_summary_message
+
+            return build_leave_session_summary_message(wf)
         active = dict(st.get("draft") or {})
         if active and st.get("active_flow") == "leave":
             summary = build_leave_review_summary(active)

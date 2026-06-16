@@ -147,6 +147,7 @@ def try_execute_router_locked_leave_turn(
     if router_decision.turn_kind in (
         TurnKind.CONFIRM_YES,
         TurnKind.CONFIRM_NO,
+        TurnKind.CONTINUE_WIZARD,
         TurnKind.SUBMIT_COMMAND,
     ) and is_awaiting_leave_confirmation(wf):
         return process_confirmation_turn(

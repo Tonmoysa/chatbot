@@ -78,12 +78,10 @@ from chat.services.expense.expense_confirm import (
     build_correction_failure_notice,
     correction_unclear_notice,
     dedupe_expense_items,
-    duplicate_reentry_notice,
     is_confirmation_no,
     is_confirmation_yes,
     is_submit_confirm_yes,
     looks_like_compound_expense_claim,
-    looks_like_duplicate_expense_reentry,
     looks_like_expense_correction,
     review_denial_hints,
     wants_travel_group_remove,
@@ -169,6 +167,20 @@ def expense_pending_prompt(workflow_state: dict[str, Any] | None) -> str | None:
 
 def _block(workflow_state: dict[str, Any]) -> dict[str, Any]:
     return read_expense_block(workflow_state)
+
+
+def _stash_expense_ack_items(
+    block: dict[str, Any], new_items: list[dict[str, Any]]
+) -> None:
+    """Lines to show in the collecting ack (this turn only — not the last 4 draft rows)."""
+    rows = [dict(x) for x in new_items if float(x.get("amount") or 0) > 0]
+    if rows:
+        block["ack_items"] = rows
+
+
+def clear_expense_ack_items(block: dict[str, Any]) -> None:
+    """Drop stale ingest ack — e.g. after a draft correction with no new lines."""
+    block.pop("ack_items", None)
 
 
 _FINISH_COLLECT_RE = re.compile(
@@ -275,6 +287,12 @@ def _respond_done_while_incomplete(
         format_done_incomplete_prompt,
     )
 
+    if not expense_draft_is_incomplete(block, items):
+        return None
+    from chat.services.expense.pending_routes import prepare_draft_items_for_submit
+
+    items = prepare_draft_items_for_submit(block, items)
+    block["items"] = items
     if not expense_draft_is_incomplete(block, items):
         return None
     issues = collect_incomplete_draft_issues(block, items)
@@ -411,12 +429,13 @@ def wants_resume_or_show_expense(message: str) -> bool:
 def _format_resume_draft_overview(
     block: dict[str, Any], *, lang: str
 ) -> str:
-    from chat.services.expense.session_ledger import (
-        draft_line_rows_for_block,
-        line_incompleteness_notes,
-    )
+    from chat.services.expense.session_ledger import line_incompleteness_notes
 
-    rows = draft_line_rows_for_block(block)
+    rows = [dict(x) for x in list(block.get("items") or [])]
+    pending = block.get("pending_line")
+    if isinstance(pending, dict) and pending.get("amount"):
+        if not str(pending.get("category") or "").strip():
+            rows.append(dict(pending))
     if not rows:
         return ""
 
@@ -467,17 +486,93 @@ def _format_resume_draft_overview(
     return head + "\n" + "\n".join(lines_out) + first_hint + "\n\n"
 
 
+def _build_resume_follow_up(
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    *,
+    lang: str,
+) -> str:
+    """Pending question only — no ack replay (expense resume)."""
+    from chat.services.expense.confusion_handler import build_category_confusion_prompt
+    from chat.services.expense_copy import ask_more_lines_prompt
+    from chat.services.expense.pending_routes import build_pending_routes_prompt
+    from chat.services.expense.slots import SLOT_CATEGORY, SLOT_FROM_TO, SLOT_MORE_LINES
+    from chat.services.expense.workflow_schema import get_expense_workflow_schema
+
+    reply_lang = normalize_reply_lang(lang)
+    schema = get_expense_workflow_schema()
+    primary = schema.primary_slot(block, items)
+    pending_step = str(block.get("pending_step") or "").strip().lower()
+    pending = block.get("pending_line")
+
+    if not primary:
+        return collect_start_prompt(reply_lang)
+
+    if primary == SLOT_FROM_TO or pending_step == "from_to":
+        return build_pending_routes_prompt(block, items, lang=reply_lang)
+
+    if primary == SLOT_CATEGORY and isinstance(pending, dict):
+        return build_category_confusion_prompt(pending, lang=reply_lang)
+
+    if primary == SLOT_MORE_LINES:
+        return ask_more_lines_prompt(reply_lang)
+
+    return collect_start_prompt(reply_lang)
+
+
+def _try_resolve_pending_travel_slot(
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    *,
+    inc_iso: str,
+    lang: str | None = None,
+) -> dict[str, Any] | None:
+    from chat.services.expense.pending_slot import try_resolve_pending_travel_message
+
+    result = try_resolve_pending_travel_message(
+        message,
+        block=block,
+        items=items,
+        lang=lang or lang_from_block(block),
+    )
+    if not result.handled:
+        return None
+    return _pack(
+        wf,
+        result.block,
+        items=result.items,
+        question=result.question,
+        inc_iso=inc_iso,
+    )
+
+
 def format_expense_resume_message(
     workflow_state: dict[str, Any], *, user_message: str = ""
 ) -> str | None:
-    """Intro + draft overview + the exact pending expense prompt (category / route / review)."""
-    resume = expense_pending_prompt(workflow_state)
-    if not resume:
-        return None
-    block = _block(workflow_state)
-    lang = lang_from_block(block)
+    """Intro + committed draft + pending gaps only (no conversation replay)."""
+    from chat.services.expense.expense_draft_sanitize import sanitize_expense_draft_block
+    from chat.services.expense.session_action_memory import (
+        format_submitted_expense_edit_blocked_answer,
+        has_expense_submission_lock,
+    )
+
+    wf = dict(workflow_state or {})
+    if has_expense_submission_lock(wf):
+        return format_submitted_expense_edit_blocked_answer(wf, lang=None)
+
+    block = dict(_block(wf) or {})
+    items, clean_block = sanitize_expense_draft_block(block)
+    wf["expense_request"] = clean_block
+    lang = lang_from_block(clean_block)
     if user_message:
         lang = resolve_reply_language(user_message, lang)
+
+    follow_up = _build_resume_follow_up(clean_block, items, lang=lang)
+    if not follow_up and not items:
+        return None
+
     if lang == "en":
         intro = (
             "Your expense claim is **not submitted yet**. "
@@ -493,8 +588,10 @@ def format_expense_resume_message(
             "আপনার খরচের আবেদন এখনো **জমা হয়নি**। "
             "যেখানে থেমেছিলেন:\n\n"
         )
-    overview = _format_resume_draft_overview(block, lang=lang)
-    return intro + overview + resume
+    overview = _format_resume_draft_overview(clean_block, lang=lang)
+    if follow_up:
+        return intro + overview + follow_up
+    return intro + overview
 
 
 def _restore_menu_choices(
@@ -1194,6 +1291,7 @@ def _ingest_new_claim_preserving_pending_from_to(
     set_expense_stage(block, STAGE_COLLECTING)
 
     if len(items) > before_count:
+        _stash_expense_ack_items(block, items[before_count:])
         wf = record_expense_lines_added(
             wf,
             new_items=items[before_count:],
@@ -1252,6 +1350,7 @@ def _ingest_new_claim_preserving_pending_category(
         set_expense_stage(block, STAGE_COLLECTING)
 
     if len(items) > before_count:
+        _stash_expense_ack_items(block, items[before_count:])
         wf = record_expense_lines_added(
             wf,
             new_items=items[before_count:],
@@ -1510,10 +1609,6 @@ def _ingest_extracted_lines(
         ):
             needs_route.append(ni)
             continue
-        from chat.services.expense.expense_confirm import expense_line_fingerprint
-
-        if any(expense_line_fingerprint(r) == expense_line_fingerprint(d) for r in out):
-            continue
         out.append(d)
 
     pending_entries: list[dict[str, Any]] = []
@@ -1527,13 +1622,7 @@ def _ingest_extracted_lines(
         }
         finalized = _finalize_route_as_bus(entry)
         if finalized:
-            from chat.services.expense.expense_confirm import expense_line_fingerprint
-
-            if not any(
-                expense_line_fingerprint(r) == expense_line_fingerprint(finalized)
-                for r in out
-            ):
-                out.append(finalized)
+            out.append(finalized)
             continue
         pending_entries.append(entry)
     for clause in ext.malformed:
@@ -1541,13 +1630,7 @@ def _ingest_extracted_lines(
         if entry:
             finalized = _finalize_route_as_bus(entry)
             if finalized:
-                from chat.services.expense.expense_confirm import expense_line_fingerprint
-
-                if not any(
-                    expense_line_fingerprint(r) == expense_line_fingerprint(finalized)
-                    for r in out
-                ):
-                    out.append(finalized)
+                out.append(finalized)
                 continue
             pending_entries.append(entry)
 
@@ -1679,14 +1762,16 @@ def expense_summary_items(
     items: list[dict[str, Any]],
     block: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Committed items plus open pending_line / pending_queue for display totals."""
+    """Committed items (caller-supplied) plus open pending_line / pending_queue."""
+    rows = [dict(x) for x in items]
     if block is not None:
-        from chat.services.expense.session_ledger import draft_line_rows_for_block
-
-        merged = draft_line_rows_for_block(block)
-        if merged:
-            return merged
-    return items
+        pending = block.get("pending_line")
+        if isinstance(pending, dict) and pending.get("amount"):
+            rows.append(dict(pending))
+        for row in list(block.get("pending_queue") or []):
+            if isinstance(row, dict) and row.get("amount"):
+                rows.append(dict(row))
+    return rows
 
 
 def format_expense_summary(
@@ -1866,7 +1951,7 @@ def format_expense_submitted_message(
 def _append_single_review_line_if_new(
     items: list[dict[str, Any]], message: str
 ) -> tuple[list[dict[str, Any]], bool]:
-    """During review, append one new parsed line unless it duplicates an existing row."""
+    """During review, append one parsed line (duplicates allowed)."""
     if looks_like_expense_correction(message):
         return items, False
     ext = extract_expense_items(message)
@@ -1882,8 +1967,6 @@ def _append_single_review_line_if_new(
     cat = str(getattr(ni, "category", "") or "").strip()
     if not cat:
         return items, False
-    from chat.services.expense.expense_confirm import expense_line_fingerprint
-
     new_row = normalize_expense_line(
         {
             "category": cat,
@@ -1892,8 +1975,6 @@ def _append_single_review_line_if_new(
             "to_location": getattr(ni, "to_location", "") or "",
         }
     )
-    if any(expense_line_fingerprint(row) == expense_line_fingerprint(new_row) for row in items):
-        return items, False
     return items + [new_row], True
 
 
@@ -1909,10 +1990,13 @@ def _try_enter_submit_confirm(
     lang: str,
     trace_id: str = "",
 ) -> dict[str, Any] | None:
+    from chat.services.expense.pending_routes import prepare_draft_items_for_submit
     from chat.services.expense.wizard_commands import wants_expense_submit_command
 
     if not wants_expense_submit_command(message):
         return None
+    items = prepare_draft_items_for_submit(block, items)
+    block["items"] = items
     val = validate_expense_items(
         items,
         incurred_date_iso=inc_iso,
@@ -2058,6 +2142,9 @@ def _pack(
     validation_blocked: bool = False,
     message_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from chat.services.expense.expense_draft_gate import finalize_expense_draft
+
+    items, block = finalize_expense_draft(block, items)
     block["items"] = items
     wf["expense_request"] = block
     if message_facts is None and question:
@@ -2125,6 +2212,10 @@ def _try_advance_to_review(
     if _has_pending_expense_line(block):
         return None
 
+    from chat.services.expense.pending_routes import prepare_draft_items_for_submit
+
+    items = prepare_draft_items_for_submit(block, items)
+    block["items"] = items
     items = dedupe_expense_items(items)
     lang = lang_from_block(block)
     pending_entries = _pending_entries_list(block)
@@ -2474,6 +2565,17 @@ def _handle_pending_line(
         )
 
     if step == "from_to":
+        slot_pack = _try_resolve_pending_travel_slot(
+            wf,
+            block,
+            items,
+            message,
+            inc_iso=inc_iso,
+            lang=lang,
+        )
+        if slot_pack:
+            return slot_pack
+
         from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
         from chat.services.expense.pending_routes import (
             build_pending_routes_prompt,
@@ -2543,6 +2645,7 @@ def _handle_pending_line(
         row = _finalize_pending_line(pending)
         if row:
             items.append(row)
+            _stash_expense_ack_items(block, [row])
         block.pop("pending_line", None)
         block.pop("pending_step", None)
         items, q = _advance_pending_queue(block, items, inc_iso=inc_iso)
@@ -2714,6 +2817,37 @@ def process_expense_turn(
     )
 
     wf = purge_stale_expense_draft_after_submit(clone_workflow_state(workflow_state))
+    from chat.services.expense.expense_fsm import read_expense_block
+    from chat.services.session_turn_router import TurnKind
+
+    if router_decision is not None and router_decision.turn_kind == TurnKind.CANCEL:
+        if has_expense_submission_lock(wf):
+            from chat.services.expense.session_action_memory import (
+                format_submitted_expense_cancel_blocked_answer,
+            )
+
+            blocked = format_submitted_expense_cancel_blocked_answer(wf, lang=None)
+            return {
+                "workflow_state": wf,
+                "complete": False,
+                "submitted": False,
+                "question": blocked,
+                "items": list(read_expense_block(wf).get("items") or []),
+                "warnings": [],
+                "incurred_date_iso": str(read_expense_block(wf).get("incurred_date_iso") or ""),
+                "validation_blocked": True,
+            }
+        wf = deactivate_expense_session(wf)
+        return {
+            "workflow_state": wf,
+            "complete": False,
+            "submitted": False,
+            "question": "Expense draft **বাতিল** করা হয়েছে।",
+            "items": [],
+            "warnings": [],
+            "incurred_date_iso": "",
+            "validation_blocked": False,
+        }
     if (
         looks_like_post_submit_expense_modification(wf, message)
         and not wants_post_submit_edit_question(message)
@@ -2729,6 +2863,47 @@ def process_expense_turn(
             "incurred_date_iso": str(read_expense_block(wf).get("incurred_date_iso") or ""),
             "validation_blocked": True,
         }
+
+    if has_expense_submission_lock(wf) and wants_resume_or_show_expense(message):
+        if not wants_post_submit_edit_question(message) and not wants_expense_summary(
+            message
+        ):
+            blocked = format_submitted_expense_edit_blocked_answer(wf, lang=None)
+            return {
+                "workflow_state": wf,
+                "complete": False,
+                "submitted": False,
+                "question": blocked,
+                "items": list(read_expense_block(wf).get("items") or []),
+                "warnings": [],
+                "incurred_date_iso": str(
+                    read_expense_block(wf).get("incurred_date_iso") or ""
+                ),
+                "validation_blocked": True,
+            }
+
+    from chat.services.workflow_suspend import (
+        has_suspended_expense,
+        restore_suspended_expense,
+        suspend_leave_for_workflow_switch,
+    )
+    from chat.services.leave_workflow import is_leave_in_progress
+    from chat.services.expense.wizard_commands import wants_expense_submit_command
+
+    if has_suspended_expense(wf) and not read_expense_block(wf).get("active"):
+        resume_turn = (
+            wants_resume_or_show_expense(message)
+            or wants_expense_submit_command(message)
+            or (
+                router_decision is not None
+                and router_decision.turn_kind
+                in (TurnKind.RESUME_SUSPENDED, TurnKind.SUBMIT_COMMAND)
+            )
+        )
+        if resume_turn:
+            if is_leave_in_progress(wf):
+                wf = suspend_leave_for_workflow_switch(wf)
+            wf = restore_suspended_expense(wf)
 
     block = wf.setdefault("expense_request", {})
     ensure_expense_block_active(block)
@@ -2829,6 +3004,10 @@ def process_expense_turn(
         return summary_pack
 
     if wants_resume_or_show_expense(message):
+        from chat.services.expense.expense_draft_sanitize import sanitize_expense_draft_block
+
+        items, block = sanitize_expense_draft_block(block)
+        wf["expense_request"] = block
         resume_msg = format_expense_resume_message(wf, user_message=message)
         if resume_msg:
             return _pack(
@@ -2979,14 +3158,6 @@ def process_expense_turn(
         items, appended_line = _append_single_review_line_if_new(items, message)
         if appended_line:
             review_snapshot = [dict(x) for x in items]
-        elif looks_like_duplicate_expense_reentry(message, items):
-            return _pack(
-                wf,
-                block,
-                items=items,
-                question=duplicate_reentry_notice(lang),
-                inc_iso=inc_iso,
-            )
 
         items = dedupe_expense_items(items)
         if not items and review_snapshot:
@@ -3118,6 +3289,17 @@ def process_expense_turn(
                 pipeline_result=pipeline_result,
             )
         if pending_step_now == "from_to":
+            slot_pack = _try_resolve_pending_travel_slot(
+                wf,
+                block,
+                items,
+                message,
+                inc_iso=inc_iso,
+                lang=lang,
+            )
+            if slot_pack:
+                return slot_pack
+
             from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
 
             if looks_like_new_expense_during_pending_slot(
@@ -3179,57 +3361,6 @@ def process_expense_turn(
             )
             if submit_pack:
                 return submit_pack
-        # Legacy shortcut: if the user answers "yes" to the "anything else?"
-        # prompt while still in collecting, treat it as "submit now".
-        # This keeps older flows/tests compatible without requiring a second confirmation.
-        if is_confirmation_yes(message):
-            val = validate_expense_items(
-                items,
-                incurred_date_iso=inc_iso,
-                day_logged_total=day_logged_total,
-                daily_cap=daily_cap,
-            )
-            if not val.ok:
-                set_expense_stage(block, STAGE_COLLECTING)
-                return _pack(
-                    wf,
-                    block,
-                    items=items,
-                    question=val.blocking_message
-                    or "কিছু তথ্য মিসিং আছে — amount + category দিন (যেমন: lunch 100)।",
-                    warnings=val.warnings,
-                    inc_iso=inc_iso,
-                    validation_blocked=True,
-                )
-            date_block = expense_submit_date_block_reason(inc_iso, today=date.today())
-            if date_block:
-                set_expense_stage(block, STAGE_COLLECTING)
-                block["submit_blocked_reason"] = date_block
-                return _pack(
-                    wf,
-                    block,
-                    items=items,
-                    question=(
-                        f"{date_block}\n\n"
-                        "এই খরচের তারিখে এখন জমা দেওয়া যাবে না। তারিখ ঠিক করে আবার চেষ্টা করুন।"
-                    ),
-                    warnings=val.warnings,
-                    inc_iso=inc_iso,
-                    validation_blocked=True,
-                )
-            block.pop("submit_blocked_reason", None)
-            wf = deactivate_expense_session(wf)
-            return {
-                "workflow_state": wf,
-                "complete": True,
-                "submitted": True,
-                "question": None,
-                "items": items,
-                "warnings": val.warnings,
-                "incurred_date_iso": inc_iso,
-                "validation_blocked": False,
-                "crm_payload": items,
-            }
         adv = _try_advance_to_review(
             wf,
             block,
@@ -3261,6 +3392,7 @@ def process_expense_turn(
                         record_expense_lines_added,
                     )
 
+                    _stash_expense_ack_items(block, items[before_count:])
                     wf = record_expense_lines_added(
                         wf,
                         new_items=items[before_count:],
@@ -3345,12 +3477,8 @@ def process_expense_turn(
             daily_cap=daily_cap,
             message=message,
         )
-        lock_note = ""
-        if block.get("ingest_lock"):
-            lock_note = "\n\n" + ingest_lock_notice(block, lang=lang)
         q = (
-            duplicate_reentry_notice(lang)
-            + lock_note
+            ingest_lock_notice(block, lang=lang)
             + "\n\n"
             + format_expense_summary(
                 items,
@@ -3382,6 +3510,7 @@ def process_expense_turn(
                 from chat.services.expense.expense_ingest_guard import clear_ingest_lock
 
                 clear_ingest_lock(block)
+            _stash_expense_ack_items(block, items[before_count:])
             wf = record_expense_lines_added(
                 wf,
                 new_items=items[before_count:],

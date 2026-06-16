@@ -14,8 +14,6 @@ from chat.services.expense.expense_confirm import (
     build_correction_failure_notice,
     correction_unclear_notice,
     dedupe_expense_items,
-    duplicate_reentry_notice,
-    looks_like_duplicate_expense_reentry,
     review_denial_hints,
     wants_travel_group_remove,
 )
@@ -345,6 +343,7 @@ def _handle_ordinal_amount_confirm_turn(
         has_ordinal_amount_confirm_pending,
         is_confirmation_no,
         is_confirmation_yes,
+        mark_ordinal_amount_confirm,
         read_ordinal_amount_confirm,
     )
     from chat.services.expense.expense_fsm import set_expense_stage
@@ -356,6 +355,27 @@ def _handle_ordinal_amount_confirm_turn(
     if not parsed:
         return None
     idx, new_amt = parsed
+
+    from chat.services.expense.interactive_pending import (
+        clear_expense_interactive_pending,
+        message_abandons_expense_interactive_pending,
+    )
+
+    if message_abandons_expense_interactive_pending(message, block):
+        clear_expense_interactive_pending(block)
+        return None
+
+    from chat.services.expense.amount_correction_pending import _parse_amount_hint
+
+    amt_hint = _parse_amount_hint(message)
+    if (
+        amt_hint is not None
+        and not is_confirmation_yes(message)
+        and not is_confirmation_no(message)
+    ):
+        new_amt = float(amt_hint)
+        mark_ordinal_amount_confirm(block, index=idx, amount=new_amt)
+
     if is_confirmation_no(message):
         block = clear_ordinal_amount_confirm(block)
         q = "আপডেট **বাতিল** — draft **অপরিবর্তিত**।\n\n"
@@ -465,7 +485,32 @@ def _handle_delete_verify_turn(
     if is_confirmation_yes(message):
         if 0 <= idx < len(items):
             items = [dict(x) for x in items]
+            deleted = items[idx] if idx < len(items) else {}
             del items[idx]
+            from chat.services.expense.expense_draft_gate import finalize_expense_draft
+
+            items, block = finalize_expense_draft(block, items)
+            # Drop pending rows that duplicated the deleted committed line.
+            del_cat = str(deleted.get("category") or "").strip().lower()
+            del_amt = round(float(deleted.get("amount") or 0), 2)
+            pending = block.get("pending_line")
+            if isinstance(pending, dict):
+                pc = str(pending.get("category") or "").strip().lower()
+                pa = round(float(pending.get("amount") or 0), 2)
+                if (not pc or pc == del_cat) and (not pa or abs(pa - del_amt) < 0.01):
+                    block.pop("pending_line", None)
+                    block.pop("pending_step", None)
+            queue = [
+                dict(x)
+                for x in list(block.get("pending_queue") or [])
+                if isinstance(x, dict)
+                and not (
+                    str(x.get("category") or "").strip().lower() in ("", del_cat)
+                    and round(float(x.get("amount") or 0), 2) == del_amt
+                )
+            ]
+            block["pending_queue"] = queue
+            items, block = finalize_expense_draft(block, items)
         block = clear_expense_delete_verify(block)
         set_expense_stage(block, STAGE_REVIEW)
         val = validate_expense_items(
@@ -743,6 +788,39 @@ def route_expense_wizard_turn(
     if stage not in (STAGE_COLLECTING, STAGE_REVIEW, STAGE_SUBMIT_CONFIRM):
         return TurnRouteResult(handled=False)
 
+    if stage == STAGE_REVIEW:
+        from chat.services.expense.expense_confirm import (
+            is_confirmation_no,
+            is_confirmation_yes,
+            looks_like_expense_correction,
+        )
+
+        if not looks_like_expense_correction(message):
+            if is_confirmation_yes(message):
+                return _route_review_confirm(
+                    wf=wf,
+                    block=block,
+                    items=items,
+                    message=message,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    lang=lang,
+                    trace_id=trace_id,
+                    last_question=last_question,
+                )
+            if is_confirmation_no(message):
+                return _route_review_deny(
+                    wf=wf,
+                    block=block,
+                    items=items,
+                    message=message,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    lang=lang,
+                )
+
     if stage == STAGE_SUBMIT_CONFIRM:
         from chat.services.leave_fsm import is_awaiting_leave_confirmation
 
@@ -753,29 +831,118 @@ def route_expense_wizard_turn(
             is_confirmation_no,
             looks_like_expense_correction,
         )
+        from chat.services.expense.expense_fsm import set_expense_stage
+        from chat.services.expense.wizard_commands import (
+            message_has_ingestible_claim_body,
+            strip_expense_submit_tail_for_parse,
+            wants_expense_submit_command,
+        )
         from chat.services.expense_workflow import (
             handle_submit_confirm_turn,
             is_submit_confirm_yes,
         )
+        from chat.services.expense.expense_confirm import looks_like_bare_delete_request
+        from chat.services.expense.command_parser import parse_correction_plan
+
+        if looks_like_bare_delete_request(message):
+            return _route_edit_draft(
+                wf=wf,
+                block=block,
+                items=items,
+                message=message,
+                stage=stage,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                decision_plan=parse_correction_plan(message, item_count=len(items or [])),
+                decision_source="rules_bare_delete_submit_confirm",
+                uncertain_note="",
+                lang=lang,
+                trace_id=trace_id,
+                last_question=last_question,
+                pending_step=pending_step,
+                pending_line=pending_line,
+            )
+
+        decision = resolve_expense_turn(
+            message,
+            items=items,
+            stage=stage,
+            pending_step=pending_step,
+            pending_line=pending_line,
+            has_pending_line=has_pending,
+            block=block,
+            last_question=last_question,
+            trace_id=trace_id,
+            router_turn=router_turn,
+        )
+
+        if decision.turn_type == TURN_ADD_LINES:
+            set_expense_stage(block, STAGE_COLLECTING)
+            ingest_message = message
+            submit_after = bool(decision.submit_draft or decision.finish_collecting)
+            if wants_expense_submit_command(message):
+                stripped = strip_expense_submit_tail_for_parse(message)
+                if message_has_ingestible_claim_body(stripped, original=message):
+                    ingest_message = stripped
+                    submit_after = True
+            return _route_add_lines(
+                wf=wf,
+                block=block,
+                items=items,
+                message=ingest_message,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                pipeline_result=pipeline_result,
+                lang=lang,
+                submit_after_ingest=submit_after,
+                trace_id=trace_id,
+                last_question=last_question,
+            )
+
+        if decision.turn_type == TURN_EDIT_DRAFT:
+            return _route_edit_draft(
+                wf=wf,
+                block=block,
+                items=items,
+                message=message,
+                stage=stage,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                decision_plan=decision.plan,
+                decision_source=decision.source,
+                uncertain_note=decision.uncertain_note,
+                lang=lang,
+                trace_id=trace_id,
+                last_question=last_question,
+                pending_step=pending_step,
+                pending_line=pending_line,
+            )
+
+        if decision.turn_type == TURN_PRAISE:
+            return _route_praise(
+                wf=wf,
+                block=block,
+                items=items,
+                message=message,
+                stage=stage,
+                inc_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                lang=lang,
+                trace_id=trace_id,
+                last_question=last_question,
+            )
 
         if (
             looks_like_expense_correction(message)
             and not is_submit_confirm_yes(message)
             and not is_confirmation_no(message)
+            and decision.turn_type not in (TURN_CONFIRM, TURN_DENY)
         ):
-            edit_decision = resolve_expense_turn(
-                message,
-                items=items,
-                stage=stage,
-                pending_step=pending_step,
-                pending_line=pending_line,
-                has_pending_line=has_pending,
-                block=block,
-                last_question=last_question,
-                trace_id=trace_id,
-                router_turn=router_turn,
-            )
-            if edit_decision.turn_type == TURN_EDIT_DRAFT:
+            if decision.turn_type == TURN_EDIT_DRAFT:
                 return _route_edit_draft(
                     wf=wf,
                     block=block,
@@ -785,9 +952,9 @@ def route_expense_wizard_turn(
                     inc_iso=inc_iso,
                     day_logged_total=day_logged_total,
                     daily_cap=daily_cap,
-                    decision_plan=edit_decision.plan,
-                    decision_source=edit_decision.source,
-                    uncertain_note=edit_decision.uncertain_note,
+                    decision_plan=decision.plan,
+                    decision_source=decision.source,
+                    uncertain_note=decision.uncertain_note,
                     lang=lang,
                     trace_id=trace_id,
                     last_question=last_question,
@@ -816,6 +983,25 @@ def route_expense_wizard_turn(
                     pending_step=pending_step,
                     pending_line=pending_line,
                 )
+
+        if (
+            decision.turn_type in (TURN_CONFIRM, TURN_DENY, TURN_NAVIGATE)
+            or is_submit_confirm_yes(message)
+            or is_confirmation_no(message)
+        ):
+            return TurnRouteResult(
+                handled=True,
+                pack=handle_submit_confirm_turn(
+                    wf,
+                    block,
+                    items,
+                    message,
+                    inc_iso=inc_iso,
+                    day_logged_total=day_logged_total,
+                    daily_cap=daily_cap,
+                    lang=lang,
+                ),
+            )
 
         return TurnRouteResult(
             handled=True,
@@ -1104,6 +1290,23 @@ def _route_fill_slot(
     pending_step = str(block.get("pending_step") or "")
     from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
 
+    if pending_step == "from_to":
+        from chat.services.expense_workflow import (
+            _try_resolve_pending_travel_slot,
+            lang_from_block,
+        )
+
+        slot_pack = _try_resolve_pending_travel_slot(
+            wf,
+            block,
+            items,
+            message,
+            inc_iso=inc_iso,
+            lang=lang_from_block(block),
+        )
+        if slot_pack:
+            return TurnRouteResult(handled=True, pack=slot_pack)
+
     if pending_step in ("from_to", "category") and looks_like_new_expense_during_pending_slot(
         message,
         dict(pending),
@@ -1300,6 +1503,20 @@ def _route_add_lines(
         try_finish_collecting_after_ingest,
     )
 
+    declined = _route_cross_category_transfer_decline(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        stage=str(block.get("stage") or STAGE_COLLECTING),
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if declined is not None:
+        return declined
+
     ingest_message = message
     if wants_expense_submit_command(message):
         stripped = strip_expense_submit_tail_for_parse(message)
@@ -1323,6 +1540,9 @@ def _route_add_lines(
                 pack=_pack_ingest_interrupt(wf, block, items, blocked, inc_iso=inc_iso),
             )
         if len(items) > before_count:
+            from chat.services.expense_workflow import _stash_expense_ack_items
+
+            _stash_expense_ack_items(block, items[before_count:])
             clear_ingest_lock(block)
         q = format_numbered_draft_summary(
             items, block, incurred_date_iso=inc_iso, lang=lang
@@ -1400,6 +1620,8 @@ def _route_add_lines(
                 )
 
     if items and should_block_compound_reingest(block, message, items):
+        from chat.services.expense.expense_ingest_guard import ingest_lock_notice
+
         val = validate_expense_items(
             items,
             incurred_date_iso=inc_iso,
@@ -1408,7 +1630,7 @@ def _route_add_lines(
             message=message,
         )
         q = (
-            duplicate_reentry_notice(lang)
+            ingest_lock_notice(block, lang=lang)
             + "\n\n"
             + _format_summary(
                 items,
@@ -1427,18 +1649,6 @@ def _route_add_lines(
                 items=items,
                 question=q,
                 warnings=val.warnings,
-                inc_iso=inc_iso,
-            ),
-        )
-
-    if looks_like_duplicate_expense_reentry(message, items):
-        return TurnRouteResult(
-            handled=True,
-            pack=_pack(
-                wf,
-                block,
-                items=items,
-                question=duplicate_reentry_notice(lang),
                 inc_iso=inc_iso,
             ),
         )
@@ -1465,6 +1675,9 @@ def _route_add_lines(
         )
 
     if len(items) > before_count:
+        from chat.services.expense_workflow import _stash_expense_ack_items
+
+        _stash_expense_ack_items(block, items[before_count:])
         clear_ingest_lock(block)
 
     if submit_after_ingest:
@@ -1516,6 +1729,61 @@ def _route_add_lines(
     )
 
 
+def _route_cross_category_transfer_decline(
+    *,
+    wf: dict[str, Any],
+    block: dict[str, Any],
+    items: list[dict[str, Any]],
+    message: str,
+    stage: str,
+    inc_iso: str,
+    day_logged_total: float,
+    daily_cap: float,
+    lang: str | None,
+) -> TurnRouteResult | None:
+    from chat.services.expense.expense_confirm import (
+        format_cross_category_transfer_decline,
+        looks_like_cross_category_transfer,
+    )
+    from chat.services.expense_workflow import _pack, format_expense_summary
+
+    if not looks_like_cross_category_transfer(message):
+        return None
+    val = validate_expense_items(
+        items,
+        incurred_date_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        message=message,
+    )
+    q = format_cross_category_transfer_decline(lang=lang)
+    if items and stage in (STAGE_REVIEW, STAGE_SUBMIT_CONFIRM, STAGE_COLLECTING):
+        q += "\n\n" + format_expense_summary(
+            items,
+            block=block,
+            incurred_date_iso=inc_iso,
+            warnings=val.warnings,
+            line_flags=val.line_flags,
+            lang=lang,
+            numbered=(stage == STAGE_COLLECTING),
+        )
+    facts = _prompt_message_facts(
+        q, items=items, lang=lang, prompt_kind="correction"
+    )
+    return TurnRouteResult(
+        handled=True,
+        pack=_pack(
+            wf,
+            block,
+            items=items,
+            question=q,
+            warnings=val.warnings,
+            inc_iso=inc_iso,
+            message_facts=facts,
+        ),
+    )
+
+
 def _route_edit_draft(
     *,
     wf: dict[str, Any],
@@ -1554,20 +1822,93 @@ def _route_edit_draft(
         format_expense_summary,
     )
 
-    from chat.services.expense.command_parser import parse_ordinal_set_amount
     from chat.services.expense.expense_confirm import (
         build_ordinal_amount_confirm_prompt,
+        clear_ordinal_amount_confirm,
         has_ordinal_amount_confirm_pending,
         mark_ordinal_amount_confirm,
     )
+    from chat.services.expense.command_parser import parse_ordinal_amount_correction
+
+    declined = _route_cross_category_transfer_decline(
+        wf=wf,
+        block=block,
+        items=items,
+        message=message,
+        stage=stage,
+        inc_iso=inc_iso,
+        day_logged_total=day_logged_total,
+        daily_cap=daily_cap,
+        lang=lang,
+    )
+    if declined is not None:
+        return declined
 
     if not is_expense_delete_verify_pending(block) and not has_ordinal_amount_confirm_pending(
         block
     ):
-        ord_set = parse_ordinal_set_amount(message, item_count=len(items))
+        ord_set = parse_ordinal_amount_correction(message, item_count=len(items))
         if ord_set and items:
             idx, new_amt = ord_set
             if 0 <= idx < len(items):
+                from chat.services.expense.expense_edit_parser import (
+                    parse_line_amount_update,
+                    should_auto_apply_line_amount_update,
+                )
+
+                edit = parse_line_amount_update(message, item_count=len(items))
+                auto_apply = (
+                    edit is not None
+                    and should_auto_apply_line_amount_update(
+                        message,
+                        items,
+                        line_index=edit.line_index,
+                        new_amount=edit.new_amount,
+                        old_amount=edit.old_amount,
+                    )
+                )
+                if auto_apply:
+                    from chat.services.expense.command_executor import execute_correction_plan
+                    from chat.services.expense.command_schema import CorrectionCommandPlan
+
+                    plan = CorrectionCommandPlan(
+                        update_amount_by_index=(idx, new_amt)
+                    )
+                    result = execute_correction_plan(items, plan, block=block)
+                    items = dedupe_expense_items(result.items)
+                    block["items"] = items
+                    clear_ordinal_amount_confirm(block)
+                    from chat.services.expense_workflow import clear_expense_ack_items
+
+                    clear_expense_ack_items(block)
+                    val = validate_expense_items(
+                        items,
+                        incurred_date_iso=inc_iso,
+                        day_logged_total=day_logged_total,
+                        daily_cap=daily_cap,
+                        message=message,
+                    )
+                    set_expense_stage(block, STAGE_REVIEW)
+                    q = "আপডেট করা হয়েছে।\n\n" + _format_summary(
+                        items,
+                        block,
+                        incurred_date_iso=inc_iso,
+                        warnings=val.warnings,
+                        line_flags=val.line_flags,
+                        lang=lang,
+                    )
+                    return TurnRouteResult(
+                        handled=True,
+                        pack=_pack(
+                            wf,
+                            block,
+                            items=items,
+                            question=q,
+                            warnings=val.warnings,
+                            inc_iso=inc_iso,
+                        ),
+                    )
+
                 mark_ordinal_amount_confirm(block, index=idx, amount=new_amt)
                 q = build_ordinal_amount_confirm_prompt(items, idx, new_amt, lang=lang)
                 val = validate_expense_items(
@@ -1672,11 +2013,94 @@ def _route_edit_draft(
     from chat.services.expense.amount_correction_pending import (
         build_duplicate_category_amount_prompt,
         clear_amount_correction_pending,
+        count_category_lines,
         mark_amount_correction_pending,
         plan_has_ambiguous_category_op,
     )
+    from chat.services.expense.route_correction_pending import (
+        build_route_modify_disambiguation_prompt,
+        clear_route_correction_pending,
+        has_route_correction_pending,
+        mark_route_correction_pending,
+        read_route_correction_pending,
+        resolve_route_correction_reply,
+    )
     from chat.services.expense.confusion_handler import list_amount_correction_targets
-    from chat.services.expense.expense_confirm import parse_bare_amount_correction
+    from chat.services.expense.expense_confirm import (
+        parse_bare_amount_correction,
+        parse_category_route_correction,
+    )
+    from chat.services.expense.command_executor import execute_correction_plan
+    from chat.services.expense.command_schema import CorrectionCommandPlan
+
+    if has_route_correction_pending(block):
+        pending_route = read_route_correction_pending(block) or {}
+        pick_idx, still_q = resolve_route_correction_reply(
+            message, items, block, pending_route
+        )
+        if still_q:
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            facts = _prompt_message_facts(
+                still_q, items=items, lang=lang, prompt_kind="correction"
+            )
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=still_q,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    message_facts=facts,
+                ),
+            )
+        if pick_idx is not None and 0 <= pick_idx < len(items):
+            route_plan = CorrectionCommandPlan()
+            route_plan.set_routes_by_index.append(
+                (
+                    pick_idx,
+                    str(pending_route.get("from_location") or ""),
+                    str(pending_route.get("to_location") or ""),
+                )
+            )
+            result = execute_correction_plan(items, route_plan, block=block)
+            items = dedupe_expense_items(result.items)
+            block["items"] = items
+            clear_route_correction_pending(block)
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            set_expense_stage(block, STAGE_REVIEW)
+            q = "আপডেট করা হয়েছে।\n\n" + _format_summary(
+                items,
+                block,
+                incurred_date_iso=inc_iso,
+                warnings=val.warnings,
+                line_flags=val.line_flags,
+                lang=lang,
+            )
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                ),
+            )
 
     review_snapshot = [dict(x) for x in items]
     if stage == STAGE_REVIEW:
@@ -1694,6 +2118,75 @@ def _route_edit_draft(
         from chat.services.expense.command_parser import parse_correction_plan
 
         active_plan = parse_correction_plan(message, item_count=len(items))
+
+    route_corr = parse_category_route_correction(message)
+    if route_corr:
+        cat, frm, to = route_corr
+        active_plan.set_routes = [
+            t for t in active_plan.set_routes if str(t[0] or "").lower() != cat.lower()
+        ]
+        from chat.services.expense.command_parser import (
+            _normalize_correction_message,
+            _ordinal_index_from_message,
+        )
+
+        idx = None
+        if active_plan.set_routes_by_index:
+            for plan_idx, plan_frm, plan_to in active_plan.set_routes_by_index:
+                if plan_frm == frm and plan_to == to:
+                    idx = plan_idx
+                    break
+        if idx is None:
+            idx = _ordinal_index_from_message(
+                _normalize_correction_message(message), item_count=len(items)
+            )
+        if count_category_lines(items, cat) > 1 and idx is None:
+            mark_route_correction_pending(
+                block, category=cat, from_location=frm, to_location=to
+            )
+            cat_targets = [
+                t
+                for t in list_amount_correction_targets(items, block)
+                if str(t.get("category") or "").strip().lower() == cat.lower()
+            ]
+            q = build_route_modify_disambiguation_prompt(
+                cat_targets,
+                category=cat,
+                from_location=frm,
+                to_location=to,
+                lang=lang,
+            )
+            val = validate_expense_items(
+                items,
+                incurred_date_iso=inc_iso,
+                day_logged_total=day_logged_total,
+                daily_cap=daily_cap,
+                message=message,
+            )
+            facts = _prompt_message_facts(
+                q, items=items, lang=lang, prompt_kind="correction"
+            )
+            return TurnRouteResult(
+                handled=True,
+                pack=_pack(
+                    wf,
+                    block,
+                    items=items,
+                    question=q,
+                    warnings=val.warnings,
+                    inc_iso=inc_iso,
+                    message_facts=facts,
+                ),
+            )
+        if idx is not None:
+            active_plan.set_routes_by_index = [
+                t
+                for t in active_plan.set_routes_by_index
+                if t[0] != idx
+            ]
+            active_plan.set_routes_by_index.append((idx, frm, to))
+        else:
+            active_plan.set_routes.append((cat, frm, to))
 
     amb = plan_has_ambiguous_category_op(active_plan, items)
     if amb:
@@ -1790,11 +2283,11 @@ def _route_edit_draft(
                 ),
             )
 
-    if decision_plan.has_any_correction():
-        result = execute_correction_plan(items, decision_plan, block=block)
+    if active_plan.has_any_correction():
+        result = execute_correction_plan(items, active_plan, block=block)
         items = dedupe_expense_items(result.items)
         corrected = result.changed
-        parse_source = decision_source
+        parse_source = decision_source if decision_plan.has_any_correction() else "rules"
     else:
         corr = apply_message_corrections(
             items,
@@ -1813,8 +2306,15 @@ def _route_edit_draft(
         corrected = corr.changed
         parse_source = corr.parse_source
 
+    block["items"] = items
+
     if corrected:
+        from chat.services.expense_workflow import clear_expense_ack_items
+
+        clear_expense_ack_items(block)
         clear_amount_correction_pending(block)
+        clear_route_correction_pending(block)
+        clear_ordinal_amount_confirm(block)
 
     if not corrected:
         fail = build_correction_failure_notice(

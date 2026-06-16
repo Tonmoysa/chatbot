@@ -122,24 +122,6 @@ def should_prompt_add_modify(
         return False
     if len(committed) >= 2:
         return True
-    fp = expense_line_fingerprint(
-        {
-            "category": category,
-            "amount": amount,
-            "from_location": from_location,
-            "to_location": to_location,
-        }
-    )
-    for ln in committed:
-        if expense_line_fingerprint(
-            {
-                "category": ln.category,
-                "amount": ln.amount,
-                "from_location": ln.from_location,
-                "to_location": ln.to_location,
-            }
-        ) == fp:
-            return True
     return False
 
 

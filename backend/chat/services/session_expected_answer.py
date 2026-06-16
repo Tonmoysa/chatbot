@@ -108,6 +108,8 @@ def derive_prompt_context_fields(
 
     if leave_active and pending_leave_step:
         slot = str(pending_leave_step).strip().lower()
+        if slot == "dates":
+            slot = "leave_dates"
         kind = _LEAVE_SLOT_KIND.get(slot, KIND_FREE_TEXT)
         if slot == "leave_dates":
             kind = KIND_DATE
@@ -156,11 +158,27 @@ def message_plausibly_answers_prompt(message: str, snapshot: SessionSnapshot) ->
     return False
 
 
+def _leave_slot_preempted_by_expense(message: str) -> bool:
+    """Strong expense claim lines are workflow switches, not leave slot answers."""
+    from chat.services.intent_detector import (
+        _strong_expense_claim,
+        _strong_expense_day_summary,
+    )
+    from chat.services.expense_extraction import message_contains_expense_claim_lines
+
+    if _strong_expense_claim(message) or _strong_expense_day_summary(message):
+        return True
+    return bool(message_contains_expense_claim_lines(message))
+
+
 def _leave_message_answers_prompt(message: str, ctx: PromptContext) -> bool:
     from chat.services.intent_detector import _message_answers_wizard_step
     from chat.services.leave_balance_intent import is_leave_balance_query
 
     if is_leave_balance_query(message):
+        return False
+
+    if _leave_slot_preempted_by_expense(message):
         return False
 
     if ctx.kind == KIND_YES_NO:

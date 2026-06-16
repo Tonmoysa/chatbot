@@ -348,6 +348,10 @@ def polish_outbound_message(
                 or "submit hoyni" in msg.lower()
             )
             if _should_llm_polish_leave_wizard(rules) or review:
+                import re as _re
+
+                if _re.search(r"[\u0980-\u09FF]", msg):
+                    return polish_clarification_message(msg)
                 from chat.services.message_polish_llm import polish_leave_wizard_message
 
                 polished = polish_leave_wizard_message(

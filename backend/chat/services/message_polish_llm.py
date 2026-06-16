@@ -730,6 +730,9 @@ def polish_leave_wizard_message(
     if not is_llm_message_polish_enabled() or not trace_id:
         return template
 
+    if re.search(r"[\u0980-\u09FF]", template):
+        return template
+
     has_marker = _LEAVE_WIZ_MARKER in template
     body = template.replace(_LEAVE_WIZ_MARKER, "").strip() if has_marker else template
     message_type: MessagePolishType = "leave_review" if review else "leave_wizard"

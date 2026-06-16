@@ -23,7 +23,7 @@ from chat.services.session_turn_router import SessionTurnDecision, TurnKind
 
 
 def router_execution_locked(decision: SessionTurnDecision | None) -> bool:
-    return decision is not None and not router_is_fallback(decision)
+    return decision is not None
 
 
 def expense_turn_decision_from_router(

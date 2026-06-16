@@ -300,7 +300,19 @@ def _patch_leave_draft(
                 draft["end_date"] = e.isoformat()
             changed = True
 
-    if _DATE_SWAP_RE.search(raw) or re.search(r"জুন|june|তারিখ|date", raw, re.I):
+    from chat.services.leave.date_correction import (
+        looks_like_leave_date_correction,
+        try_apply_leave_date_correction,
+    )
+
+    if looks_like_leave_date_correction(message, today=today_d):
+        if try_apply_leave_date_correction(
+            draft, message, today=today_d, use_llm=False
+        ):
+            changed = True
+    elif _DATE_SWAP_RE.search(raw) or re.search(
+        r"জুন|june|আগস্ট|august|তারিখ|date", raw, re.I
+    ):
         if _apply_date_correction(draft, raw, today=today_d):
             changed = True
 

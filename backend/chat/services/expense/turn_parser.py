@@ -14,6 +14,7 @@ from chat.services.expense.expense_confirm import (
     is_confirmation_yes,
     looks_like_compound_expense_claim,
     looks_like_expense_correction,
+    looks_like_cross_category_transfer,
     _is_fresh_multi_category_expense_claim,
 )
 from chat.services.expense.turn_schema import (
@@ -172,6 +173,72 @@ def _message_looks_like_category_edit(
         return True
     if mentioned_draft and _EDIT_VERB_RE.search(low):
         return True
+    return False
+
+
+def _fresh_claim_should_beat_correction(
+    message: str,
+    items: list[dict[str, Any]],
+    plan: CorrectionCommandPlan,
+) -> bool:
+    """
+    Multi-line / distinct-route claims must not be treated as amount edits.
+
+    e.g. ``bus 60 gulistan to dhanmondi then bus 30 ecb to kurmitola`` while a
+    Bus line already exists should ADD lines, not set the first Bus to 60 Tk.
+    """
+    text = (message or "").strip()
+    if not text or not plan.has_any_correction():
+        return False
+    if plan.has_transfer_pattern or plan.transfers:
+        return False
+    if looks_like_cross_category_transfer(text):
+        return False
+    if plan.amount_replacements or plan.update_amount_by_index is not None:
+        return False
+    if plan.replacements or plan.remove_one or plan.remove_loose:
+        return False
+    if plan.remove_travel_group or plan.remove_by_index is not None:
+        return False
+
+    ext = extract_expense_items(text)
+    if len(ext.items) >= 2:
+        return True
+    if looks_like_compound_expense_claim(text) and ext.items:
+        return True
+    if len(ext.items) != 1:
+        return False
+
+    ni = ext.items[0]
+    cat = str(ni.category or "").strip().lower()
+    if not cat:
+        return False
+    frm = str(ni.from_location or "").strip().lower()
+    to = str(ni.to_location or "").strip().lower()
+    amt = float(ni.amount or 0)
+
+    same_cat_rows = [
+        r for r in items if str(r.get("category") or "").strip().lower() == cat
+    ]
+    if not same_cat_rows:
+        return True
+
+    if frm and to:
+        for row in same_cat_rows:
+            row_frm = str(row.get("from_location") or "").strip().lower()
+            row_to = str(row.get("to_location") or "").strip().lower()
+            row_amt = float(row.get("amount") or 0)
+            if (
+                row_frm == frm
+                and row_to == to
+                and abs(row_amt - amt) < 0.01
+            ):
+                return False
+        return True
+
+    if plan.set_amounts and len(same_cat_rows) > 1:
+        return True
+
     return False
 
 
@@ -348,6 +415,17 @@ def parse_turn_rules(
             source="rules_amount_pending",
         )
 
+    from chat.services.expense.route_correction_pending import (
+        has_route_correction_pending,
+    )
+
+    if isinstance(block, dict) and has_route_correction_pending(block):
+        return TurnDecision(
+            turn_type=TURN_EDIT_DRAFT,
+            confidence=0.95,
+            source="rules_route_pending",
+        )
+
     from chat.services.expense.delete_disambiguation_pending import (
         has_delete_disambiguation_pending,
     )
@@ -376,6 +454,42 @@ def parse_turn_rules(
         if not pending and isinstance(block, dict):
             raw_pending = block.get("pending_line")
             pending = raw_pending if isinstance(raw_pending, dict) else {}
+
+        if pending_step == "from_to" and pending.get("amount"):
+            from chat.services.expense.pending_slot import (
+                message_completes_open_pending_travel,
+                pending_amount_update_for_category,
+            )
+
+            if message_completes_open_pending_travel(
+                text, pending, pending_step=pending_step
+            ):
+                return TurnDecision(
+                    turn_type=TURN_FILL_SLOT,
+                    confidence=0.97,
+                    source="rules_pending_slot_complete",
+                )
+            pending_cat = str(pending.get("category") or "").strip().lower()
+            new_amt = pending_amount_update_for_category(text, pending_cat)
+            if new_amt:
+                try:
+                    pending_amt = round(float(pending.get("amount") or 0), 2)
+                except (TypeError, ValueError):
+                    pending_amt = 0.0
+                if abs(float(new_amt) - pending_amt) >= 0.01:
+                    ext = extract_expense_items(text)
+                    if (
+                        len(ext.items) == 1
+                        and not ext.malformed
+                        and str(ext.items[0].category or "").strip().lower()
+                        == pending_cat
+                    ):
+                        return TurnDecision(
+                            turn_type=TURN_FILL_SLOT,
+                            confidence=0.96,
+                            source="rules_pending_amount_update",
+                        )
+
         if _is_fresh_multi_category_expense_claim(text):
             return TurnDecision(
                 turn_type=TURN_ADD_LINES,
@@ -430,7 +544,24 @@ def parse_turn_rules(
         )
 
     plan = parse_correction_plan(text, item_count=len(items or []))
+    if looks_like_cross_category_transfer(text):
+        return TurnDecision(
+            turn_type=TURN_EDIT_DRAFT,
+            confidence=0.97,
+            plan=plan,
+            source="rules_transfer_decline",
+        )
+
     if plan.has_any_correction():
+        if _fresh_claim_should_beat_correction(text, items, plan):
+            ext = extract_expense_items(text)
+            if ext.items or ext.malformed:
+                return TurnDecision(
+                    turn_type=TURN_ADD_LINES,
+                    confidence=0.94,
+                    source="rules_fresh_over_correction",
+                )
+
         from chat.services.expense.expense_confirm import _is_bare_fresh_category_amount_claim
 
         if _is_bare_fresh_category_amount_claim(text):
@@ -549,6 +680,11 @@ def resolve_expense_turn(
         rules.turn_type == TURN_FILL_SLOT
         and has_pending_line
         and pending_step in ("category", "from_to")
+        and rules.source
+        not in (
+            "rules_pending_slot_complete",
+            "rules_pending_amount_update",
+        )
         and looks_like_draft_edit_signal(message, items, block)
     ):
         from chat.services.expense.expense_confirm import looks_like_new_expense_during_pending_slot
@@ -593,6 +729,16 @@ def resolve_expense_turn(
 
     if rules.turn_type == TURN_EDIT_DRAFT and rules.plan.has_any_correction():
         return rules
+
+    from chat.services.expense.expense_confirm import looks_like_bare_delete_request
+
+    if looks_like_bare_delete_request(message):
+        return TurnDecision(
+            turn_type=TURN_EDIT_DRAFT,
+            confidence=0.96,
+            plan=parse_correction_plan(message, item_count=len(items or [])),
+            source="rules_bare_delete",
+        )
 
     if rules.turn_type == TURN_ADD_LINES:
         return rules

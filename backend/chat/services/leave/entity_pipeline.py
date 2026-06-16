@@ -189,6 +189,22 @@ class LeaveEntityPipeline:
         ent = strip_ungrounded_half_day_period(ent, message)
         ent = strip_ungrounded_leave_dates(ent, message)
         ent = strip_ungrounded_reason(ent, message)
+
+        from chat.services.leave.date_correction import looks_like_leave_date_correction
+
+        lock_calendar = looks_like_leave_date_correction(message) and (
+            bool(draft.get("start_date")) or bool(draft.get("end_date"))
+        )
+        locked_calendar = (
+            {
+                k: draft[k]
+                for k in ("start_date", "end_date", "days")
+                if draft.get(k) is not None and draft.get(k) != ""
+            }
+            if lock_calendar
+            else {}
+        )
+
         preserve_dates = overwrite and not message_explicitly_states_leave_date(message)
         if preserve_dates and message_mentions_leave_duration(message):
             preserve_dates = False
@@ -252,7 +268,9 @@ class LeaveEntityPipeline:
                 merged_ex, ent, message, llm_used=True
             )
             _sources.update(sem)
-        slot_overwrite = overwrite or _is_compound_slot_message(message)
+        slot_overwrite = (overwrite or _is_compound_slot_message(message)) and not (
+            lock_calendar
+        )
         prefill_draft_from_extraction(
             draft,
             merged_ex,
@@ -296,6 +314,9 @@ class LeaveEntityPipeline:
                 draft["start_date"] = preserved_start
             if preserved_end:
                 draft["end_date"] = preserved_end
+
+        if locked_calendar:
+            draft.update(locked_calendar)
 
         self._normalize_draft(draft)
 

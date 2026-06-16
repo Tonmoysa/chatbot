@@ -271,6 +271,15 @@ def is_confirmation_yes(message: str) -> bool:
             return False
 
     try:
+        from chat.services.expense_extraction import message_contains_expense_claim_lines
+        from chat.services.intent_detector import _strong_expense_claim
+
+        if message_contains_expense_claim_lines(t) or _strong_expense_claim(t):
+            return False
+    except Exception:
+        pass
+
+    try:
         from chat.services.workflow_suspend import wants_resume_suspended_leave
 
         if wants_resume_suspended_leave(t):
@@ -492,6 +501,7 @@ def build_edit_field_menu_prompt(draft: dict[str, Any], *, message: str = "") ->
             "ঠিক আছে — **কোন তথ্য বদলাতে** চান? নিচের যেকোনোটা লিখুন:\n\n"
             "• **তারিখ** — `date` / `তারিখ`\n"
             "• **Select Leave (paid/unpaid)** — `payment` / `paid`\n"
+            "• **ছুটির ধরন** — `type` / `sick` / `annual`\n"
             "• **পুরো বা হাফ দিন** — `scope` / `full` / `half`\n"
             "• **কারণ** — `reason` / `কারণ`\n\n"
             f"**এখন যা আছে:** তারিখ {date_line} · {select_leave} · {scope_label} · কারণ: {reason}\n\n"
@@ -503,6 +513,7 @@ def build_edit_field_menu_prompt(draft: dict[str, Any], *, message: str = "") ->
             "Thik ache — **kon field change** korte chan? Ekta likhun:\n\n"
             "• **date** / tarikh\n"
             "• **payment** / paid / unpaid\n"
+            "• **type** / sick / annual\n"
             "• **scope** / full / half\n"
             "• **reason**\n\n"
             f"Ekhon: {date_line} · {select_leave} · {scope_label} · reason: {reason}\n\n"
@@ -512,6 +523,7 @@ def build_edit_field_menu_prompt(draft: dict[str, Any], *, message: str = "") ->
         "Sure — **which field would you like to change?** Reply with one of:\n\n"
         "• **date(s)** — `date`\n"
         "• **paid / unpaid** — `payment`\n"
+        "• **leave type** — `type` / `sick` / `annual`\n"
         "• **full or half day** — `scope`\n"
         "• **reason** — `reason`\n\n"
         f"**Current:** {date_line} · {select_leave} · {scope_label} · reason: {reason}\n\n"
@@ -958,7 +970,7 @@ def process_confirmation_turn(
 
 
 
-    if is_confirmation_yes(message):
+    if is_confirmation_yes(message) or wants_leave_submit_command(message):
         from chat.services.leave.normalization import normalize_leave_draft
         from chat.services.leave_draft_utils import apply_leave_draft_defaults
         from chat.services.leave_policies import get_company_leave_policy

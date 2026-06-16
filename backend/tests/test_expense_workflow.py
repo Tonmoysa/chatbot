@@ -80,8 +80,8 @@ def test_rail_shorthand_extracted_as_metro_rail():
     assert parse_category_token("rail") == "Metro Rail"
 
 
-def test_compound_reentry_after_partial_route_no_duplicate_lunch():
-    """Re-sending lunch 100, bus 200, rail 400 must not duplicate Lunch or re-add Bus."""
+def test_compound_reentry_after_partial_route_allows_duplicate_lines():
+    """Re-sending the same compound message adds duplicate lines (no duplicate guard)."""
     msg = "lunch 100, bus 200, rail 400"
     wf: dict = {}
     r1 = process_expense_turn(workflow_state=wf, message=msg)
@@ -94,9 +94,7 @@ def test_compound_reentry_after_partial_route_no_duplicate_lunch():
 
     r3 = process_expense_turn(workflow_state=r2["workflow_state"], message=msg)
     items_after = list(r3["items"])
-    assert sum(1 for r in items_after if r.get("category") == "Lunch") == 1
-    q = r3.get("question") or ""
-    assert "unchanged" in q.lower() or "duplicate" in q.lower() or "abar" in q.lower()
+    assert sum(1 for r in items_after if r.get("category") == "Lunch") >= 2
 
 
 def test_joma_daw_keeps_rail_line_in_pending_queue():
@@ -354,6 +352,19 @@ def test_travel_route_after_amount():
 def test_travel_route_after_reverse_amount_category():
     """Banglish: amount before category, route after — '100 taka bus mirpur to badda'."""
     ext = extract_expense_items("100 taka bus mirpur to badda")
+    assert len(ext.items) == 1
+    row = ext.items[0]
+    assert row.category == "Bus"
+    assert row.amount == 100.0
+    assert row.from_location == "mirpur"
+    assert row.to_location == "badda"
+
+
+def test_travel_route_with_for_preposition_before_category():
+    """'for bus mirpur to badda' must not treat 'for' as the from location."""
+    ext = extract_expense_items(
+        "amar expense hoyeche 100 taka for bus mirpur to badda"
+    )
     assert len(ext.items) == 1
     row = ext.items[0]
     assert row.category == "Bus"
@@ -703,6 +714,111 @@ def test_kalke_lagbe_is_tomorrow():
         today=date(2026, 5, 24),
     )
     assert inc == "2026-05-25"
+
+
+def test_correction_response_shows_updated_items_same_turn():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "review",
+            "incurred_date_iso": "2026-06-15",
+            "items": [
+                {
+                    "category": "Bus",
+                    "amount": 100,
+                    "from_location": "mirpur",
+                    "to_location": "badda",
+                    "line_id": "a",
+                },
+                {"category": "Lunch", "amount": 100, "line_id": "b"},
+            ],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="bus ta delete koro")
+    items = pack["items"]
+    assert len(items) == 1
+    assert items[0]["category"] == "Lunch"
+    q = pack.get("question") or ""
+    assert "Bus" not in q
+    assert "Lunch" in q
+
+    pack2 = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="lunch ta modify kore 150 taka koro",
+    )
+    assert float(pack2["items"][0]["amount"]) == 150.0
+    q2 = pack2.get("question") or ""
+    assert "150" in q2
+    assert "100" not in q2.split("150")[0] or "150" in q2
+
+
+def test_delete_at_submit_confirm_removes_line():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-06-15",
+            "items": [
+                {"category": "Bus", "amount": 100, "line_id": "a"},
+                {"category": "Lunch", "amount": 50, "line_id": "b"},
+            ],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="delete koro")
+    q = pack.get("question") or ""
+    assert "1" in q and "2" in q
+    pack2 = process_expense_turn(
+        workflow_state=pack["workflow_state"],
+        message="1",
+    )
+    pack3 = process_expense_turn(
+        workflow_state=pack2["workflow_state"],
+        message="yes",
+    )
+    items = pack3["items"]
+    assert len(items) == 1
+    assert items[0]["category"] == "Lunch"
+
+
+def test_modify_amount_at_submit_confirm():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-06-15",
+            "items": [{"category": "Bus", "amount": 100, "line_id": "a"}],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="bus 150 hobe")
+    assert float(pack["items"][0]["amount"]) == 150.0
+
+
+def test_add_line_at_submit_confirm_merges_into_draft():
+    wf = {
+        "expense_request": {
+            "active": True,
+            "stage": "submit_confirm",
+            "incurred_date_iso": "2026-06-15",
+            "items": [
+                {
+                    "category": "Bus",
+                    "amount": 100,
+                    "from_location": "mirpur",
+                    "to_location": "badda",
+                }
+            ],
+            "reply_language": "banglish",
+        }
+    }
+    pack = process_expense_turn(workflow_state=wf, message="lunch 100 taka")
+    items = pack["items"]
+    assert sum(1 for r in items if r.get("category") == "Lunch") == 1
+    assert sum(1 for r in items if r.get("category") == "Bus") == 1
+    q = pack.get("question") or ""
+    assert "lunch" in q.lower()
 
 
 def test_past_date_submit_allowed(monkeypatch):

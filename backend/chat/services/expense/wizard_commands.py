@@ -42,7 +42,12 @@ _REMOVE_TYPO_CAT_RE = re.compile(
 )
 
 _CANCEL_EXPENSE_RE = re.compile(
-    r"(?:^|\b)(?:cancel\s+expense|expense\s+cancel|খরচ\s*cancel|cancel\s*খরচ)(?:\s*[\.।]|$)",
+    r"(?:^|\b)(?:"
+    r"cancel\s+(?:the\s+)?(?:expense|claim|reimbursement)"
+    r"|expense\s+cancel"
+    r"|খরচ\s*cancel"
+    r"|cancel\s*খরচ"
+    r")(?:\s*[\.।]|$)",
     re.I | re.UNICODE,
 )
 

@@ -4,7 +4,7 @@ import pytest
 
 from chat.services.leave.normalization import parse_day_scope_answer
 from chat.services.leave.reason_value import extract_reason_replacement
-from chat.services.leave_slots import SLOT_SCOPE, get_missing_slots
+from chat.services.leave_slots import SLOT_REASON, SLOT_SCOPE, SLOT_DATES, get_missing_slots
 from chat.services.leave_fsm import read_leave_state
 from chat.services.leave_workflow import process_leave_turn
 
@@ -90,6 +90,56 @@ def test_process_leave_turn_reason_swap_while_scope_pending() -> None:
     reason = str(draft.get("reason") or "")
     assert "ফ্যামিলি" in reason or "family" in reason.lower()
     assert "শরীর খারাপ" not in reason or "ফ্যামিলি" in reason
+
+
+def test_collecting_switch_field_to_date_edit():
+    """While on reason step, user can jump to date edit."""
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "step": SLOT_REASON,
+        "draft": {
+            "start_date": "2026-06-09",
+            "end_date": "2026-06-09",
+            "leave_payment_category": "paid",
+            "leave_type": "sick",
+            "day_scope": "full",
+        },
+    }
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="date change koro 2026-06-12",
+        entities={},
+        company_id="company-a",
+    )
+    st = read_leave_state(pack["workflow_state"])
+    draft = st.get("draft") or {}
+    assert draft.get("start_date") == "2026-06-12"
+
+
+def test_collecting_edit_menu_opens_on_edit_koro():
+    wf = {
+        "active_flow": "leave",
+        "status": "active",
+        "step": SLOT_REASON,
+        "draft": {
+            "start_date": "2026-06-09",
+            "end_date": "2026-06-09",
+            "leave_payment_category": "paid",
+            "leave_type": "sick",
+            "day_scope": "full",
+        },
+    }
+    pack = process_leave_turn(
+        workflow_state=wf,
+        message="edit koro",
+        entities={},
+        company_id="company-a",
+    )
+    st = read_leave_state(pack["workflow_state"])
+    assert st.get("step") == "edit_menu"
+    q = pack.get("question") or ""
+    assert "date" in q.lower() or "তারিখ" in q
 
 
 def test_compound_leave_message_sets_full_scope_from_bn_voice() -> None:
